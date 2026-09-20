@@ -18,23 +18,20 @@ use quip_core::time::Timestamp;
 /// Level discriminant for the "local" (city/region) tier of the Coral
 /// hierarchy.
 ///
-/// **Spec discrepancy:** spec §13 numbers the Coral levels as
-/// Local = 2, Regional = 1, Global = 0. These discriminants use the
-/// opposite convention (ascending from local) and are preserved for
-/// backward compatibility with existing callers. A future revision should
-/// invert them to match the spec numbering; when that happens, this is the
-/// only file that needs to change.
-pub const LOCAL_CLUSTER: u8 = 0;
+/// The Coral hierarchy numbers levels by coverage, descending: `2` is
+/// the innermost (local) tier, `1` is regional, `0` is the global tier.
+/// This matches spec §13 and [`crate::cluster::ClusterLevel`].
+pub const LOCAL_CLUSTER: u8 = 2;
 
 /// Level discriminant for the "regional" (continent) tier.
 ///
-/// See [`LOCAL_CLUSTER`] for the spec-numbering discrepancy note.
+/// See [`LOCAL_CLUSTER`] for the numbering rationale.
 pub const REGIONAL_CLUSTER: u8 = 1;
 
 /// Level discriminant for the "global" (planet-wide) tier.
 ///
-/// See [`LOCAL_CLUSTER`] for the spec-numbering discrepancy note.
-pub const GLOBAL_CLUSTER: u8 = 2;
+/// See [`LOCAL_CLUSTER`] for the numbering rationale.
+pub const GLOBAL_CLUSTER: u8 = 0;
 
 /// Acceptance percentile for cluster admission (spec §3: 90).
 pub const ACCEPTANCE_PERCENTILE: u8 = crate::constants::CLUSTER_ACCEPTANCE_PERCENTILE;
@@ -248,6 +245,13 @@ mod tests {
         c.insert(nid(1), vec![nid(2)], t(0));
         assert!(c.get(&nid(1), t(500), 1).is_some());
         assert!(c.get(&nid(1), t(2_000), 1).is_none());
+    }
+
+    #[test]
+    fn cluster_discriminants_match_spec() {
+        assert_eq!(LOCAL_CLUSTER, 2);
+        assert_eq!(REGIONAL_CLUSTER, 1);
+        assert_eq!(GLOBAL_CLUSTER, 0);
     }
 
     #[test]

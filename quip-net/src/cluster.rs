@@ -22,10 +22,9 @@
 //! # Level numbering
 //!
 //! [`ClusterLevel`] uses the spec's numbering: Global is 0, Regional is
-//! 1, Local is 2. This is the opposite of the `dht::LOCAL_CLUSTER` /
-//! `dht::REGIONAL_CLUSTER` / `dht::GLOBAL_CLUSTER` constants, which were
-//! declared before §13 was finalised. New code should prefer
-//! [`ClusterLevel`].
+//! 1, Local is 2. The [`crate::dht::LOCAL_CLUSTER`] /
+//! [`crate::dht::REGIONAL_CLUSTER`] / [`crate::dht::GLOBAL_CLUSTER`]
+//! constants use the same convention, so the two are interchangeable.
 
 use crate::constants::{
     CLUSTER_ACCEPTANCE_PERCENTILE, CLUSTER_HEARTBEAT_S, CLUSTER_LEVELS,

@@ -1,0 +1,27 @@
+[package]
+name = "quip-storage"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["J. J. Mututi <jjmututicloud@gmail.com>"]
+description = "QUIP storage: content-addressed blobs, pinning, quarantine, governance, and resource discovery state"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jjmututi/quip-storage"
+documentation = "https://docs.rs/quip-storage"
+keywords = ["quip", "cbor", "pin", "storage", "p2p"]
+categories = ["network-programming", "filesystem"]
+
+[features]
+default = ["std"]
+# `std` enables the file-backed blob store and wall-clock helper.
+# Without it the crate is `no_std + alloc` and provides in-memory backends only.
+std = ["quip-core/std"]
+
+[dependencies]
+# Only quip-core. Hashing and signature verification stay behind traits so that
+# the storage layer remains crypto-agnostic and dependency-free, mirroring
+# `quip-core`'s `Verifier`/`Signer` design.
+quip-core = { version = "0.1.0", path = "../quip-core", default-features = false }
+
+[lib]
+crate-type = ["lib"]

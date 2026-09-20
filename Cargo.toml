@@ -1,0 +1,14 @@
+# QUIP workspace.
+#
+# `quip-core`     — transport-agnostic wire types, QUIP-CBOR, CIDs, DVVs.
+# `quip-storage`  — persistent state: blobs, pins, quarantine, governance, discovery.
+# `quip-net`      — QUIC framing, stream IDs, tiers, NAT traversal.
+#
+# Add future crates to `members`.
+[workspace]
+resolver = "2"
+members = [
+    "quip-core",
+    "quip-storage",
+    "quip-net",
+]

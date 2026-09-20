@@ -1,0 +1,56 @@
+[package]
+name = "quip-net"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["J. J. Mututi <jjmututicloud@gmail.com>"]
+description = "QUIP transport: QUIC framing, stream tiers, handshake, RBSR sync, NAT traversal, and Coral DHT discovery state"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jjmututi/quip"
+documentation = "https://docs.rs/quip-net"
+keywords = ["quip", "quic", "p2p", "federation", "dht"]
+categories = ["network-programming"]
+
+[features]
+default = ["std"]
+# `std` enables wall-clock helpers. Without it the crate is `no_std + alloc`.
+std = ["quip-core/std", "quip-storage/std"]
+# `crypto` plugs real algorithms behind the workspace traits:
+#   sha2   -> ContentHasher(HashAlgo::Sha256) + handshake hash_algo ext
+#   blake3 -> ContentHasher(HashAlgo::Blake3) (spec OPTIONAL)
+#   ed25519-dalek -> quip_core::Verifier/Signer (Ed25519 identities, §5)
+crypto = ["dep:sha2", "dep:blake3", "dep:ed25519-dalek", "dep:bao", "std"]
+# `quic` wires the QUIC runtime (quinn + tokio + rustls) on top of the
+# transport-agnostic framing in `frame`/`conn`. The base crate never
+# touches a socket; this feature adds the `transport` module that does.
+quic = ["dep:quinn", "dep:rustls", "dep:tokio", "std"]
+# Convenience: everything (transport + crypto) for applications.
+full = ["crypto", "quic"]
+
+[dependencies]
+quip-core = { version = "0.1.0", path = "../quip-core", default-features = false }
+quip-storage = { version = "0.1.0", path = "../quip-storage", default-features = false }
+
+# --- Optional external dependencies (all default-off, std-only) ---
+# Content hashing (spec App. A.3: SHA-256 MUST, BLAKE3 OPTIONAL).
+sha2 = { version = "0.10", optional = true, default-features = false }
+blake3 = { version = "1.5", optional = true, default-features = false }
+# Ed25519 identities (spec §5).
+ed25519-dalek = { version = "2", optional = true, default-features = false, features = ["alloc"] }
+# QUIC runtime (spec §12: QUIC + TLS 1.3, ALPN "quip", RFC 9221 datagrams).
+quinn = { version = "0.11", optional = true, default-features = false, features = ["rustls", "runtime-tokio"] }
+rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync"] }
+# BLAKE3 verified streaming (spec §8.2). Requires std.
+bao = { version = "0.12", optional = true }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
+sha2 = "0.10"
+blake3 = "1.5"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rcgen = "0.13"
+
+[lib]
+crate-type = ["lib"]
+

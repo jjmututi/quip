@@ -1,0 +1,23 @@
+[package]
+name = "quip-core"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["J. J. Mututi <jjmututicloud@gmail.com>"]
+description = "QUIP core: deterministic CBOR, CIDs, Dotted Version Vectors, and message types"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jjmututi/quip-core"
+documentation = "https://docs.rs/quip-core"
+keywords = ["quip", "cbor", "dvv", "p2p", "federation"]
+categories = ["network-programming", "encoding"]
+
+[features]
+default = ["std"]
+std = []
+
+[dependencies]
+# Intentionally none. Signature verification is behind a trait so that
+# `quip-core` remains dependency-free and `no_std`-capable.
+
+[lib]
+crate-type = ["lib"]

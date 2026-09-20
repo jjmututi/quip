@@ -1,0 +1,21 @@
+# Cargo build output
+target/
+**/target/
+
+# Editor / OS cruft
+.DS_Store
+*.swp
+*.swo
+
+# Rust backup files
+*.rs.bk
+*.orig
+
+# Local environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.iml

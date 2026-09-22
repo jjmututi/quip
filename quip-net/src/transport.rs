@@ -60,7 +60,7 @@
 //! §16 steps 7–8: after the §4 handshake, each peer sends its
 //! self-signed [`KeyClaim`](quip_core::messages::KeyClaim) on T0 and waits
 //! for the other's. The driver sends its own and reads the peer's inline,
-//! before any read task is pawned, so the `announce_key` messages never 
+//! before any read task is pawned, so the `announce_key` messages never
 //! surface as [`Event::Frame`]s.
 //!
 //! **The driver does not verify the peer's signature.** Callers MUST
@@ -81,6 +81,7 @@ use crate::constants::{ALPN_QUIP, CTRL_STREAM_ID, MAX_DGRAM_BYTES, SYNC_STREAM_I
 use crate::error::{Error, Result};
 use crate::flow::{dispatch_flow, FlowFrame};
 use crate::frame::{self, Tier};
+use crate::handshake::Capabilities;
 use crate::message::{self, Message};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -184,6 +185,12 @@ pub struct ServerConfig {
     /// Sent to every accepted peer as the `announce_key` verb during the
     /// §16 Key Claim exchange.
     pub key_claim: KeyClaim,
+    /// Capabilities to advertise during the §4 handshake.
+    ///
+    /// The server's advertised set, not the client's, is what determines
+    /// what verbs the connection can carry. Set this to whatever the
+    /// server is prepared to serve.
+    pub capabilities: Capabilities,
 }
 
 /// Configuration for a client [`Endpoint`].
@@ -193,6 +200,8 @@ pub struct ClientConfig {
     pub bind: SocketAddr,
     /// The endpoint's self-signed identity claim (§5.1).
     pub key_claim: KeyClaim,
+    /// Capabilities to advertise during the §4 handshake.
+    pub capabilities: Capabilities,
 }
 
 /// Which side of the connection we are.
@@ -205,10 +214,17 @@ pub enum Role {
 }
 
 /// A QUIP-over-QUIC endpoint.
+///
+/// Holds a [`QuipNetConfig`] that is used for every accepted or
+/// initiated connection. The advertised capability set comes from this
+/// config, so a server that wants to serve `merkle_range` must advertise
+/// it here.
 pub struct Endpoint {
     inner: QuinnEndpoint,
     /// The endpoint's identity, sent on every new connection.
     key_claim: KeyClaim,
+    /// The transport-layer config used for every connection.
+    config: QuipNetConfig,
 }
 
 impl Endpoint {
@@ -231,9 +247,15 @@ impl Endpoint {
         let inner = QuinnEndpoint::server(server_cfg, config.bind)
             .map_err(|e| Error::Transport(format!("bind {}: {e}", config.bind)))?;
 
+        let net_config = QuipNetConfig {
+            capabilities: config.capabilities,
+            ..QuipNetConfig::default()
+        };
+
         Ok(Self {
             inner,
             key_claim: config.key_claim,
+            config: net_config,
         })
     }
 
@@ -253,15 +275,27 @@ impl Endpoint {
             .map_err(|e| Error::Transport(format!("bind {}: {e}", config.bind)))?;
         inner.set_default_client_config(client_cfg);
 
+        let net_config = QuipNetConfig {
+            capabilities: config.capabilities,
+            ..QuipNetConfig::default()
+        };
+
         Ok(Self {
             inner,
             key_claim: config.key_claim,
+            config: net_config,
         })
     }
 
     /// The endpoint's identity claim.
     pub fn key_claim(&self) -> &KeyClaim {
         &self.key_claim
+    }
+
+    /// The transport-layer config this endpoint uses for every
+    /// connection.
+    pub fn config(&self) -> &QuipNetConfig {
+        &self.config
     }
 
     /// The local address this endpoint is bound to.
@@ -285,7 +319,7 @@ impl Endpoint {
                     .map_err(|e| Error::Transport(format!("accept: {e}")))?;
                 Ok(Some(ConnectionDriver::from_connection(
                     conn,
-                    QuipNetConfig::default(),
+                    self.config,
                     Role::Responder,
                     self.key_claim.clone(),
                 )))
@@ -294,11 +328,13 @@ impl Endpoint {
     }
 
     /// Connect to a remote server.
+    ///
+    /// Uses the endpoint's own [`QuipNetConfig`]; callers that want a
+    /// different config construct a second endpoint.
     pub async fn connect(
         &self,
         addr: SocketAddr,
         server_name: &str,
-        config: QuipNetConfig,
     ) -> Result<ConnectionDriver> {
         let connecting = self
             .inner
@@ -309,7 +345,7 @@ impl Endpoint {
             .map_err(|e| Error::Transport(format!("connect {addr}: {e}")))?;
         Ok(ConnectionDriver::from_connection(
             conn,
-            config,
+            self.config,
             Role::Initiator,
             self.key_claim.clone(),
         ))
@@ -452,8 +488,13 @@ pub struct ConnectionDriver {
 
     // ---- T2 ----
     /// Outbound T2 streams, keyed by the resource being transferred.
-    /// Populated on `SendStart` and removed on `SendComplete`.
-    bulk_sends: BTreeMap<Vec<u8>, quinn::SendStream>,
+    ///
+    /// Both halves are held: the send half for writing, and the receive
+    /// half to keep the stream alive. Dropping the receive half of a
+    /// bi-directional QUIC stream sends STOP_SENDING to the peer, which
+    /// tears down the peer's read side and silently drops any frames
+    /// that were still in flight.
+    bulk_sends: BTreeMap<Vec<u8>, (quinn::SendStream, quinn::RecvStream)>,
 
     // ---- read tasks ----
     /// Receiver for events produced by the read tasks.
@@ -838,29 +879,32 @@ impl ConnectionDriver {
         let framed = frame::encode_message(bytes)?;
         match msg {
             Message::SendStart(s) => {
-                let (mut send, _recv) = self
+                let (mut send, recv) = self
                     .conn
                     .open_bi()
                     .await
                     .map_err(|e| Error::Transport(format!("open T2: {e}")))?;
                 write_all_cancel_safe(&mut send, &framed).await?;
-                self.bulk_sends.insert(s.resource_id.clone(), send);
+                self.bulk_sends.insert(s.resource_id.clone(), (send, recv));
             }
             Message::SendChunk(c) => {
-                let send = self
+                let (send, _) = self
                     .bulk_sends
                     .get_mut(&c.resource_id)
                     .ok_or_else(|| Error::Transport("no open T2 stream".into()))?;
                 write_all_cancel_safe(send, &framed).await?;
             }
             Message::SendComplete(c) => {
-                let mut send = self
+                let (mut send, _recv) = self
                     .bulk_sends
                     .remove(&c.resource_id)
                     .ok_or_else(|| Error::Transport("no open T2 stream".into()))?;
                 write_all_cancel_safe(&mut send, &framed).await?;
                 send.finish()
                     .map_err(|e| Error::Transport(format!("finish T2: {e}")))?;
+                // `_recv` drops here, after the send half has finished.
+                // This is fine: the transfer is already complete, and
+                // the peer has seen the FIN.
             }
             _ => {
                 return Err(Error::Transport(
@@ -1175,34 +1219,65 @@ mod tests {
         }
     }
 
-    fn server_endpoint(seed: u8) -> (Endpoint, SocketAddr) {
+    /// Build a server config with the given capability set.
+    fn server_config(seed: u8, caps: Capabilities) -> ServerConfig {
         let (cert_der, key_der) = make_cert();
-        let server = Endpoint::server(ServerConfig {
+        ServerConfig {
             bind: localhost_zero(),
             cert_der,
             key_der,
             key_claim: fake_key_claim(seed),
-        })
-        .expect("server bind");
+            capabilities: caps,
+        }
+    }
+
+    /// Build a client config with the given capability set.
+    fn client_config(seed: u8, caps: Capabilities) -> ClientConfig {
+        ClientConfig {
+            bind: localhost_zero(),
+            key_claim: fake_key_claim(seed),
+            capabilities: caps,
+        }
+    }
+
+    fn server_endpoint(seed: u8) -> (Endpoint, SocketAddr) {
+        let server = Endpoint::server(server_config(seed, Capabilities::baseline()))
+            .expect("server bind");
         let addr = server.local_addr().expect("server local addr");
         (server, addr)
     }
 
     fn client_endpoint(seed: u8) -> Endpoint {
-        Endpoint::client(ClientConfig {
-            bind: localhost_zero(),
-            key_claim: fake_key_claim(seed),
-        })
-        .expect("client bind")
+        Endpoint::client(client_config(seed, Capabilities::baseline()))
+            .expect("client bind")
     }
 
     /// Drive both sides through the handshake and Key Claim exchange
     /// concurrently and return both drivers in the `Established` phase.
+    ///
+    /// Both sides advertise `Capabilities::baseline()`.
     async fn handshake_pair(
         server_seed: u8,
         client_seed: u8,
     ) -> (ConnectionDriver, ConnectionDriver) {
-        let (server, server_addr) = server_endpoint(server_seed);
+        handshake_pair_with(server_seed, client_seed, Capabilities::baseline()).await
+    }
+
+    /// Like `handshake_pair`, but both sides advertise `caps`.
+    ///
+    /// The capability set is a per-endpoint configuration: the server
+    /// advertises it because it is what the server is prepared to
+    /// serve, and the client advertises it because it is what the
+    /// client is prepared to use. Both ends must agree for the
+    /// capabilities to survive negotiation.
+    async fn handshake_pair_with(
+        server_seed: u8,
+        client_seed: u8,
+        caps: Capabilities,
+    ) -> (ConnectionDriver, ConnectionDriver) {
+        let server =
+            Endpoint::server(server_config(server_seed, caps)).expect("server bind");
+        let server_addr = server.local_addr().expect("server local addr");
 
         let server_fut = async move {
             let mut driver = server
@@ -1215,9 +1290,10 @@ mod tests {
         };
 
         let client_fut = async {
-            let client = client_endpoint(client_seed);
+            let client = Endpoint::client(client_config(client_seed, caps))
+                .expect("client bind");
             let mut driver = client
-                .connect(server_addr, "localhost", QuipNetConfig::default())
+                .connect(server_addr, "localhost")
                 .await
                 .expect("client connect");
             driver.poll(now()).await.expect("client handshake");
@@ -1283,7 +1359,7 @@ mod tests {
 
         let client = client_endpoint(2);
         let client_driver = client
-            .connect(server_addr, "localhost", QuipNetConfig::default())
+            .connect(server_addr, "localhost")
             .await
             .unwrap();
 
@@ -1304,14 +1380,10 @@ mod tests {
         let client = client_endpoint(1);
         let result = tokio::time::timeout(
             Duration::from_secs(2),
-            client.connect(
-                "127.0.0.1:1".parse().unwrap(),
-                "localhost",
-                QuipNetConfig::default(),
-            ),
+            client.connect("127.0.0.1:1".parse().unwrap(), "localhost"),
         )
         .await;
-    
+
         // Either the connect failed (expected) or it timed out (also a
         // failure to connect). Both satisfy the assertion.
         match result {
@@ -1513,5 +1585,413 @@ mod tests {
         // the exchange.
         assert!(client.poll(now()).await.unwrap().is_empty());
         assert!(server.poll(now()).await.unwrap().is_empty());
+    }
+
+    // =====================================================================
+    // M6.1 — §16 full-flow integration tests
+    // =====================================================================
+
+    use crate::bulk::BulkReceiver;
+    use quip_core::cid::{Cid, CidOrV1, HashAlgo};
+    use quip_storage::ContentHasher;
+
+    /// Poll `driver` until `pred` matches an event, or the deadline
+    /// expires. Returns the matching event on success, `None` on
+    /// timeout. Non-matching events are discarded.
+    async fn poll_for_event<F>(
+        driver: &mut ConnectionDriver,
+        timeout_ms: u64,
+        mut pred: F,
+    ) -> Option<Event>
+    where
+        F: FnMut(&Event) -> bool,
+    {
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        loop {
+            let events = driver.poll(now()).await.ok()?;
+            for e in events {
+                if pred(&e) {
+                    return Some(e);
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+        }
+    }
+
+    /// True if `event` is a T0/T1/T2 frame carrying the given verb.
+    fn is_frame_with_verb(event: &Event, tier: Tier, verb: &str) -> bool {
+        matches!(
+            event,
+            Event::Frame { tier: t, msg, .. }
+                if *t == tier && msg.verb().map(|v| v == verb).unwrap_or(false)
+        )
+    }
+
+    // ---- Stage 4 — full bulk transfer with CID verification ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bulk_full_transfer_verifies_cid() {
+        let (mut server, mut client) = handshake_pair(1, 2).await;
+
+        let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let hasher = crate::crypto::Sha256Hasher;
+        let digest = hasher.digest(HashAlgo::Sha256, &payload).unwrap();
+        let cid = CidOrV1::Raw(Cid(digest));
+        let resource = b"stage4-resource".to_vec();
+
+        // Client sends the entire transfer up front, before the server
+        // polls. This eliminates the race between the server's read
+        // task spawning and the arrival of the first chunk.
+        client
+            .send(
+                &Message::SendStart(message::SendStart {
+                    resource_id: resource.clone(),
+                    total_size: payload.len() as u64,
+                    hash: digest.to_vec(),
+                    cid,
+                    hash_algo: None,
+                }),
+                now(),
+            )
+            .await
+            .expect("send_start");
+
+        const CHUNK: usize = 1024;
+        let mut seq = 0u64;
+        let mut offset = 0usize;
+        while offset < payload.len() {
+            let end = (offset + CHUNK).min(payload.len());
+            client
+                .send(
+                    &Message::SendChunk(message::SendChunk {
+                        resource_id: resource.clone(),
+                        seq,
+                        offset: offset as u64,
+                        bytes: payload[offset..end].to_vec(),
+                    }),
+                    now(),
+                )
+                .await
+                .expect("send_chunk");
+            seq += 1;
+            offset = end;
+        }
+
+        client
+            .send(
+                &Message::SendComplete(message::SendComplete {
+                    resource_id: resource.clone(),
+                    final_hash: digest.to_vec(),
+                    cid: Some(cid),
+                }),
+                now(),
+            )
+            .await
+            .expect("send_complete");
+
+        // Now collect on the server side. The deadline is generous
+        // because the runtime may be loaded with other tests.
+        let mut receiver = BulkReceiver::new();
+        let mut done = false;
+        let mut opened = false;
+        let deadline = std::time::Instant::now() + Duration::from_millis(10_000);
+        while std::time::Instant::now() < deadline && !done {
+            let events = server.poll(now()).await.unwrap();
+            for e in events {
+                match e {
+                    Event::BulkStreamOpened { .. } => {
+                        opened = true;
+                    }
+                    Event::Frame {
+                        tier: Tier::Bulk,
+                        msg,
+                        ..
+                    } => {
+                        let complete = receiver.ingest_bytes(&msg.raw).unwrap();
+                        if complete {
+                            done = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        assert!(opened, "server did not see BulkStreamOpened");
+        assert!(done, "server never finished the bulk transfer");
+
+        let reassembled = receiver
+            .reassemble_verified(HashAlgo::Sha256, &hasher)
+            .expect("verified reassembly");
+        assert_eq!(reassembled, payload, "reassembled bytes match payload");
+    }
+
+    // ---- Stage 5 — fetch_range / range_response with bao verification ----
+
+    #[cfg(feature = "crypto")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn fetch_range_round_trip_with_proof() {
+        use crate::range::bao_support::{extract_proof, verify_response};
+        use crate::range::{FetchRange, RangeResponse};
+
+        let caps = Capabilities::baseline()
+            | Capabilities(Capabilities::BLAKE3)
+            | Capabilities(Capabilities::CID_ADDRESSING)
+            | Capabilities(Capabilities::MERKLE_RANGE);
+        let (mut server, mut client) = handshake_pair_with(1, 2, caps).await;
+
+        // Sanity: both sides agreed on the capability.
+        let agreed = client.agreed().expect("client agreed");
+        assert!(agreed.has(Capabilities::MERKLE_RANGE));
+
+        // A BLAKE3-addressed 8 KiB payload.
+        let payload: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
+        let hasher = crate::crypto::Blake3Hasher;
+        let digest = hasher.digest(HashAlgo::Blake3, &payload).unwrap();
+        let cid = CidOrV1::V1(quip_core::cid::CidV1 {
+            hash_algo: HashAlgo::Blake3,
+            digest,
+        });
+        let resource = b"stage5-resource".to_vec();
+        let offset = 1000u64;
+        let length = 2048u64;
+
+        // --- Client asks ---
+        client
+            .send(
+                &Message::FetchRange(FetchRange {
+                    resource_id: resource.clone(),
+                    cid,
+                    offset,
+                    length,
+                }),
+                now(),
+            )
+            .await
+            .expect("fetch_range");
+
+        // --- Server sees the request ---
+        let req = poll_for_event(&mut server, 500, |e| {
+            is_frame_with_verb(e, Tier::Sync, "fetch_range")
+        })
+        .await
+        .expect("server did not see fetch_range");
+        match &req {
+            Event::Frame { tier, msg, .. } => {
+                assert_eq!(*tier, Tier::Sync);
+                assert_eq!(msg.verb().unwrap(), "fetch_range");
+            }
+            _ => unreachable!(),
+        }
+
+        // --- Server computes the response locally ---
+        // (In a real deployment this is a state-machine concern; here
+        // the test acts as the responder.)
+        let (bytes, proof) = extract_proof(&payload, offset, length).expect("extract_proof");
+        assert_eq!(bytes.len() as u64, length);
+        assert_eq!(
+            bytes,
+            payload[offset as usize..(offset + length) as usize].to_vec()
+        );
+
+        server
+            .send(
+                &Message::RangeResponse(RangeResponse {
+                    resource_id: resource.clone(),
+                    cid,
+                    offset,
+                    length,
+                    bytes: bytes.clone(),
+                    proof,
+                }),
+                now(),
+            )
+            .await
+            .expect("range_response");
+
+        // --- Client sees it and verifies the proof ---
+        let resp_event = poll_for_event(&mut client, 500, |e| {
+            is_frame_with_verb(e, Tier::Sync, "range_response")
+        })
+        .await
+        .expect("client did not see range_response");
+
+        // Decode the range_response from the raw bytes.
+        let raw = match resp_event {
+            Event::Frame { msg, .. } => msg.raw,
+            _ => unreachable!(),
+        };
+        let resp = RangeResponse::from_bytes(&raw).expect("decode range_response");
+        verify_response(&resp, HashAlgo::Blake3).expect("bao proof verifies");
+        assert_eq!(resp.bytes, bytes);
+        assert_eq!(resp.offset, offset);
+        assert_eq!(resp.length, length);
+    }
+
+    // ---- Stage 6 — governance verbs on T0 ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn governance_register_tcid_round_trips() {
+        let caps = Capabilities::baseline()
+            | Capabilities(Capabilities::CID_ADDRESSING)
+            | Capabilities(Capabilities::DHT_DISCOVERY)
+            | Capabilities(Capabilities::GOVERNANCE);
+        let (mut server, mut client) = handshake_pair_with(1, 2, caps).await;
+
+        // Sanity: the negotiated set includes GOVERNANCE.
+        assert!(client.agreed().unwrap().has(Capabilities::GOVERNANCE));
+
+        let registration = quip_core::messages::TrustedCidRegistration {
+            cid: CidOrV1::Raw(Cid([0x10; 32])),
+            app_metadata: vec![],
+            owner: nid(2),
+            timestamp: now(),
+            signature: [0xef; 64],
+        };
+
+        client
+            .send(&Message::RegisterTcid(registration), now())
+            .await
+            .expect("register_tcid");
+
+        let seen = poll_for_event(&mut server, 500, |e| {
+            is_frame_with_verb(e, Tier::Ctrl, "register_tcid")
+        })
+        .await;
+        assert!(seen.is_some(), "server did not see register_tcid");
+    }
+
+    // ---- Stage 7 — BFT verbs on T0 ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bft_consensus_sequence_round_trips() {
+        use crate::bft::{BftCommit, BftPrecommit, BftPrepare, BftPreprepare, Operation};
+        use alloc::string::String;
+
+        let (mut server, mut client) = handshake_pair(1, 2).await;
+
+        let ring_id = [0xAA; 32];
+        let digest = [0xBB; 32];
+        let operation = Operation {
+            kind: String::from("key_rotation"),
+            subject: vec![0x01; 32],
+            body: CborValue::Int(1),
+        };
+
+        // preprepare, then the three votes, in sequence.
+        client
+            .send(
+                &Message::BftPreprepare(BftPreprepare {
+                    ring_id,
+                    view: 0,
+                    sequence: 0,
+                    operation,
+                    digest,
+                    primary_sig: [0xCC; 64],
+                }),
+                now(),
+            )
+            .await
+            .expect("bft_preprepare");
+
+        for msg in [
+            Message::BftPrepare(BftPrepare {
+                ring_id,
+                view: 0,
+                sequence: 0,
+                digest,
+                witness_sig: [0xDD; 64],
+            }),
+            Message::BftPrecommit(BftPrecommit {
+                ring_id,
+                view: 0,
+                sequence: 0,
+                digest,
+                witness_sig: [0xDD; 64],
+            }),
+            Message::BftCommit(BftCommit {
+                ring_id,
+                view: 0,
+                sequence: 0,
+                digest,
+                witness_sig: [0xDD; 64],
+            }),
+        ] {
+            client.send(&msg, now()).await.expect("bft vote");
+        }
+
+        // Server should see four T0 events, one per verb.
+        let mut seen = std::collections::BTreeSet::new();
+        let deadline = std::time::Instant::now() + Duration::from_millis(2000);
+        while std::time::Instant::now() < deadline && seen.len() < 4 {
+            let events = server.poll(now()).await.unwrap();
+            for e in events {
+                if let Event::Frame {
+                    tier: Tier::Ctrl,
+                    msg,
+                    ..
+                } = e
+                {
+                    seen.insert(msg.verb().unwrap().to_string());
+                }
+            }
+        }
+
+        for expected in [
+            "bft_preprepare",
+            "bft_prepare",
+            "bft_precommit",
+            "bft_commit",
+        ] {
+            assert!(seen.contains(expected), "server did not see {expected}");
+        }
+    }
+
+    // ---- Stage 8 — cross-path validation on T0 ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cross_path_validation_round_trips() {
+        use crate::coral::{CrossPathValidation, LookupResponse, PathProof};
+
+        let caps = Capabilities::baseline() | Capabilities(Capabilities::DHT_DISCOVERY);
+        let (mut server, mut client) = handshake_pair_with(1, 2, caps).await;
+
+        // Build a CrossPathValidation with one embedded LookupResponse.
+        // The embedded response carries a nonzero signature so the test
+        // exercises the nested-signature path in §10.1.
+        let inner = LookupResponse {
+            key: [0x10; 32],
+            values: vec![],
+            path_proofs: vec![PathProof {
+                path_id: [0x20; 16],
+                node_signatures: vec![],
+                value_hash: [0x30; 32],
+                responded: false,
+            }],
+            responder: nid(3),
+            timestamp: now(),
+            signature: [0x44; 64],
+        };
+        let check = CrossPathValidation {
+            key: [0x11; 32],
+            path_responses: vec![inner],
+            witness_ring: vec![nid(1), nid(2), nid(3)],
+            requester: nid(2),
+            timestamp: now(),
+            signature: [0x22; 64],
+        };
+
+        client
+            .send(&Message::CrossPathValidation(check), now())
+            .await
+            .expect("cross_path_validation");
+
+        let seen = poll_for_event(&mut server, 500, |e| {
+            is_frame_with_verb(e, Tier::Ctrl, "cross_path_validation")
+        })
+        .await;
+        assert!(seen.is_some(), "server did not see cross_path_validation");
     }
 }

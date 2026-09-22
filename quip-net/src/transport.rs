@@ -11,7 +11,7 @@
 //! stream. Read halves are moved into per-stream tasks that feed a
 //! shared `mpsc::Sender<Event>`. [`ConnectionDriver::poll`] drains the
 //! receiver, returning whatever events are ready within
-//! [`POLL_TIMEOUT_MS`].
+//! `POLL_TIMEOUT_MS`.
 //!
 //! Tasks hold clones of the `quinn::Connection`, so dropping the driver
 //! would not by itself terminate them. The [`Drop`] impl for
@@ -50,7 +50,7 @@
 //! arrives, not when [`quinn::Connection::open_bi`] resolves. The
 //! initiator therefore writes a no-op [`FlowFrame::Window`] on T1 right
 //! after opening it, so the responder's `accept_bi` returns. The frame
-//! is consumed silently by [`route_message`] — it produces no
+//! is consumed silently by `route_message` — it produces no
 //! application event. This matches the requirement documented on
 //! `quinn::Connection::open_bi`: waiting on the `RecvStream` without
 //! writing to `SendStream` never succeeds.
@@ -58,10 +58,10 @@
 //! # Key Claim exchange
 //!
 //! §16 steps 7–8: after the §4 handshake, each peer sends its
-//! self-signed [`KeyClaim`] on T0 and waits for the other's. The driver
-//! sends its own and reads the peer's inline, before any read task is
-//! spawned, so the `announce_key` messages never surface as
-//! [`Event::Frame`]s.
+//! self-signed [`KeyClaim`](quip_core::messages::KeyClaim) on T0 and waits
+//! for the other's. The driver sends its own and reads the peer's inline,
+//! before any read task is pawned, so the `announce_key` messages never 
+//! surface as [`Event::Frame`]s.
 //!
 //! **The driver does not verify the peer's signature.** Callers MUST
 //! verify it themselves — against the `NodeId` in the claim, under their
@@ -593,7 +593,7 @@ impl ConnectionDriver {
     /// `[Event::ControlConnected]`. The driver ends in
     /// [`DriverPhase::Established`].
     ///
-    /// On subsequent calls, waits up to [`POLL_TIMEOUT_MS`] for an event
+    /// On subsequent calls, waits up to `POLL_TIMEOUT_MS` for an event
     /// and returns whatever arrived, draining any further ready events.
     /// An idle connection returns an empty vector, not an error.
     pub async fn poll(&mut self, now: Timestamp) -> Result<Vec<Event>> {
@@ -723,7 +723,7 @@ impl ConnectionDriver {
     /// first `STREAM` frame arrives, so without this write the
     /// responder's `accept_bi` would block until the first application
     /// message — which may never come. The frame is consumed silently by
-    /// [`route_message`] and produces no application event.
+    /// `route_message` and produces no application event.
     async fn open_or_accept_t1(&mut self) -> Result<()> {
         let (mut send, recv) = match self.role {
             Role::Initiator => self

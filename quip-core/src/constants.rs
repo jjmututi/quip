@@ -212,7 +212,7 @@ pub mod pin {
     /// Spec §14.2: *"A TTL of 0xFFFFFFFF indicates indefinite storage
     /// (subject to capacity constraints)."*
     ///
-    /// Coincidentally equal to [`dvv::INF`], but deliberately defined
+    /// Coincidentally equal to [`dvv::INF`](crate::constants::dvv::INF), but deliberately defined
     /// independently: `INF` is the DVV pruning sentinel,
     /// `INDEFINITE_TTL_S` is the pin TTL sentinel, and they should not
     /// move together.

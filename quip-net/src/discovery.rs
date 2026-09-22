@@ -17,7 +17,7 @@
 //!    [`WitnessDiscovery::ingest_lookup_response`]. Each one adds a
 //!    path's witness list to the state. When enough paths have
 //!    responded, the discovery runs
-//!    [`cross_path_consensus`](crate::coral::cross_path_consensus) and
+//!    [`cross_path_consensus`] and
 //!    either completes or emits a [`SpilloverRequest`].
 //! 3. Caller forwards incoming [`SpilloverResponse`] messages to
 //!    [`WitnessDiscovery::ingest_spillover_response`]. A response with

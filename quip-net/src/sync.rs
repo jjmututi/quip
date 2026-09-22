@@ -678,12 +678,6 @@ impl QueryQuarantined {
     }
 }
 
-/// Format an error string for error responses.
-pub fn error_text(code: quip_core::ErrorCode, text: &str, id: u64) -> String {
-    let _ = id;
-    alloc::format!("{code:?}: {text}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

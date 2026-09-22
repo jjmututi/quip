@@ -61,6 +61,7 @@ use crate::coral::{
 use crate::dht::WitnessRingCache;
 use crate::error::{Error, Result};
 use alloc::collections::{BTreeMap, BTreeSet};
+use alloc::vec;
 use alloc::vec::Vec;
 use quip_core::constants::{
     DEGRADED_QUORUM, ROTATION_INTERVAL_S, SPILLOVER_CACHE_TTL_S, SPILLOVER_THRESHOLD,

@@ -1,9 +1,9 @@
 //! QUIC transport binding for QUIP (spec §12).
 //!
-//! **Status:** M5 complete — Endpoint, T0 handshake, T1/T2/T3 stream I/O,
-//! per-stream dispatch, and the §16 Key Claim exchange. Flow-control
-//! send integration and rate limiting (blocked on NodeId) are not yet
-//! wired.
+//! **Status:** M5 complete, plus M7 rate limiting — Endpoint, T0
+//! handshake, T1/T2/T3 stream I/O, per-stream dispatch, the §16 Key
+//! Claim exchange, and per-peer receive-side rate limiting (§19.4).
+//! Flow-control send integration is not yet wired.
 //!
 //! # Architecture
 //!
@@ -69,6 +69,28 @@
 //! identity as established. [`ConnectionDriver::peer_key_claim`] returns
 //! the raw claim for that purpose.
 //!
+//! # Rate limiting
+//!
+//! Once the Key Claim exchange completes, the driver rate-limits
+//! inbound traffic per peer NodeId (§19.4). The general limit is
+//! [`RateLimiterConfig::general`] — 1000 ops/min with a 100-op burst by
+//! default. Pin gossip, spillover, relay discovery, and governance
+//! verbs each have their own bucket; see `operation_kind_for`. T2
+//! (bulk) frames are exempt: they are bounded by stream-level flow
+//! control, and a multi-gigabyte transfer would blow past any
+//! ops-per-minute budget.
+//!
+//! Pre-handshake traffic is unbounded: the driver has no peer NodeId to
+//! key on, and the handshake itself is short and QUIC-bounded.
+//!
+//! **Enforcement is per-connection.** The driver's limiter holds
+//! buckets for the one peer on this connection, so the effective limit
+//! matches the spec for a single-connection peer. To enforce a shared
+//! budget across many connections to the same NodeId, a caller would
+//! need to share a limiter across drivers — which this driver does not
+//! currently support. That is a known limitation of the first cut; a
+//! follow-up can hoist the limiter above the driver.
+//!
 //! # Certificate handling
 //!
 //! QUIP has no WebPKI (§5). TLS is a confidentiality layer, and identity
@@ -83,10 +105,12 @@ use crate::flow::{dispatch_flow, FlowFrame};
 use crate::frame::{self, Tier};
 use crate::handshake::Capabilities;
 use crate::message::{self, Message};
+use crate::rate::{OperationKind, RateLimiter, RateLimiterConfig};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 use quip_core::cbor::CborValue;
+use quip_core::dvv::NodeId;
 use quip_core::messages::KeyClaim;
 use quip_core::time::Timestamp;
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -473,6 +497,17 @@ pub struct ConnectionDriver {
     /// established.
     peer_key_claim: Option<KeyClaim>,
 
+    /// Receive-side rate limiter, keyed by the peer's NodeId once the
+    /// Key Claim exchange completes.
+    ///
+    /// Before then, `peer_key_claim` is `None` and the driver does not
+    /// rate-limit; the handshake itself is short and QUIC-bounded.
+    ///
+    /// Enforcement is per-connection: the limiter holds buckets for the
+    /// one peer this driver talks to. Sharing a budget across many
+    /// connections would require hoisting the limiter above the driver.
+    rate_limiter: RateLimiter,
+
     // ---- T0 ----
     /// T0 send half, held for the connection's lifetime.
     control_send: Option<quinn::SendStream>,
@@ -556,6 +591,7 @@ impl ConnectionDriver {
             phase: DriverPhase::Connecting,
             local_key_claim,
             peer_key_claim: None,
+            rate_limiter: RateLimiter::new(),
             control_send: None,
             control_recv: None,
             sync_send: None,
@@ -595,9 +631,45 @@ impl ConnectionDriver {
         self.peer_key_claim.as_ref()
     }
 
+    /// The peer's NodeId, once the §16 Key Claim exchange has completed.
+    ///
+    /// Returns `None` before the exchange completes. The returned NodeId
+    /// is the peer's claimed identity — the driver does not verify the
+    /// signature that vouches for it (see [`Self::peer_key_claim`]).
+    pub fn peer_node_id(&self) -> Option<NodeId> {
+        self.peer_key_claim.as_ref().map(|c| c.node_id)
+    }
+
     /// Our own Key Claim.
     pub fn local_key_claim(&self) -> &KeyClaim {
         &self.local_key_claim
+    }
+
+    /// The receive-side rate limiter.
+    ///
+    /// Useful for inspection: a caller can check whether the peer is
+    /// approaching a limit before deciding to close the connection.
+    pub fn rate_limiter(&self) -> &RateLimiter {
+        &self.rate_limiter
+    }
+
+    /// Mutable access to the receive-side rate limiter.
+    ///
+    /// Callers wanting to adjust the limiter's configuration should use
+    /// [`Self::set_rate_config`], which replaces the limiter wholesale
+    /// rather than mutating its config in place.
+    pub fn rate_limiter_mut(&mut self) -> &mut RateLimiter {
+        &mut self.rate_limiter
+    }
+
+    /// Replace the rate limiter with one configured by `config`.
+    ///
+    /// **Discards accumulated state.** Any buckets the previous limiter
+    /// held are dropped. This is safe when called before the first poll
+    /// (which is the intended use: configure, then drive); a caller that
+    /// swaps the limiter mid-connection resets that peer's budget.
+    pub fn set_rate_config(&mut self, config: RateLimiterConfig) {
+        self.rate_limiter = RateLimiter::with_config(config);
     }
 
     /// Local IP address of this connection, if the runtime has resolved
@@ -637,6 +709,11 @@ impl ConnectionDriver {
     /// On subsequent calls, waits up to `POLL_TIMEOUT_MS` for an event
     /// and returns whatever arrived, draining any further ready events.
     /// An idle connection returns an empty vector, not an error.
+    ///
+    /// Once the peer's NodeId is known, each inbound `Frame` or
+    /// `Datagram` is checked against the rate limiter. Frames over
+    /// budget are replaced with `Event::Error { error: RateLimit }`.
+    /// T2 (bulk) frames are exempt.
     pub async fn poll(&mut self, now: Timestamp) -> Result<Vec<Event>> {
         if self.phase == DriverPhase::Closed {
             return Ok(Vec::new());
@@ -648,7 +725,8 @@ impl ConnectionDriver {
 
         // ---- Handshake + Key Claim path ----
         if self.phase != DriverPhase::Established {
-            return self.poll_handshake(now).await;
+            let events = self.poll_handshake(now).await?;
+            return Ok(self.apply_rate_limits(events, now));
         }
 
         // ---- Established path: drain the event channel ----
@@ -669,7 +747,66 @@ impl ConnectionDriver {
         while let Ok(event) = rx.try_recv() {
             events.push(event);
         }
-        Ok(events)
+        Ok(self.apply_rate_limits(events, now))
+    }
+
+    /// Apply rate limits to `events`.
+    ///
+    /// For each `Frame` or `Datagram`, look up the operation kind from
+    /// the verb and consult the limiter. Exceeding the limit replaces
+    /// the event with `Event::Error { error: RateLimit }`.
+    ///
+    /// No-op before the peer's NodeId is known.
+    fn apply_rate_limits(&mut self, events: Vec<Event>, now: Timestamp) -> Vec<Event> {
+        // Copy out the peer's NodeId so the mutable borrow of the
+        // limiter below is not entangled with an immutable borrow of
+        // `peer_key_claim`.
+        let peer = match self.peer_key_claim.as_ref() {
+            Some(c) => c.node_id,
+            None => return events,
+        };
+
+        // Cheap sweep: drop buckets that have refilled to capacity.
+        self.rate_limiter.sweep(now);
+
+        let mut out = Vec::with_capacity(events.len());
+        for event in events {
+            let replacement = match &event {
+                Event::Frame { tier, stream, msg } => {
+                    // Bulk (T2) traffic is bounded by stream-level flow
+                    // control, not by ops/min.
+                    if matches!(tier, Tier::Bulk) {
+                        None
+                    } else {
+                        let kind = operation_kind_for(msg);
+                        if self.rate_limiter.check(peer, kind, now).is_ok() {
+                            None
+                        } else {
+                            Some(Event::Error {
+                                tier: Some(*tier),
+                                stream: Some(*stream),
+                                error: Error::RateLimit,
+                            })
+                        }
+                    }
+                }
+                Event::Datagram { msg } => {
+                    let kind = operation_kind_for(msg);
+                    if self.rate_limiter.check(peer, kind, now).is_ok() {
+                        None
+                    } else {
+                        Some(Event::Error {
+                            tier: Some(Tier::Event),
+                            stream: None,
+                            error: Error::RateLimit,
+                        })
+                    }
+                }
+                _ => None,
+            };
+            out.push(replacement.unwrap_or(event));
+        }
+        out
     }
 
     /// Drive the §4 handshake and §16 Key Claim exchange to completion,
@@ -831,6 +968,11 @@ impl ConnectionDriver {
     /// capability set before sending; a verb whose required capability
     /// was not advertised is rejected locally with
     /// [`Error::CapabilityViolation`] (§4).
+    ///
+    /// Send-side rate limiting is not enforced here: the limits in
+    /// §19.4 bound what a peer may send *to us*, not what we choose to
+    /// send. The application decides whether its own outbound traffic
+    /// is within its own policy.
     pub async fn send(&mut self, msg: &Message, _now: Timestamp) -> Result<()> {
         let negotiated = self
             .transport
@@ -919,6 +1061,29 @@ impl ConnectionDriver {
     #[allow(dead_code)]
     pub(crate) fn inner(&self) -> &quinn::Connection {
         &self.conn
+    }
+}
+
+// -------------------------------------------------------------------------
+// Rate limiting helpers
+// -------------------------------------------------------------------------
+
+/// Classify an inbound message into a rate-limit operation kind.
+///
+/// The mapping mirrors the §19.4 categories. Verbs that are not listed
+/// fall under [`OperationKind::General`].
+///
+/// `relay_discovery` and `relay_response` are DHT-plane messages
+/// (§12.2) and do not normally appear on a peer connection, but the
+/// classification is provided for completeness.
+fn operation_kind_for(msg: &IncomingMessage) -> OperationKind {
+    match msg.verb().unwrap_or("") {
+        "pin_announce" => OperationKind::PinAnnounce,
+        "spillover" | "spillover_response" => OperationKind::Spillover,
+        "relay_discovery" | "relay_response" => OperationKind::Relay,
+        "register_tcid" | "delegation" | "quarantine" | "unquarantine"
+        | "derivative_link" => OperationKind::Governance,
+        _ => OperationKind::General,
     }
 }
 
@@ -1184,6 +1349,7 @@ async fn read_one_frame(recv: &mut quinn::RecvStream) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
     use crate::event::EmitEvent;
+    use crate::rate::BucketConfig;
     use crate::sync::GetRequest;
     use quip_core::dvv::Dvv;
     use rcgen::{generate_simple_self_signed, CertifiedKey};
@@ -1572,6 +1738,10 @@ mod tests {
         // Local claims are also exposed.
         assert_eq!(client.local_key_claim().node_id, [2u8; 32]);
         assert_eq!(server.local_key_claim().node_id, [1u8; 32]);
+
+        // peer_node_id mirrors peer_key_claim.
+        assert_eq!(client.peer_node_id(), Some([1u8; 32]));
+        assert_eq!(server.peer_node_id(), Some([2u8; 32]));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1585,6 +1755,160 @@ mod tests {
         // the exchange.
         assert!(client.poll(now()).await.unwrap().is_empty());
         assert!(server.poll(now()).await.unwrap().is_empty());
+    }
+
+    // =====================================================================
+    // M7 — rate limiting
+    // =====================================================================
+
+    /// The driver rejects surplus general ops once the peer exceeds its
+    /// budget, surfacing each surplus as `Event::Error { RateLimit }`.
+    ///
+    /// Configure the server with a 3-op budget and no burst, then have
+    /// the client send 10 `Error` frames on T0. The server should accept
+    /// exactly 3 and rate-limit the remaining 7.
+    ///
+    /// The test uses a fixed `now`, so the bucket never refills during
+    /// the run and the counts are deterministic.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rate_limit_rejects_surplus_ops() {
+        let (mut server, mut client) = handshake_pair(1, 2).await;
+
+        // Configure the receiver with a tight budget.
+        let cfg = RateLimiterConfig {
+            general: BucketConfig {
+                limit_per_minute: 3,
+                burst: 0,
+            },
+            ..RateLimiterConfig::default()
+        };
+        server.set_rate_config(cfg);
+
+        // The server must know the peer NodeId by now.
+        assert_eq!(server.peer_node_id(), Some([2u8; 32]));
+
+        // The client sends 10 messages on T0, all classified as
+        // `OperationKind::General`.
+        for i in 0..10u64 {
+            let msg = Message::Error(message::ErrorMessage {
+                code: quip_core::ErrorCode::Violation,
+                message_id: i,
+                text: "spam".into(),
+            });
+            client.send(&msg, now()).await.expect("send");
+        }
+
+        // Drain on the server side and count acceptances vs limits.
+        let mut accepted = 0u64;
+        let mut limited = 0u64;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && (accepted + limited) < 10 {
+            let events = server.poll(now()).await.unwrap();
+            for e in events {
+                match e {
+                    Event::Frame { .. } => accepted += 1,
+                    Event::Error {
+                        error: Error::RateLimit,
+                        ..
+                    } => limited += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        assert_eq!(accepted, 3, "expected exactly 3 accepted frames");
+        assert_eq!(limited, 7, "expected exactly 7 rate-limit errors");
+    }
+
+    /// T2 (bulk) traffic is exempt from the ops/min limiter.
+    ///
+    /// Configure the server with a 1-op general budget, then send a
+    /// small bulk transfer (4 chunks). The transfer should complete
+    /// without any `RateLimit` errors.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rate_limit_exempts_bulk() {
+        let (mut server, mut client) = handshake_pair(1, 2).await;
+
+        // A budget of 1 op is below what the handshake already
+        // consumed, but bulk frames must not be limited at all.
+        let cfg = RateLimiterConfig {
+            general: BucketConfig {
+                limit_per_minute: 1,
+                burst: 0,
+            },
+            ..RateLimiterConfig::default()
+        };
+        server.set_rate_config(cfg);
+
+        let resource = b"bulk-exempt".to_vec();
+        let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+        let digest = [0u8; 32];
+        let cid = quip_core::cid::CidOrV1::Raw(quip_core::cid::Cid(digest));
+
+        client
+            .send(
+                &Message::SendStart(message::SendStart {
+                    resource_id: resource.clone(),
+                    total_size: payload.len() as u64,
+                    hash: digest.to_vec(),
+                    cid,
+                    hash_algo: None,
+                }),
+                now(),
+            )
+            .await
+            .expect("send_start");
+
+        for (i, chunk) in payload.chunks(1024).enumerate() {
+            client
+                .send(
+                    &Message::SendChunk(message::SendChunk {
+                        resource_id: resource.clone(),
+                        seq: i as u64,
+                        offset: (i * 1024) as u64,
+                        bytes: chunk.to_vec(),
+                    }),
+                    now(),
+                )
+                .await
+                .expect("send_chunk");
+        }
+
+        client
+            .send(
+                &Message::SendComplete(message::SendComplete {
+                    resource_id: resource,
+                    final_hash: digest.to_vec(),
+                    cid: Some(cid),
+                }),
+                now(),
+            )
+            .await
+            .expect("send_complete");
+
+        // Collect. Every bulk frame should arrive without a RateLimit
+        // error.
+        let mut bulk_frames = 0u64;
+        let mut rate_errors = 0u64;
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline && bulk_frames < 6 {
+            let events = server.poll(now()).await.unwrap();
+            for e in events {
+                match e {
+                    Event::Frame {
+                        tier: Tier::Bulk, ..
+                    } => bulk_frames += 1,
+                    Event::Error {
+                        error: Error::RateLimit,
+                        ..
+                    } => rate_errors += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        assert_eq!(bulk_frames, 6, "expected 6 bulk frames (start + 4 + complete)");
+        assert_eq!(rate_errors, 0, "bulk frames must not be rate-limited");
     }
 
     // =====================================================================

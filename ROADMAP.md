@@ -20,10 +20,9 @@ status this file recognises.
 both. The M3b build break documented below happened because a refactor landed
 in two files while three dependents kept compiling against the old shape.
 
-**Sections are ordered by execution priority, not by number.** M3b is first
-because its driver wiring just landed with relay emission still outstanding;
-M4a is second because it just landed; M6, M4b and M7 follow in the order they
-should be attempted.
+**Sections are ordered by execution priority, not by number.** M7 and M4b are
+first now that M6 has landed; M3b's remaining work and the defect register
+follow. The M4a, M5, and M8 records are kept as historical context.
 
 ---
 
@@ -35,38 +34,43 @@ should be attempted.
 | M2b.1 | Cluster info / membership state | landed | `cluster.rs` |
 | M3a | NAT wire codecs (§12) | landed | `nat_wire.rs` |
 | M3b.1 | NAT state machine (§12.1–§12.3) | landed | `nat.rs`, `AddressState`, `CandidateTable` |
-| M3b.2 | NAT driver wiring | **landed** (`RequestRelays` forwarded; `DiscoverRelays` emission outstanding) | `nat_driver.rs`, builds clean |
+| M3b.2 | NAT driver wiring | landed (relay emission outstanding) | `nat_driver.rs`, builds clean |
 | M3b.3 | Candidate probing, relay signing | not started | 1 `TODO(M3b.3)` at `nat.rs:1108` |
-| M5 | QUIC transport driver (§11, §12, §16) | landed | `transport.rs`, 12 tests over a real QUIC handshake pair |
-| **M4a** | **BFT wire codecs (§5.3.4)** | **landed** | `bft.rs`, 39 tests |
-| M6.1 | §16 full-flow integration tests | not started | no `tests/` crate |
-| M6.2 | Signing test vectors (§10.1) | not started | — |
-| M6.3 | CI | not started | no `.github/` |
+| M5 | QUIC transport driver (§11, §12, §16) | landed | `transport.rs`, 16 tests over a real QUIC handshake pair |
+| M4a | BFT wire codecs (§5.3.4) | landed | `bft.rs`, 39 tests |
+| **M6.1** | **§16 full-flow integration tests** | **landed** | `transport.rs`, 5 new tests |
+| **M6.2** | **Signing test vectors (§10.1)** | **landed** | `test-vectors/`, `xtask/` |
+| **M6.3** | **CI** | **landed** | `.github/workflows/ci.yml`, 5 jobs |
 | M4b | BFT driver (§5.3.4) | not started | no `bft_driver.rs` |
-| M7 | Hardening (§11, §19.4) | **partially landed early** | see M7 |
+| M7 | Hardening (§11, §19.4) | partially landed early | see M7 |
 | M8 | Range fetch / bao verified streaming | landed | `range.rs` |
 
-**Demo-critical:** M6, plus the parts of M3b that touch §16 steps 9–14.
-Everything else is post-hackathon.
+**Demo-critical list is complete.** M6.1, M6.2, M6.3, and the parts of M3b
+touching §16 steps 9–14 are the last remaining items before the reference
+implementation is demo-ready. M3b's relay emission is the one gap in that set.
 
 ---
 
 ## Build status
 
-**Green.** All three crates compile, every test passes, clippy is silent:
+**Green.** All three crates compile, every test passes, clippy and rustdoc are
+silent under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo check -p quip-net                                   clean, no warnings
-cargo test --workspace --all-features                     451 unit + 3 doc, exit 0
-cargo clippy --workspace --all-features --all-targets     0 warnings
+cargo check --workspace --all-features                   clean, no warnings
+cargo test --workspace --all-features                    458 unit + 3 doc, exit 0
+cargo clippy --workspace --all-features --all-targets    clean, -D warnings
+cargo doc --workspace --all-features --no-deps           clean
+RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
+cargo build -p quip-core -p quip-storage -p quip-net \
+    --no-default-features                                clean
 ```
 
-The one build that still fails is the `no_std` one — see **D2** — which is in
-the M6.3 matrix and should be fixed before CI exists.
+All five commands are in `.github/workflows/ci.yml` and run on every push.
 
 ### Resolved: the M3b build break
 
-Kept here as a record, because the reason it happened is the reason M6.3 comes
+Kept as a record, because the reason it happened is the reason M6.3 landed
 before M6.1.
 
 For one revision `quip-net` did not compile on **any** feature combination —
@@ -96,38 +100,40 @@ Three dependents kept compiling against the old shapes:
 correlated, `NatDriver::on_peer_message` takes
 `relay_target: Option<NodeId>`, and the two uncovered `Outbound` arms forward
 to the application as `NatEvent::ProbeRequested` and
-`NatEvent::RelayDiscoveryRequested` (see **D5** and **M3b.2** for why those
-belong to the application rather than the driver).
+`NatEvent::RelayDiscoveryRequested`.
 
 **The lesson.** A refactor in two files left three dependents stale, and
-nothing in the project was capable of saying so. That is the gap M6.3 closes.
+nothing in the project was capable of saying so. M6.3 landed and closed that
+gap; the workflow would have failed on the commit that caused the break.
 
 ---
 
 ## Verification baseline
 
-Run all four after any change; the first two are the gate for this file's
+Run all five after any change; the first two are the gate for this file's
 status claims.
 
 ```bash
 cargo test --workspace --all-features
-cargo clippy --workspace --all-features --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo doc --workspace --all-features --no-deps
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Current baseline, verified on this revision (cargo test: 74 + 320 + 57
-unit tests and 3 doc-tests):
+Current baseline, verified on `main` at commit `3a52c0b`:
 
 ```
 quip-core      74 passed
-quip-net      320 passed
+quip-net      327 passed
 quip-storage   57 passed
 doc-tests       3 passed (one per crate)
-             451 unit tests, 0 failed — clippy clean
+             458 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
-The last command in the block above fails for `quip-net` — see **D2**.
+The CI workflow (`.github/workflows/ci.yml`) runs an equivalent set of five
+jobs on every push, plus a `vectors` job that regenerates `test-vectors/` and
+fails if the working tree changed.
 
 ---
 
@@ -151,27 +157,15 @@ inference, stale pruning, host-before-relayed ordering, and hop limits.
 ### M3b.2 — driver wiring — LANDED
 `nat_driver.rs` defines the `DhtClient` trait, `DhtResult` (whose `Relays`
 variant threads the discovery target the wire drops — see **D5**),
-`NullDhtClient`, and `NatDriver<D>::poll()`, and it compiles clean. The two
-`Outbound` arms the original driver predated (`ProbeCandidate`,
-`RequestRelays`) are handled: both forward to the application as `NatEvent`s
-rather than being executed in the driver. What remains:
+`NullDhtClient`, and `NatDriver<D>::poll()`. The two `Outbound` arms the
+original driver predated (`ProbeCandidate`, `RequestRelays`) forward to the
+application as `NatEvent`s rather than executing in the driver. What remains:
 
-- **Decide the two placement questions** the driver surfaced, rather than
-  guessing. Both are currently resolved by forwarding to the application;
-  confirm that placement is intended or move them:
-  - a connectivity probe is QUIC path validation (RFC 9000 §8.2) against an
-    address we may hold no connection to, so it needs an `Endpoint`. The
-    driver does not own one. Current resolution: emit
-    `NatEvent::ProbeRequested` and let the application dial and report back
-    through `on_probe_result`.
-  - `relay_discovery` must be signed by the requester (§12.2). The driver
-    holds no `Signer`. Current resolution: emit
-    `NatEvent::RelayDiscoveryRequested` and let the application sign and send.
 - **Emit the relay requests.** `Outbound::RequestRelays` is handled by the
   driver but `Outbound::DiscoverRelays` is *defined* yet emitted nowhere. The
   state machine never asks for relays today, so `RelayManager` is only ever
   fed by `connectivity_announce`.
-- §12.1 re-announce scheduler (TTL 600 s, re-announce 480 s; adaptive
+- **§12.1 re-announce scheduler** (TTL 600 s, re-announce 480 s; adaptive
   50–90 %). `last_announce` exists on `NatTraversal` but nothing schedules.
 
 ### M3b.3 — not started
@@ -184,16 +178,16 @@ rather than being executed in the driver. What remains:
   `RELAY_CAPACITY` (the capacity bound exists; the rate limit does not).
 
 ### Dependencies
-M3a (landed), M2b.1 (landed), and the `DhtClient` trait — which now exists as
-a trait plus `NullDhtClient`. **The gating design question is answered: define
-the trait, ship a null impl, take no concrete DHT dependency.**
+M3a (landed), M2b.1 (landed), and the `DhtClient` trait. **The gating design
+question is answered: define the trait, ship a null impl, take no concrete DHT
+dependency.**
 
 ### Risks
 The driver compiles and the state machine is exercised, but nothing yet
 *drives* it end to end: no relay request is ever emitted and no probe is ever
 answered, so `NatTraversal` stays in its initial state in a real deployment.
-M3b is also only *partly* demo-critical (§16 steps 9–14). Do not let finishing
-it delay M6.1.
+M3b is only *partly* demo-critical (§16 steps 9–14); the demo path itself is
+complete through M6.1 without it.
 
 ---
 
@@ -209,8 +203,7 @@ Both corrections flagged during drafting are in the code:
 - **The pre-prepare digest is recomputed.** `BftPreprepare::compute_digest`
   implements `SHA-256(ring_id || view || sequence ||
   QUIP-CBOR-encode(operation))` with `view`/`sequence` as 8-byte big-endian;
-  `verify_digest` and `verify_full` enforce it. Verifying `primary_sig` alone
-  is no longer sufficient and no longer done.
+  `verify_digest` and `verify_full` enforce it.
 
 Also present: all eight messages (`BftPreprepare`, `BftPrepare`,
 `BftPrecommit`, `BftCommit`, `BftViewChange`, `BftNewView`, `BftCheckpoint`,
@@ -221,78 +214,82 @@ carry no signer field. Wired into `message.rs` with `verb()`,
 (the two `bft_checkpoint`-gated ones only), `to_bytes()`, and `dispatch()`.
 
 ### Carry-forward
-`bft.rs:543` notes that `BftNewView`'s `view_change_messages`,
+`bft.rs`'s module docs note that `BftNewView`'s `view_change_messages`,
 `prepared_messages`, and `checkpoint_messages` are opaque `[* bytes]`; the
 codec preserves them verbatim and verifying their contents is M4b.
 
 ### Dependencies
-None. **Nothing blocks M6.1 any more.**
+None.
 
 ---
 
-## M6 — Integration + test vectors
+## M6 — Integration + test vectors — LANDED
 
-**Status: not started.** No `tests/` crate, no `examples/`, no CI.
+**Status: M6.1, M6.2, and M6.3 all landed.**
 
-### M6.1 — Full-flow integration tests
-Structure: a shared fixture with a `handshake_pair()` constructor and a
-`poll_until` helper. `transport.rs` already has private `handshake_pair` and
-`poll_until_event` helpers in its test module — promote those into a shared
-harness instead of writing a second one.
+### M6.1 — Full-flow integration tests — LANDED
+Five tests in `quip-net/src/transport.rs`, one per §16 stage 4–8:
 
-The §16 flow has 18 steps. Existing coverage is *transport*-level, not
-protocol-flow: handshake, capability negotiation, Key Claim, T0/T1/T3
-send-receive, and bulk chunks. Add one test per stage:
+| Test | §16 stage |
+|---|---|
+| `bulk_full_transfer_verifies_cid` | 4 — `send_start` / `send_chunk` / `send_complete` with CID verification |
+| `fetch_range_round_trip_with_proof` | 5 — `fetch_range` / `range_response` with bao proof verification |
+| `governance_register_tcid_round_trips` | 6 — governance verbs on T0 |
+| `bft_consensus_sequence_round_trips` | 7 — BFT preprepare/prepare/precommit/commit on T0 |
+| `cross_path_validation_round_trips` | 8 — cross-path validation on T0 |
 
-1. Handshake exchange and capability intersection
-2. Key Claim exchange (`announce_key`)
-3. `set` / `get` / `sync` round-trip on T1
-4. `send_start` / `send_chunk` / `send_complete` on T2 with CID verification
-5. `fetch_range` / `range_response` on T1 with bao proof verification
-6. Governance verbs on T0 (gated by `governance`)
-7. BFT `preprepare` / `prepare` / `precommit` / `commit` on T0 (ungated)
-8. Cross-path validation and spillover routing
+Stages 1–3 are covered by the existing transport tests
+(`handshake_exchange_negotiates_capabilities`,
+`key_claims_are_exchanged_and_stored`, `send_receive_on_t1`/`_t3`).
 
-Steps 9–16 (NAT traversal, witness discovery) cannot be exercised end-to-end
-without M3b.3 and a DHT.
+Two non-test changes were needed to make stages 4–5 testable:
 
-**Why 4 and 5 matter most.** The bao tests failed during M8 because
-`SliceExtractor` reads from the *encoded* stream, not raw bytes. That is a
-boundary bug — exactly the class a full-flow test catches and a unit test
-does not. Same class: a `send_complete` CID mismatch that only surfaces when
-chunk reassembly meets CID verification.
+- **`Endpoint` holds a `QuipNetConfig`.** `ServerConfig` and `ClientConfig`
+  gained a `capabilities: Capabilities` field. Before this, the server side
+  had nowhere to advertise a non-baseline capability set, so `merkle_range`
+  and `governance` could not be negotiated in tests.
+- **`ConnectionDriver` keeps the receive half of every outbound T2 stream
+  alive.** Dropping it sent STOP_SENDING to the peer, tearing down the peer
+  read side and silently dropping frames still in flight. This was the root
+  cause of the bulk test seeing only `BulkStreamOpened`.
 
-### M6.2 — Signing test vectors (§10.1)
-§10.1 mandates four cases: one self-signed (`KeyClaim`), one witness-signed
-(`WitnessStatement`), one `IndividualRingSig`, one `FrostRingSig`. The rest
-are SHOULD. Format: JSON with
-`{message_cbor_bytes, signing_payload_bytes, signature}`, published at the
-URL in A.9.
+The bulk test sends its entire transfer before the server begins polling,
+because BULK is a streaming protocol with no natural turn-taking; an earlier
+structure that polled between client sends raced against read-task scheduling
+under load.
 
-`signing_payload()` now exists on every signed core message and on all eight
-BFT messages, so the generator can be written against the workspace's own
-codec rather than reimplementing §10.1.
+### M6.2 — Signing test vectors (§10.1) — LANDED
+Four vectors under `test-vectors/`, one per §10.1 case:
 
-**Open question:** the `FrostRingSig` vector needs a real FROST aggregate,
-which needs either a FROST dependency or a precomputed aggregate from an
-external source. This is the one M6 item that may not land.
+- `key_claim.json` — self-signed `KeyClaim`
+- `witness_statement.json` — witness-signed `WitnessStatement`
+- `individual_ring_sig.json` — 5-signer `IndividualRingSig`
+- `frost_ring_sig.json` — real 5-of-7 FROST aggregate, deterministic nonces
 
-### M6.3 — CI
-`cargo test --workspace --all-features`, `cargo clippy --workspace
---all-features --all-targets -- -D warnings`, `cargo doc --workspace
---all-features --no-deps`, plus the `no_std` matrix (M6.3 wording in the
-original list omitted `--all-targets` on clippy; without it the test modules
-are not linted).
+Generated by `cargo xtask generate-vectors`. `xtask/` depends on
+`frost-ed25519` as a dev-dependency only. A CI job (`vectors`) regenerates and
+diffs, failing if the vectors are stale after a codec change.
 
-**Do this first.** It is config-only, fully unblocked, and the M3b build break
-would have been caught within seconds of the commit that caused it had this
-existed then. Expect the
-`no_std` job to fail until **D2** is fixed — add it anyway, it is the point.
+The FROST case landed, closing the open question the previous revision of this
+file flagged as possibly unachievable.
+
+### M6.3 — CI — LANDED
+`.github/workflows/ci.yml` runs five jobs, each independent:
+
+| Job | Command |
+|---|---|
+| `test` | `cargo test --workspace --all-features --locked` |
+| `clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` |
+| `doc` | `cargo doc --workspace --all-features --no-deps --locked` with `RUSTDOCFLAGS=-D warnings` |
+| `no_std` | `cargo build -p quip-core -p quip-storage -p quip-net --no-default-features --locked` |
+| `vectors` | `cargo xtask generate-vectors` + `git diff --exit-code test-vectors/` |
+
+The `clippy` job uses `--all-targets` (the original M6.3 wording omitted it;
+without it the test modules are not linted).
 
 ### Dependencies
-M6.1 depends on M4a (landed) and M8 (landed); full §16 coverage also needs
-M3b.3. M6.2 depends on M4a (landed) for BFT signing payloads. M6.3 is
-unblocked.
+M6.1 depends on M4a (landed) and M8 (landed). Full §16 coverage of steps 9–16
+also needs M3b.3. M6.2 depends on M4a (landed). M6.3 is unblocked.
 
 ---
 
@@ -354,7 +351,7 @@ with its checkpoint sequence; a peer responds with state plus a
   `RingMembership` view mapping position → NodeId for primary rotation.
 - Tests: full 5-of-7 commit, view change on primary failure, checkpoint
   convergence, state transfer, DEGRADED entry and exit.
-- Also fulfil `bft.rs:543`'s carry-forward: verify the contents of
+- Also fulfil the M4a carry-forward: verify the contents of
   `bft_new_view`'s opaque `view_change_messages`, `prepared_messages`, and
   `checkpoint_messages`.
 
@@ -373,17 +370,16 @@ M2b interface for "how does the driver learn current ring membership".
 ## M7 — Hardening (§11, §19.4) — PARTIALLY LANDED EARLY
 
 **Status: roughly half this list was already built during M5/M8.** The
-original milestone text understates what exists; the completed items are
-listed first so they are not redone.
+completed items are listed first so they are not redone.
 
 ### Already done
 - **Flow control frames.** `flow.rs` has the codec (`BLOCK_KIND` 0x01,
   `UNBLOCK_KIND` 0x02, `WINDOW_KIND` 0x03, `FlowFrame`, `dispatch_flow`) *and*
   the state machine (`FlowStateMachine` with `local_block`, `local_unblock`,
   `local_window`, `apply_remote`, `try_reserve_send`). All re-exported from
-  `lib.rs`. The milestone's claim of "no codec, no state machine" is stale.
-- **Pin eviction.** `quip-storage/src/pins.rs` evicts by lowest `ref_count` then age, with the
-  test `eviction_prefers_low_ref_count_then_age`.
+  `lib.rs`.
+- **Pin eviction.** `quip-storage/src/pins.rs` evicts by lowest `ref_count`
+  then age, with the test `eviction_prefers_low_ref_count_then_age`.
 - **Range length cap — codec half.** `FetchRange::check_length` exists.
 
 ### Outstanding
@@ -419,7 +415,7 @@ listed first so they are not redone.
 `constants.rs`, while §19.4 says 256. One of the two is wrong.
 
 ### Dependencies
-M6 for the integration harness that exercises these.
+M6 (landed) provides the integration harness that exercises these.
 
 ### Size
 ~1500–2000 lines spread across several modules.
@@ -428,48 +424,28 @@ M6 for the integration harness that exercises these.
 
 ## Defect register
 
-Open defects that are not owned by a single milestone. Fix D1 and D2 first —
-D2 is in the M6.3 gate and D1 is a live spec violation.
+### D1 — Coral cluster-level discriminants — RESOLVED
+Commit `51fcc51` inverted `LOCAL_CLUSTER` and `GLOBAL_CLUSTER` in `dht.rs` to
+match §13 (Local = 2, Regional = 1, Global = 0) and `ClusterLevel`. The
+`assert_ne!`-only test was replaced with an `assert_eq!` test on the spec
+values, plus the original distinctness check kept alongside.
 
-### D1 — Coral cluster-level discriminants are inverted vs the spec
-`dht.rs` defines `LOCAL_CLUSTER = 0`, `REGIONAL_CLUSTER = 1`,
-`GLOBAL_CLUSTER = 2`. §13 numbers them the other way: **Local = 2,
-Regional = 1, Global = 0**. The file documents the discrepancy and promises a
-future revision will invert them, but keeps the wrong values.
-
-Worse, the guard cannot catch it: the tests are `assert_ne!` between the three
-constants, which passes under either convention. Replace with assertions on
-the spec values.
-
-Severity: high — a CDC discriminant that misclassifies every cluster, with a
-test that structurally cannot detect the misclassification.
-
-### D2 — `quip-net` does not build `no_std`
-`quip-core` and `quip-storage` build fine with `--no-default-features`;
-`quip-net` fails with three errors:
-
-```
-cannot find macro `vec` in this scope      discovery.rs:391
-cannot find macro `vec` in this scope      discovery.rs:602
-cannot find type `String` in this scope    sync.rs:682
-```
-
-The first two need `use alloc::vec;`. The third is on D6's dead
-`error_text` — deleting it fixes the error outright. Every crate's `lib.rs`
-advertises `no_std + alloc`, and M6.3 puts it in the CI matrix, so this is the
-gap between the documented contract and reality.
+### D2 — `quip-net` `no_std` build — RESOLVED
+Commit `0a95fb6` added `use alloc::vec;` to `discovery.rs`. The `no_std` job
+in CI now passes. Every crate's `lib.rs` advertises `no_std + alloc`, and
+that contract now holds.
 
 ### D3 — Handshake framing is undefined, and works by accident
 §4 says only that the handshake is "a CBOR array defined by the following
 CDDL" — it never says whether the array carries the varint length prefix that
 every other reliable-stream message uses.
 
-The code sends it **raw** (`transport.rs:662`, no `encode_message`) and reads
-it by pulling **one byte at a time** until `Handshake::from_bytes` succeeds
-(`transport.rs:1084–1099`). So T0's first message is self-delimiting by trial
-parse, while every subsequent message is length-prefixed. It works because a
-varint prefix byte in front of a CBOR array normally fails to parse *as an
-array*, so the trial loop skips past it.
+The code sends it **raw** (`transport.rs`, no `encode_message`) and reads it
+by pulling **one byte at a time** until `Handshake::from_bytes` succeeds. So
+T0's first message is self-delimiting by trial parse, while every subsequent
+message is length-prefixed. It works because a varint prefix byte in front of
+a CBOR array normally fails to parse *as an array*, so the trial loop skips
+past it.
 
 Severity: high for interoperability. Two peers running this implementation
 can never expose it. Resolve as **S5**.
@@ -477,31 +453,29 @@ can never expose it. Resolve as **S5**.
 ### D4 — T2 stream cap disagrees with the spec
 `T2_MAX_STREAMS = 16` in `quip-net/src/constants.rs`; §19.4 says 256. See M7.
 
-### D5 — `relay_response` cannot be attributed to a target
+### D5 — `relay_response` cannot be attributed to a target — RESOLVED IN CODE
 `RelayDiscovery` carries `{requester, target, max_hops, timestamp,
 signature}`; `RelayResponse` carries `{requester, relays, timestamp,
-signature}` and **drops the target**. A receiver therefore cannot tell which
-outstanding discovery a response answers, so the caller must supply it
-out-of-band. **Resolved in the code**: `target` is threaded through
+signature}` and drops the target. `target` is threaded through
 `DhtResult::Relays` and `on_peer_message`, with
-`on_relay_response_unattributed` as the fallback when it cannot be matched.
-Worth still pinning in the draft as **S6**.
+`on_relay_response_unattributed` as the fallback. Worth still pinning in the
+draft as **S6**.
 
-### D6 — Dead function that breaks the `no_std` build
-`sync.rs:682` `pub fn error_text(code, text, id) -> String` has no callers
-anywhere in the workspace and discards its own `id` parameter (`let _ = id;`).
-It exists only to fail D2. Delete it.
+### D6 — Dead function that broke the `no_std` build — RESOLVED
+Commit `0a95fb6` deleted `sync.rs`'s `error_text`, which had no callers and
+discarded its own `id` parameter.
 
-### D7 — No version control, no licence files
-There is no `.git` in the workspace, so there is no history, no blame, and no
-way to roll back a bad edit — which is why the M3b break could only be fixed
-forward. Every manifest declares `license = "MIT OR Apache-2.0"` but no
-`LICENSE` file exists. There is also no `.gitignore`, hence the stale
-`quip-core/target/` and `quip-core/Cargo.lock` left from when `quip-core` was
-standalone.
+### D7 — No version control, no licence files — RESOLVED
+Repository initialised; nine commits on `main`. `LICENSE-MIT` and
+`LICENSE-APACHE` added, matching the `MIT OR Apache-2.0` declared in every
+manifest. `.gitignore` committed with `target/`. Pushed to
+`github.com/jjmututi/quip`.
 
-**Initialise a repository before the next milestone.** This is the cheapest
-risk reduction available on this project.
+The stale `quip-core/target/` and `quip-core/Cargo.lock` from the pre-workspace
+era were removed before the initial import.
+
+**Still outstanding:** decide the fate of `quip-core/quip-core.txt` and
+`quip-core/crate_dump.sh` (see Housekeeping).
 
 ---
 
@@ -512,8 +486,8 @@ choice, and which should be resolved in the text.
 
 - **S1 — `RelayHop.encrypted_key`.** "Encrypted with the next hop's public
   key", but the scheme is never named. Presumably ECDH + X25519 + AEAD. Until
-  it is pinned, `build_relay_chain` cannot go past one hop and leaves the field
-  empty.
+  it is pinned, `build_relay_chain` cannot go past one hop and leaves the
+  field empty.
 - **S2 — How the driver obtains QUIC path validation.** §12.3 says
   connectivity checks use QUIC path validation but not how a driver with no
   `Endpoint` performs one. In practice: open a throwaway connection per
@@ -540,6 +514,10 @@ choice, and which should be resolved in the text.
 Every milestone citation in the source, so the code and this file cannot drift
 apart silently. If you add a tag, add it here.
 
+**Note on positions.** `transport.rs` grew by ~500 lines in M6.1, so tag
+positions in that file have shifted. The values below reflect the tree at
+commit `3a52c0b`; re-grep if you move a tagged region.
+
 | Location | Tag | Refers to |
 |---|---|---|
 | `quip-net/src/lib.rs:16` | M2, M3 | `nat` / `dht` module description |
@@ -554,66 +532,85 @@ apart silently. If you add a tag, add it here.
 | `quip-net/src/nat.rs:1108` | M3b.3 | `TODO`: infer `port_preservation` |
 | `quip-net/src/nat_driver.rs:153` | M3b.2 | send on the one connection passed in |
 | `quip-net/src/transport.rs:3` | M5 | "M5 complete" status header |
-| `quip-net/src/transport.rs:1247` | M5.2 | handshake/capability test group |
-| `quip-net/src/transport.rs:1324` | M5.3 | T0/T1/T3 send-receive test group |
-| `quip-net/src/transport.rs:1484` | M5.4 | Key Claim test group |
+| `quip-net/src/transport.rs:~1247` | M5.2 | handshake/capability test group |
+| `quip-net/src/transport.rs:~1324` | M5.3 | T0/T1/T3 send-receive test group |
+| `quip-net/src/transport.rs:~1484` | M5.4 | Key Claim test group |
+| `quip-net/src/transport.rs` (M6.1 section) | M6.1 | §16 integration tests |
 | `quip-net/src/conn.rs:6` | M5 | driver owns the QUIC connection |
 | `quip-net/src/conn.rs:66` | M5 | driver consults `flow_state` |
 | `quip-net/src/handshake.rs:562` | M8 | negotiated-set re-encode hot path |
 | `quip-net/src/cluster.rs:109` | M2b.1 | `ClusterInfo` after signature verification |
-| `quip-net/src/bft.rs:543` | M4b | opaque `new_view` contents verified by the driver |
+| `quip-net/src/bft.rs` (module docs) | M4b | opaque `new_view` contents verified by the driver |
 
-**M0, M1, M4, M6 and M7 are cited nowhere in the code.** Their definitions
+**M0, M1, M4, M6, and M7 are cited nowhere in the code.** Their definitions
 live only in this file. Either tag them when their work lands or accept that
 the numbering has holes at those positions.
 
 **Not yet tagged but milestone-owned:** `flow.rs` (M7, landed early),
 `range.rs` (M8 + M7), `rate.rs` (M7, unwired), `discovery.rs` (M2b),
-`coral.rs` (M2), `message.rs` BFT arms (M4a), `bft.rs` (M4a). Tagging these
-on the next touch is cheap and makes the index complete.
+`coral.rs` (M2), `message.rs` BFT arms (M4a), `bft.rs` (M4a), `xtask/` (M6.2),
+`.github/workflows/ci.yml` (M6.3). Tagging these on the next touch is cheap
+and makes the index complete.
 
 ---
 
 ## Suggested order
 
-1. **Fix D2 and D6.** Delete `error_text`; add `use alloc::vec;` to
-   `discovery.rs`. Three lines. This clears the `no_std` job before CI exists.
-2. **Fix D1.** One file plus tests that assert the spec values instead of
-   `assert_ne!`. Do it before other work depends on cluster levels.
-3. **M6.3 — CI.** Config only, fully unblocked, and it closes the gap
-   recorded under **Build status**.
-4. **M6.1 — integration harness.** The only demo-critical item, and its sole
-   code dependency (M4a) has landed. Promote `transport.rs`'s
-   `handshake_pair`/`poll_until_event` into a shared fixture.
-5. **M6.2 — signing vectors**, minus the `FrostRingSig` case if it cannot land.
-6. **Finish M3b.2's relay emission**, or M4b, depending on whether the demo
-   needs §16 steps 9–14.
-7. **M7.** Re-check this list first — three of its items are already done.
+M6 is complete. The remaining work is post-demo and can be taken in any order
+that suits; the sequence below reflects dependency and risk.
 
-Do not start M4b before M6.3. A 2,500-line consensus state machine landing
-into an unversioned tree with no CI is how the M3b break happened.
+1. **M7 — hardening, starting with rate limiting.** `rate.rs` is complete but
+   has zero call sites. Wiring it is the highest-value single item on the
+   remaining list: it closes a §19.4 gap, exercises a module that no test
+   currently reaches in anger, and each enforcement point is independently
+   verifiable. The bao cache, quarantine on range, and the T1 stream state
+   machine follow.
+
+2. **Spec updates S1–S7.** Cheap, text-only, and closes the gap between the
+   draft and the code. S5 (handshake framing) and S6 (`relay_response` target)
+   are the ones that affect the wire format; the rest are clarifications.
+
+3. **M3b.2 completion.** Emit `Outbound::DiscoverRelays` from the state
+   machine, add the §12.1 re-announce scheduler, and finish M3b.3's candidate
+   probing. This unlocks §16 steps 9–14 for integration coverage.
+
+4. **M4b — BFT driver.** Largest remaining item at ~2000–2500 lines. Landing
+   it after M7 means the driver is added to a codebase that already enforces
+   its rate limits and has a settled T1 state machine.
+
+Do not start M4b before M7. A 2,500-line consensus state machine landing into
+a tree that has not exercised its own rate limiter is how the M3b break
+happened.
 
 ---
 
 ## Housekeeping
 
-Cheap, independent of any milestone:
-
-- **`git init`.** Highest-value action on this list. See D7.
-- **`LICENSE` + `LICENSE-APACHE`**, matching the `MIT OR Apache-2.0` already
-  declared in all three manifests. A reference implementation for an IETF
-  draft cannot ship without them.
+### Done
+- **`git init` and first push.** Nine commits on `main` at
+  `github.com/jjmututi/quip`. See D7.
+- **`LICENSE-MIT` + `LICENSE-APACHE`**, matching the `MIT OR Apache-2.0`
+  declared in all three manifests.
 - **`.gitignore`** with `target/`.
-- **Delete `quip-core/target/` and `quip-core/Cargo.lock`** — leftovers from
-  when `quip-core` was a standalone crate. The workspace has one lockfile at
-  the root.
+- **`quip-core/target/` and `quip-core/Cargo.lock`** deleted before the
+  initial import.
+- **Draft at repository root.** `draft-mututi-quip-03.xml` versioned alongside
+  the code.
+- **CI workflow** at `.github/workflows/ci.yml`.
+
+### Outstanding
 - **Decide the fate of `quip-core/quip-core.txt` and
   `quip-core/crate_dump.sh`.** The dump is a 68 KB concatenation of the crate
   and is regenerated by the script; keeping either in-tree means the diff of
-  every source change includes a stale copy.
-- **Keep the draft at the repository root.** `draft-mututi-quip-03.xml` was
-  moved there (288 KB) and is the normative artefact every status claim in
-  this file is measured against — it needs to be versioned alongside the code
-  that implements it.
+  every source change includes a stale copy. Either commit both with a note
+  that the dump is regenerated, or remove both and rely on `cargo doc` and the
+  Git history.
+- **Add repo description and topics** on GitHub. Suggested: description "QUIP
+  reference implementation — a brokerless federation protocol over QUIC";
+  topics `quic`, `p2p`, `federation`, `rust`, `ietf`, `dht`, `bft`,
+  `content-addressing`.
+- **Tag the M6.1 state.** `git tag v0.1.0-m6 && git push origin v0.1.0-m6`
+  marks the commit where the demo-critical list closed. Any future regression
+  can be diagnosed against it.
 - **A `<link>` from each crate's `lib.rs` to this file** would make the
   milestone tags discoverable from the source rather than only the reverse.

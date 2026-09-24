@@ -56,13 +56,67 @@ use crate::error::{Error, Result};
 use alloc::vec::Vec;
 use quip_core::cbor::{decode, encode, CborValue};
 use quip_core::cid::{CidOrV1, HashAlgo};
+use quip_core::time::Timestamp;
 
 /// Largest `length` we will serve in a single [`RangeResponse`].
+///
+/// The `bao` chunk tree cache lives in
+/// [`crate::bao_cache`].
 pub const MAX_RANGE_IN_SINGLE_RESPONSE: u64 = (MAX_MESSAGE_SIZE as u64 - 1024) / 2;
 
 /// True if `cid` is a BLAKE3 identifier.
 pub fn is_blake3(cid: &CidOrV1, negotiated: HashAlgo) -> bool {
     cid.algo().unwrap_or(negotiated) == HashAlgo::Blake3
+}
+
+// -------------------------------------------------------------------------
+// Quarantine policy (§8.2, §19.3)
+// -------------------------------------------------------------------------
+
+/// The quarantine policy a responder applies before serving a range.
+///
+/// §8.2: "A quarantined CID **MUST NOT** be served via `range_response`,
+/// even if the requester knows the exact CID. Implementations **SHOULD**
+/// reject such requests with E_QUARANTINED." §A.4 adds that a responder
+/// **MUST** apply "the same quarantine policy to range responses as to
+/// whole-resource reads".
+///
+/// This trait is that boundary. It follows the `DhtClient` pattern in
+/// `nat_driver`: `quip-net` defines the interface and the caller supplies
+/// the state. It is implemented for
+/// [`quip_storage::QuarantineStore`], the same store
+/// [`QuipStore`](quip_storage::QuipStore) consults for whole-resource
+/// reads, so the two cannot disagree.
+///
+/// [`NoQuarantine`] is for callers that do not support the governance
+/// primitive, which §A.4 makes the condition for the requirement.
+pub trait QuarantineCheck {
+    /// True if `cid` must not be served at `now`.
+    ///
+    /// `now` is an argument rather than a clock read because notices
+    /// expire: `QuarantineStore` treats `valid_until == 0` as permanent
+    /// and any other value as a deadline.
+    fn is_quarantined(&self, cid: &CidOrV1, now: Timestamp) -> bool;
+}
+
+impl QuarantineCheck for quip_storage::QuarantineStore {
+    fn is_quarantined(&self, cid: &CidOrV1, now: Timestamp) -> bool {
+        quip_storage::QuarantineStore::is_quarantined(self, cid, now)
+    }
+}
+
+/// A [`QuarantineCheck`] that quarantines nothing.
+///
+/// For deployments that do not support the governance primitive, which is
+/// the condition §A.4 attaches to the requirement. A responder that *does*
+/// support it must use [`quip_storage::QuarantineStore`], not this.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct NoQuarantine;
+
+impl QuarantineCheck for NoQuarantine {
+    fn is_quarantined(&self, _cid: &CidOrV1, _now: Timestamp) -> bool {
+        false
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -206,27 +260,22 @@ impl RangeResponse {
 #[cfg(feature = "crypto")]
 pub mod bao_support {
     use super::*;
+    use crate::bao_cache::BaoCache;
     use crate::error::{Error, Result};
     use alloc::format;
     use alloc::vec::Vec;
     use std::io::{Cursor, Read};
 
-    /// Build a proof for `payload[offset..offset+length]`.
+    /// Bytes reserved for CBOR and field overhead when checking a
+    /// response against [`MAX_MESSAGE_SIZE`].
+    const RESPONSE_OVERHEAD: usize = 512;
+
+    /// Validate a range against `payload` and the single-response cap.
     ///
-    /// Returns a `(slice, proof)` pair suitable for [`RangeResponse`]. The
-    /// `slice` is the raw bytes; the `proof` is a bao-encoded stream that
-    /// a client can feed to [`verify_response`].
-    ///
-    /// # Cost
-    ///
-    /// Encodes the entire payload on every call, which is O(n) in the
-    /// resource size. The spec (§8.2) permits this and suggests caching
-    /// the encoded stream alongside the blob for production deployments.
-    pub fn extract_proof(
-        payload: &[u8],
-        offset: u64,
-        length: u64,
-    ) -> Result<(Vec<u8>, Vec<u8>)> {
+    /// Returns the half-open `[start, end)` byte interval. Shared by
+    /// [`extract_proof`] and [`extract_proof_cached`] so that the cached
+    /// and uncached paths reject exactly the same inputs.
+    fn checked_range(payload: &[u8], offset: u64, length: u64) -> Result<(usize, usize)> {
         if length == 0 {
             return Err(Error::RangeInvalid("range length must be non-zero"));
         }
@@ -241,8 +290,45 @@ pub mod bao_support {
         if end > payload.len() as u64 {
             return Err(Error::RangeInvalid("range extends past the resource"));
         }
+        Ok((offset as usize, end as usize))
+    }
 
-        let slice = payload[offset as usize..end as usize].to_vec();
+    /// A proof produced by [`extract_proof_cached`].
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub struct ExtractedProof {
+        /// The raw payload bytes for the requested range.
+        pub slice: Vec<u8>,
+        /// The bao-encoded slice, ready for a [`RangeResponse`].
+        pub proof: Vec<u8>,
+        /// True if the chunk tree was not cached and had to be built on
+        /// this call.
+        ///
+        /// §8.2 says a responder that recomputes **SHOULD** rate-limit
+        /// such requests. This flag is the signal for that decision;
+        /// `RateLimiter::check_at_most` is the intended tool.
+        pub recomputed: bool,
+    }
+
+    /// Build a proof for `payload[offset..offset+length]`.
+    ///
+    /// Returns a `(slice, proof)` pair suitable for [`RangeResponse`]. The
+    /// `slice` is the raw bytes; the `proof` is a bao-encoded stream that
+    /// a client can feed to [`verify_response`].
+    ///
+    /// # Cost
+    ///
+    /// Encodes the entire payload on every call, which is O(n) in the
+    /// resource size. This is the "recompute on demand" path that §8.2
+    /// permits. [`extract_proof_cached`] is the caching path §8.2 prefers
+    /// and produces byte-identical proofs.
+    pub fn extract_proof(
+        payload: &[u8],
+        offset: u64,
+        length: u64,
+    ) -> Result<(Vec<u8>, Vec<u8>)> {
+        let (start, end) = checked_range(payload, offset, length)?;
+
+        let slice = payload[start..end].to_vec();
 
         // bao's SliceExtractor reads from the *encoded* stream, not the
         // raw bytes: the encoding begins with an 8-byte length prefix
@@ -256,14 +342,122 @@ pub mod bao_support {
             .read_to_end(&mut proof)
             .map_err(|e| Error::Transport(format!("bao extract: {e}")))?;
 
-        let overhead_estimate = 512usize;
-        if slice.len() + proof.len() + overhead_estimate > MAX_MESSAGE_SIZE {
+        if slice.len() + proof.len() + RESPONSE_OVERHEAD > MAX_MESSAGE_SIZE {
             return Err(Error::RangeInvalid(
                 "range response exceeds MAX_MESSAGE_SIZE",
             ));
         }
 
         Ok((slice, proof))
+    }
+
+    /// Build a proof using a cached chunk tree, per §8.2 (M7).
+    ///
+    /// On a hit the tree is reused and the call costs
+    /// `O(log(resource_size))`. On a miss the tree is built once, at
+    /// `O(payload.len())`, and cached, so the next request for the same
+    /// resource is a hit — the behaviour §8.2 asks for when it says a
+    /// responder **SHOULD** "cache the tree after the first
+    /// recomputation".
+    ///
+    /// A tree too large for the cache is not an error: the call falls back
+    /// to [`extract_proof`], so wiring a cache never makes a responder
+    /// serve less than it would have without one.
+    ///
+    /// # Trust boundary
+    ///
+    /// `payload` must be the bytes addressed by `cid`, for the reason
+    /// documented on [`BaoCache`]: re-hashing per request would cost the
+    /// `O(n)` this function exists to avoid. The digest is checked when
+    /// the tree is built, so a mismatch is an error on a miss; on a hit
+    /// the caller's assertion is taken as given.
+    pub fn extract_proof_cached(
+        cache: &mut BaoCache,
+        cid: &CidOrV1,
+        payload: &[u8],
+        offset: u64,
+        length: u64,
+        negotiated: HashAlgo,
+        now: Timestamp,
+    ) -> Result<ExtractedProof> {
+        if !super::is_blake3(cid, negotiated) {
+            return Err(Error::RangeInvalid("range CID is not BLAKE3"));
+        }
+        let (start, end) = checked_range(payload, offset, length)?;
+
+        // A hit requires the digest and the payload length to agree.
+        let mut recomputed = false;
+        if cache.get(cid, payload.len() as u64, now).is_none() {
+            recomputed = true;
+            // `Ok(false)` means the tree was declined as oversized, which
+            // the fallback below handles.
+            cache.insert(cid, payload, now)?;
+        }
+
+        let outboard = match cache.peek(cid) {
+            Some(entry) => entry.outboard(),
+            None => {
+                let (slice, proof) = extract_proof(payload, offset, length)?;
+                return Ok(ExtractedProof {
+                    slice,
+                    proof,
+                    recomputed,
+                });
+            }
+        };
+
+        let slice = payload[start..end].to_vec();
+        let mut extractor = ::bao::encode::SliceExtractor::new_outboard(
+            Cursor::new(payload),
+            Cursor::new(outboard),
+            offset,
+            length,
+        );
+        let mut proof = Vec::with_capacity(slice.len() + RESPONSE_OVERHEAD);
+        extractor
+            .read_to_end(&mut proof)
+            .map_err(|e| Error::Transport(format!("bao extract: {e}")))?;
+
+        if slice.len() + proof.len() + RESPONSE_OVERHEAD > MAX_MESSAGE_SIZE {
+            return Err(Error::RangeInvalid(
+                "range response exceeds MAX_MESSAGE_SIZE",
+            ));
+        }
+
+        Ok(ExtractedProof {
+            slice,
+            proof,
+            recomputed,
+        })
+    }
+
+    /// Serve a range, applying the quarantine policy first (§8.2, §19.3).
+    ///
+    /// This is the entry point a responder should call. It consults
+    /// `quarantine` before touching the cache, so a quarantined CID is
+    /// neither served nor given a chunk tree, and it fails with
+    /// [`ErrorCode::Quarantined`](quip_core::ErrorCode::Quarantined)
+    /// (0x10) as §8.2 recommends.
+    ///
+    /// [`extract_proof_cached`] is the same operation without the policy.
+    /// A responder that supports the governance primitive **MUST NOT**
+    /// call it directly: §8.2 makes the quarantine check mandatory, not
+    /// optional.
+    #[allow(clippy::too_many_arguments)]
+    pub fn serve_range<Q: QuarantineCheck>(
+        cache: &mut BaoCache,
+        quarantine: &Q,
+        cid: &CidOrV1,
+        payload: &[u8],
+        offset: u64,
+        length: u64,
+        negotiated: HashAlgo,
+        now: Timestamp,
+    ) -> Result<ExtractedProof> {
+        if quarantine.is_quarantined(cid, now) {
+            return Err(Error::Storage(quip_storage::Error::Quarantined));
+        }
+        extract_proof_cached(cache, cid, payload, offset, length, negotiated, now)
     }
 
     /// Verify a [`RangeResponse`] against the expected CID.
@@ -306,6 +500,8 @@ pub mod bao_support {
 mod tests {
     use super::*;
     use alloc::vec;
+    use quip_core::messages::{IndividualRingSig, QuarantineNotice, RingSignature};
+    use quip_storage::QuarantineStore;
 
     fn cid_blake3(payload: &[u8]) -> CidOrV1 {
         let hash = ::blake3::hash(payload);
@@ -406,13 +602,83 @@ mod tests {
         assert!(is_blake3(&raw, HashAlgo::Blake3));
         assert!(!is_blake3(&raw, HashAlgo::Sha256));
     }
+    // ---- quarantine policy (§8.2, §19.3) ----
+
+    fn raw_cid(b: u8) -> CidOrV1 {
+        CidOrV1::Raw(quip_core::cid::Cid([b; 32]))
+    }
+
+    fn notice(tcid: u8, affected: &[u8], valid_until_ms: u64) -> QuarantineNotice {
+        QuarantineNotice {
+            trusted_cid: raw_cid(tcid),
+            affected_cids: affected.iter().map(|&b| raw_cid(b)).collect(),
+            reason: "dmca".into(),
+            timestamp: Timestamp::from_millis(1_000),
+            valid_until: Timestamp::from_millis(valid_until_ms),
+            ring_signature: RingSignature::Individual(IndividualRingSig {
+                signatures: vec![[0xaa; 64]],
+                signers: vec![[0x01; 32]],
+            }),
+        }
+    }
+
+    #[test]
+    fn no_quarantine_never_quarantines() {
+        let q = NoQuarantine;
+        assert!(!q.is_quarantined(&raw_cid(1), Timestamp::from_millis(0)));
+        assert!(!q.is_quarantined(&raw_cid(1), Timestamp::from_millis(u64::MAX)));
+    }
+
+    #[test]
+    fn quarantine_store_impl_matches_storage() {
+        // The point of the impl is that `quip-net` and `QuipStore` cannot
+        // disagree about what is quarantined. Delegate, do not reimplement.
+        let mut store = QuarantineStore::new();
+        let target = raw_cid(1);
+        let t0 = Timestamp::from_millis(2_000);
+
+        assert!(!store.is_quarantined(&target, t0));
+        assert!(!QuarantineCheck::is_quarantined(&store, &target, t0));
+
+        store.add_notice(notice(1, &[2], 0), t0).unwrap();
+
+        assert!(store.is_quarantined(&target, t0));
+        assert!(QuarantineCheck::is_quarantined(&store, &target, t0));
+        // An affected CID is covered too, not just the trusted CID.
+        assert!(QuarantineCheck::is_quarantined(&store, &raw_cid(2), t0));
+        // An unrelated CID is not.
+        assert!(!QuarantineCheck::is_quarantined(&store, &raw_cid(9), t0));
+    }
+
+    #[test]
+    fn quarantine_check_honours_expiry() {
+        let mut store = QuarantineStore::new();
+        let target = raw_cid(1);
+        let t0 = Timestamp::from_millis(2_000);
+
+        // Valid until t0 + 1000 ms.
+        store
+            .add_notice(notice(1, &[], 3_000), t0)
+            .unwrap();
+
+        assert!(QuarantineCheck::is_quarantined(&store, &target, t0));
+        assert!(!QuarantineCheck::is_quarantined(
+            &store,
+            &target,
+            Timestamp::from_millis(3_000)
+        ));
+    }
+
+
 
     // ---- bao helpers (crypto feature only) ----
 
     #[cfg(feature = "crypto")]
     mod bao_tests {
         use super::*;
-        use crate::range::bao_support::{extract_proof, verified_slice, verify_response};
+        use crate::range::bao_support::{
+            extract_proof, extract_proof_cached, verified_slice, verify_response, ExtractedProof,
+        };
 
         #[test]
         fn extract_and_verify_chunk_aligned_range() {
@@ -596,5 +862,270 @@ mod tests {
             let out = verified_slice(&resp, HashAlgo::Blake3).unwrap();
             assert_eq!(out, slice);
         }
+
+        // ---- cached path (§8.2, M7) ----
+
+        use crate::bao_cache::BaoCache;
+        use quip_core::time::Timestamp;
+
+        fn now() -> Timestamp {
+            Timestamp::from_millis(1_700_000_000_000)
+        }
+
+        fn response(cid: CidOrV1, offset: u64, length: u64, out: ExtractedProof) -> RangeResponse {
+            RangeResponse {
+                resource_id: b"r".to_vec(),
+                cid,
+                offset,
+                length,
+                bytes: out.slice,
+                proof: out.proof,
+            }
+        }
+
+        #[test]
+        fn cached_proof_verifies_with_the_unchanged_verifier() {
+            let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+
+            let out =
+                extract_proof_cached(&mut cache, &cid, &payload, 100, 200, HashAlgo::Blake3, now())
+                    .unwrap();
+
+            // The client side is untouched by this milestone: the same
+            // verifier that accepted the uncached proofs must accept this.
+            let resp = response(cid, 100, 200, out);
+            let verified = verified_slice(&resp, HashAlgo::Blake3).unwrap();
+            assert_eq!(verified, payload[100..300].to_vec());
+        }
+
+        #[test]
+        fn cached_and_uncached_proofs_are_byte_identical() {
+            let payload: Vec<u8> = (0u8..=255).cycle().take(8192).collect();
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+
+            let (uncached_slice, uncached_proof) = extract_proof(&payload, 1234, 500).unwrap();
+            let cached = extract_proof_cached(
+                &mut cache,
+                &cid,
+                &payload,
+                1234,
+                500,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap();
+
+            assert_eq!(cached.slice, uncached_slice);
+            assert_eq!(cached.proof, uncached_proof, "wire bytes must not move");
+        }
+
+        #[test]
+        fn second_request_for_a_resource_is_a_cache_hit() {
+            let payload: Vec<u8> = vec![9; 4096];
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+
+            let first =
+                extract_proof_cached(&mut cache, &cid, &payload, 0, 256, HashAlgo::Blake3, now())
+                    .unwrap();
+            assert!(first.recomputed, "first request must build the tree");
+
+            let second = extract_proof_cached(
+                &mut cache,
+                &cid,
+                &payload,
+                1024,
+                256,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap();
+            assert!(!second.recomputed, "second request must reuse the tree");
+
+            let stats = cache.stats();
+            assert_eq!(stats.hits, 1);
+            assert_eq!(stats.misses, 1);
+            assert_eq!(stats.entries, 1);
+        }
+
+        #[test]
+        fn cached_path_matches_uncached_across_chunk_boundaries() {
+            let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+
+            let cases: [(u64, u64); 5] =
+                [(0, 1), (1023, 2), (1024, 1024), (2048, 2048), (4095, 1)];
+            for (offset, length) in cases {
+                let (expected_slice, expected_proof) =
+                    extract_proof(&payload, offset, length).unwrap();
+                let got = extract_proof_cached(
+                    &mut cache,
+                    &cid,
+                    &payload,
+                    offset,
+                    length,
+                    HashAlgo::Blake3,
+                    now(),
+                )
+                .unwrap();
+                assert_eq!(got.slice, expected_slice, "slice at {offset}+{length}");
+                assert_eq!(got.proof, expected_proof, "proof at {offset}+{length}");
+            }
+        }
+
+
+        #[test]
+        fn cached_path_rejects_the_same_inputs_as_uncached() {
+            let payload: Vec<u8> = vec![3; 1024];
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+
+            let cases: [(u64, u64); 4] = [
+                (0, 0),                                // zero length
+                (1000, 100),                           // extends past the resource
+                (1024, 1),                             // starts at the end
+                (0, MAX_RANGE_IN_SINGLE_RESPONSE + 1), // over the single-response cap
+            ];
+            for (offset, length) in cases {
+                let uncached = extract_proof(&payload, offset, length).is_err();
+                let cached = extract_proof_cached(
+                    &mut cache,
+                    &cid,
+                    &payload,
+                    offset,
+                    length,
+                    HashAlgo::Blake3,
+                    now(),
+                )
+                .is_err();
+                assert!(uncached, "uncached should reject {offset}+{length}");
+                assert_eq!(cached, uncached, "paths disagree on {offset}+{length}");
+            }
+
+            // A SHA-256 CID is not range-fetchable.
+            let sha = cid_sha256(&payload);
+            assert!(extract_proof_cached(
+                &mut cache,
+                &sha,
+                &payload,
+                0,
+                32,
+                HashAlgo::Sha256,
+                now(),
+            )
+            .is_err());
+            assert!(cache.is_empty(), "a rejected request must not populate");
+        }
+
+        #[test]
+        fn cached_path_errors_when_the_payload_does_not_match_the_cid() {
+            let payload: Vec<u8> = vec![4; 4096];
+            let other: Vec<u8> = vec![5; 4096];
+            let mut cache = BaoCache::new();
+
+            // On a miss the tree is built for `cid`, so a payload that does
+            // not hash to it cannot be cached or served.
+            let err = extract_proof_cached(
+                &mut cache,
+                &cid_blake3(&other),
+                &payload,
+                0,
+                64,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap_err();
+            assert!(matches!(err, Error::ProofInvalid(_)), "got {err:?}");
+            assert!(cache.is_empty());
+        }
+
+        #[test]
+        fn oversized_tree_falls_back_and_still_verifies() {
+            let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+            let cid = cid_blake3(&payload);
+            // A cache that cannot hold anything: every tree is declined.
+            let mut cache = BaoCache::with_limits(4, 1, 1);
+
+            let out =
+                extract_proof_cached(&mut cache, &cid, &payload, 0, 128, HashAlgo::Blake3, now())
+                    .unwrap();
+            assert!(out.recomputed);
+            assert!(cache.is_empty(), "nothing should have been cached");
+
+            let resp = response(cid, 0, 128, out);
+            assert_eq!(
+                verified_slice(&resp, HashAlgo::Blake3).unwrap(),
+                payload[0..128].to_vec()
+            );
+        }
+
+        #[test]
+        fn an_evicted_tree_is_rebuilt_and_still_verifies() {
+            let small: Vec<u8> = vec![1; 4096];
+            let big: Vec<u8> = vec![2; 256 * 1024];
+            let small_cid = cid_blake3(&small);
+            let big_cid = cid_blake3(&big);
+
+            // A budget that holds the large tree and nothing else.
+            let big_tree = ::bao::encode::outboard_size(big.len() as u64) as usize;
+            let mut cache = BaoCache::with_limits(8, big_tree, big_tree);
+
+            let first =
+                extract_proof_cached(&mut cache, &small_cid, &small, 0, 64, HashAlgo::Blake3, now())
+                    .unwrap();
+            assert!(first.recomputed);
+            assert!(cache.contains(&small_cid));
+
+            // The larger resource evicts the smaller one.
+            let _ = extract_proof_cached(&mut cache, &big_cid, &big, 0, 64, HashAlgo::Blake3, now())
+                .unwrap();
+            assert!(!cache.contains(&small_cid), "small tree should be evicted");
+
+            // Re-requesting the small resource rebuilds it; the proof still
+            // verifies.
+            let again =
+                extract_proof_cached(&mut cache, &small_cid, &small, 0, 64, HashAlgo::Blake3, now())
+                    .unwrap();
+            assert!(again.recomputed, "an evicted tree must be rebuilt");
+
+            let resp = response(small_cid, 0, 64, again);
+            assert_eq!(
+                verified_slice(&resp, HashAlgo::Blake3).unwrap(),
+                small[0..64].to_vec()
+            );
+        }
+
+        #[test]
+        fn cached_path_serves_the_whole_payload_from_a_hit() {
+            let payload: Vec<u8> = (0u8..=255).cycle().take(2048).collect();
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+
+            // Warm the cache, then take the whole resource from the hit.
+            let _ =
+                extract_proof_cached(&mut cache, &cid, &payload, 0, 1, HashAlgo::Blake3, now())
+                    .unwrap();
+            let out = extract_proof_cached(
+                &mut cache,
+                &cid,
+                &payload,
+                0,
+                2048,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap();
+
+            assert!(!out.recomputed);
+            assert_eq!(out.slice, payload);
+
+            let resp = response(cid, 0, 2048, out);
+            assert!(verify_response(&resp, HashAlgo::Blake3).is_ok());
+        }
+
     }
 }

@@ -86,6 +86,10 @@ pub mod bft;
 #[cfg(feature = "crypto")]
 pub mod crypto;
 
+/// Cached bao chunk trees for range responses (§8.2, App. A.4).
+#[cfg(feature = "crypto")]
+pub mod bao_cache;
+
 /// Optional QUIC runtime binding (§11, §12).
 #[cfg(feature = "quic")]
 pub mod transport;
@@ -173,6 +177,12 @@ pub use bft::{
 
 #[cfg(feature = "crypto")]
 pub use range::bao_support;
+
+#[cfg(feature = "crypto")]
+pub use bao_cache::{
+    BaoCache, CacheStats, CachedTree, DEFAULT_BAO_CACHE_BYTES, DEFAULT_BAO_CACHE_ENTRIES,
+    DEFAULT_BAO_CACHE_ENTRY_BYTES,
+};
 
 #[cfg(feature = "crypto")]
 pub use crypto::{Blake3Hasher, Ed25519Signer, Ed25519Verifier, Sha256Hasher};

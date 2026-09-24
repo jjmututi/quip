@@ -13,8 +13,10 @@
 //! - [`conn`] — connection lifecycle and per-stream bookkeeping.
 //! - [`message`] — the [`Message`] enum and [`dispatch`] router.
 //! - [`sync`], [`bulk`], [`event`], [`resource`], [`query`] — verb codecs.
+//! - [`sync_stream`] — T1 SYNC stream state machine (§11).
 //! - [`nat`], [`dht`] — NAT traversal and Coral DHT state (M2, M3).
 //! - [`rate`] — per-NodeId token-bucket rate limiter.
+//! - [`backoff`] — per-key exponential backoff (§19.4).
 //! - [`constants`] — transport-local constants plus core re-exports.
 //! - [`error`] — transport error type with §15 wire-code mapping.
 //! - [`clock`] — wall-clock helper (only with `std`).
@@ -57,13 +59,17 @@
 
 extern crate alloc;
 
+pub mod backoff;
+pub mod bft;
 pub mod bulk;
 pub mod clock;
 pub(crate) mod codec;
-pub mod coral;
 pub mod conn;
 pub mod constants;
+pub mod coral;
+pub mod cluster;
 pub mod dht;
+pub mod discovery;
 pub mod error;
 pub mod event;
 pub mod flow;
@@ -71,16 +77,14 @@ pub mod frame;
 pub mod handshake;
 pub mod message;
 pub mod nat;
+pub mod nat_wire;
 pub mod query;
+pub mod range;
 pub mod rate;
 pub mod resource;
 pub mod sync;
 pub(crate) mod sync_codec;
-pub mod cluster;
-pub mod discovery;
-pub mod nat_wire;
-pub mod range;
-pub mod bft;
+pub mod sync_stream;
 
 /// Optional crypto back-ends (§5 identities, App. A.3 hashing).
 #[cfg(feature = "crypto")]
@@ -101,6 +105,7 @@ pub mod nat_driver;
 // Crate-level re-exports
 // -------------------------------------------------------------------------
 
+pub use backoff::{BackoffTracker, DEFAULT_BASE_MS, DEFAULT_MAX_KEYS, DEFAULT_MAX_MS};
 pub use bulk::{BulkReceiver, BulkSender, BulkTransferConfig, CHUNK_SIZE};
 #[cfg(feature = "std")]
 pub use clock::unix_now;
@@ -118,7 +123,8 @@ pub use constants::{
 };
 pub use dht::{
     CoralConfig, CrossPathCheck, LookupPathState, LookupProgress, LookupState, RttClass,
-    WitnessRingCache, ACCEPTANCE_PERCENTILE, GLOBAL_CLUSTER, LOCAL_CLUSTER, REGIONAL_CLUSTER,
+    WitnessLoad, WitnessRingCache, ACCEPTANCE_PERCENTILE, DEFAULT_MAX_RINGS, GLOBAL_CLUSTER,
+    LOCAL_CLUSTER, REGIONAL_CLUSTER,
 };
 pub use coral::{
     compare_by_distance, cross_path_consensus, select_witness_ring, xor_distance, CoralLookup,
@@ -156,6 +162,7 @@ pub use sync::{
     Range, RbsrReconciler, RbsrRequest, RbsrResponse, SetRequest, SyncRequest, SyncResponse,
     UnpinRequest, XorFingerprint,
 };
+pub use sync_stream::{SyncEvent, SyncState, SyncStream};
 pub use nat::{
     AddressState, CandidateTable, ConnectivityState, HolePunchRole, HolePunchSession,
     NatConfig, NatEvent, NatKind, NatTraversal, Outbound as NatOutbound, RelayManager,
@@ -168,7 +175,8 @@ pub use nat_wire::{
     NAT_TYPE_SYMMETRIC, NAT_TYPE_UNKNOWN,
 };
 pub use range::{
-    is_blake3, FetchRange, RangeResponse, MAX_RANGE_IN_SINGLE_RESPONSE,
+    is_blake3, split_range, FetchRange, NoQuarantine, QuarantineCheck, RangeResponse,
+    MAX_RANGE_IN_SINGLE_RESPONSE,
 };
 pub use bft::{
     BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPreprepare, BftPrepare,
@@ -177,6 +185,9 @@ pub use bft::{
 
 #[cfg(feature = "crypto")]
 pub use range::bao_support;
+
+#[cfg(feature = "crypto")]
+pub use range::bao_support::RangeResponder;
 
 #[cfg(feature = "crypto")]
 pub use bao_cache::{
@@ -189,7 +200,8 @@ pub use crypto::{Blake3Hasher, Ed25519Signer, Ed25519Verifier, Sha256Hasher};
 
 #[cfg(feature = "quic")]
 pub use transport::{
-    ConnectionDriver, DriverPhase, Endpoint, ClientConfig, ServerConfig, Event, IncomingMessage, Role,
+    ClientConfig, ConnectionDriver, DriverPhase, Endpoint, Event, IncomingMessage, Role,
+    ServerConfig,
 };
 
 #[cfg(feature = "quic")]

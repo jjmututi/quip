@@ -1,9 +1,10 @@
 //! QUIC transport binding for QUIP (spec §12).
 //!
-//! **Status:** M5 complete, plus M7 rate limiting — Endpoint, T0
-//! handshake, T1/T2/T3 stream I/O, per-stream dispatch, the §16 Key
-//! Claim exchange, and per-peer receive-side rate limiting (§19.4).
-//! Flow-control send integration is not yet wired.
+//! **Status:** M5 complete, plus M7 hardening — Endpoint, T0 handshake,
+//! T1/T2/T3 stream I/O, per-stream dispatch, the §16 Key Claim exchange,
+//! per-peer receive-side rate limiting (§19.4), the T1 SYNC stream state
+//! machine (§11), per-peer backoff tracking (§19.4), and a per-connection
+//! T2 stream cap.
 //!
 //! # Architecture
 //!
@@ -91,6 +92,36 @@
 //! currently support. That is a known limitation of the first cut; a
 //! follow-up can hoist the limiter above the driver.
 //!
+//! # T1 SYNC state machine
+//!
+//! The driver holds a [`SyncStream`](crate::sync_stream::SyncStream)
+//! that tracks whether T1 is currently serving a request (§11). The
+//! machine is fed inbound T1 request frames via
+//! `SyncStream::classify_verb`, and returned to `Idle` by the next
+//! successful T1 write while the machine is busy. The state is exposed
+//! via [`ConnectionDriver::sync_stream`] for callers that want to gate
+//! their own T1 writes on it.
+//!
+//! A caller that wants finer control than "any T1 write while busy is a
+//! response" can drive the machine directly through the accessor and
+//! ignore the driver's automatic transitions.
+//!
+//! # Backoff
+//!
+//! A [`BackoffTracker`](crate::backoff::BackoffTracker) records
+//! consecutive protocol errors keyed by peer NodeId. The driver only
+//! records; it does not act. The retry policy belongs to whichever layer
+//! dials the connection, so the tracker is exposed via
+//! [`ConnectionDriver::backoff`] rather than driven automatically.
+//!
+//! # T2 stream cap
+//!
+//! Inbound T2 streams are bounded by a per-connection semaphore of
+//! `T2_MAX_STREAMS` permits. The permit is held for the lifetime of the
+//! stream's read task, so a peer that opens more concurrent bulk streams
+//! than the cap gets backpressure from QUIC until an existing stream
+//! closes. This bounds the driver's per-connection stream bookkeeping.
+//!
 //! # Certificate handling
 //!
 //! QUIP has no WebPKI (§5). TLS is a confidentiality layer, and identity
@@ -98,14 +129,18 @@
 //! The server's certificate is supplied by the caller; the client skips
 //! certificate verification with an internal no-op verifier.
 
+use crate::backoff::BackoffTracker;
 use crate::conn::{Connection as QuipConnection, QuipNetConfig};
-use crate::constants::{ALPN_QUIP, CTRL_STREAM_ID, MAX_DGRAM_BYTES, SYNC_STREAM_ID};
+use crate::constants::{
+    ALPN_QUIP, CTRL_STREAM_ID, MAX_DGRAM_BYTES, SYNC_STREAM_ID, T2_MAX_STREAMS,
+};
 use crate::error::{Error, Result};
 use crate::flow::{dispatch_flow, FlowFrame};
 use crate::frame::{self, Tier};
 use crate::handshake::Capabilities;
 use crate::message::{self, Message};
 use crate::rate::{OperationKind, RateLimiter, RateLimiterConfig};
+use crate::sync_stream::{SyncEvent, SyncStream};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
@@ -122,7 +157,7 @@ use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::net::SocketAddr;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tokio::task::JoinHandle;
 
 /// Maximum handshake size we will buffer before rejecting.
@@ -507,6 +542,21 @@ pub struct ConnectionDriver {
     /// one peer this driver talks to. Sharing a budget across many
     /// connections would require hoisting the limiter above the driver.
     rate_limiter: RateLimiter,
+    /// T1 SYNC stream state machine (§11). Tracks whether T1 is
+    /// currently serving a request.
+    ///
+    /// Fed inbound T1 request frames via
+    /// [`SyncStream::classify_verb`](crate::sync_stream::SyncStream::classify_verb),
+    /// and returned to `Idle` by the next successful T1 write while busy.
+    /// See the module docs for the heuristic.
+    sync_stream: SyncStream,
+
+    /// Per-peer exponential backoff tracker (§19.4).
+    ///
+    /// Records consecutive protocol errors on this connection so the
+    /// caller can throttle a repeat offender. The driver records only;
+    /// the retry policy belongs to whichever layer dials the connection.
+    backoff: BackoffTracker<NodeId>,
 
     // ---- T0 ----
     /// T0 send half, held for the connection's lifetime.
@@ -592,6 +642,8 @@ impl ConnectionDriver {
             local_key_claim,
             peer_key_claim: None,
             rate_limiter: RateLimiter::new(),
+            sync_stream: SyncStream::new(),
+            backoff: BackoffTracker::new(),
             control_send: None,
             control_recv: None,
             sync_send: None,
@@ -672,6 +724,25 @@ impl ConnectionDriver {
         self.rate_limiter = RateLimiter::with_config(config);
     }
 
+    /// The T1 SYNC stream state machine (§11).
+    ///
+    /// Callers that want to gate their own T1 writes on the state can
+    /// consult this; the driver also drives it automatically (see the
+    /// module docs for the heuristic).
+    pub fn sync_stream(&self) -> &SyncStream {
+        &self.sync_stream
+    }
+
+    /// The per-peer backoff tracker (§19.4).
+    ///
+    /// Consult before dialing or retrying against the current peer.
+    /// `BackoffTracker::can_attempt(peer, now)` answers "is this peer
+    /// worth retrying right now?" for a caller that keys on the peer
+    /// NodeId.
+    pub fn backoff(&self) -> &BackoffTracker<NodeId> {
+        &self.backoff
+    }
+
     /// Local IP address of this connection, if the runtime has resolved
     /// it yet.
     pub fn local_ip(&self) -> Option<std::net::IpAddr> {
@@ -726,7 +797,9 @@ impl ConnectionDriver {
         // ---- Handshake + Key Claim path ----
         if self.phase != DriverPhase::Established {
             let events = self.poll_handshake(now).await?;
-            return Ok(self.apply_rate_limits(events, now));
+            let events = self.apply_rate_limits(events, now);
+            self.note_events(&events, now);
+            return Ok(events);
         }
 
         // ---- Established path: drain the event channel ----
@@ -747,7 +820,9 @@ impl ConnectionDriver {
         while let Ok(event) = rx.try_recv() {
             events.push(event);
         }
-        Ok(self.apply_rate_limits(events, now))
+        let events = self.apply_rate_limits(events, now);
+        self.note_events(&events, now);
+        Ok(events)
     }
 
     /// Apply rate limits to `events`.
@@ -807,6 +882,56 @@ impl ConnectionDriver {
             out.push(replacement.unwrap_or(event));
         }
         out
+    }
+
+    /// Feed the T1 SYNC stream state machine and the per-peer backoff
+    /// tracker from `events`.
+    ///
+    /// Called from [`Self::poll`] after rate limiting, so the state
+    /// machine sees only the events the application will see.
+    ///
+    /// A protocol error on T1 puts the state machine into its terminal
+    /// `Error` state; errors on other tiers bump the backoff tracker
+    /// but leave T1 alone.
+    fn note_events(&mut self, events: &[Event], now: Timestamp) {
+        let peer = self.peer_key_claim.as_ref().map(|c| c.node_id);
+
+        for event in events {
+            match event {
+                Event::Frame {
+                    tier: Tier::Sync,
+                    msg,
+                    ..
+                } => {
+                    if let Ok(verb) = msg.verb() {
+                        if let Some(ev) = SyncStream::classify_verb(verb) {
+                            // A rejected transition (request while busy)
+                            // is not itself an error event; the state
+                            // machine ignores it. The application can
+                            // observe the state via `sync_stream()`.
+                            let _ = self.sync_stream.on_event(ev);
+                        }
+                    }
+                }
+                Event::Error {
+                    tier: Some(Tier::Sync),
+                    ..
+                } => {
+                    if let Some(peer) = peer {
+                        self.backoff.record_failure(peer, now);
+                    }
+                    let _ = self.sync_stream.on_event(SyncEvent::ProtocolError(
+                        alloc::string::String::from("T1 stream error"),
+                    ));
+                }
+                Event::Error { .. } => {
+                    if let Some(peer) = peer {
+                        self.backoff.record_failure(peer, now);
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// Drive the §4 handshake and §16 Key Claim exchange to completion,
@@ -948,7 +1073,11 @@ impl ConnectionDriver {
         let conn_t2 = self.conn.clone();
         let tx_t2 = tx.clone();
         self.read_tasks
-            .push(tokio::spawn(accept_bulk_loop(conn_t2, tx_t2)));
+            .push(tokio::spawn(accept_bulk_loop(
+                conn_t2,
+                tx_t2,
+                T2_MAX_STREAMS,
+            )));
 
         let conn_t3 = self.conn.clone();
         let tx_t3 = tx;
@@ -994,11 +1123,20 @@ impl ConnectionDriver {
             }
             Tier::Sync => {
                 let framed = frame::encode_message(&bytes)?;
-                let send = self
-                    .sync_send
-                    .as_mut()
-                    .ok_or_else(|| Error::Transport("T1 not open".into()))?;
-                write_all_cancel_safe(send, &framed).await?;
+                {
+                    let send = self
+                        .sync_send
+                        .as_mut()
+                        .ok_or_else(|| Error::Transport("T1 not open".into()))?;
+                    write_all_cancel_safe(send, &framed).await?;
+                }
+                // If the state machine was waiting on a response, this
+                // write is it. The heuristic treats any successful T1
+                // write while busy as the response; a caller that needs
+                // finer control can drive `sync_stream()` directly.
+                if self.sync_stream.state().is_busy() {
+                    let _ = self.sync_stream.on_event(SyncEvent::ResponseSent);
+                }
             }
             Tier::Bulk => self.send_bulk(msg, &bytes).await?,
             Tier::Event => {
@@ -1191,8 +1329,25 @@ fn route_message(bytes: &[u8], tier: Tier, stream: u64) -> Option<Event> {
 }
 
 /// Accept T2 streams from the peer and spawn a read task for each.
-async fn accept_bulk_loop(conn: quinn::Connection, tx: mpsc::Sender<Event>) {
+///
+/// Concurrency is bounded by a semaphore of `max_streams` permits. A
+/// permit is acquired before `accept_bi` and released when the read task
+/// for that stream ends, so a peer that opens more concurrent bulk
+/// streams than the cap gets QUIC-level backpressure rather than the
+/// driver queueing unboundedly.
+async fn accept_bulk_loop(
+    conn: quinn::Connection,
+    tx: mpsc::Sender<Event>,
+    max_streams: usize,
+) {
+    let permits = Arc::new(Semaphore::new(max_streams.max(1)));
+
     loop {
+        let permit = match permits.clone().acquire_owned().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+
         match conn.accept_bi().await {
             Ok((_send, recv)) => {
                 let stream_id = wire_stream_id(recv.id());
@@ -1204,7 +1359,12 @@ async fn accept_bulk_loop(conn: quinn::Connection, tx: mpsc::Sender<Event>) {
                     return;
                 }
                 let tx = tx.clone();
-                tokio::spawn(read_loop(recv, Tier::Bulk, stream_id, tx));
+                tokio::spawn(async move {
+                    read_loop(recv, Tier::Bulk, stream_id, tx).await;
+                    // Released when the read task exits, freeing a slot
+                    // for the next inbound bulk stream.
+                    drop(permit);
+                });
             }
             Err(_) => return,
         }

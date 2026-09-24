@@ -40,7 +40,7 @@
 //! 1 KiB reserve for CBOR and field overhead. Callers negotiating
 //! `max_range_length` with a peer SHOULD cap it at this value; callers
 //! that need larger ranges MUST split the request across multiple
-//! `fetch_range` calls.
+//! `fetch_range` calls — [`split_range`] computes those calls.
 //!
 //! [`MAX_RANGE_LENGTH`]: quip_core::constants::MAX_RANGE_LENGTH
 //!
@@ -49,6 +49,15 @@
 //! Range fetching is only defined for BLAKE3 CIDs. The codec does not
 //! enforce this — it carries any [`CidOrV1`]. The server and client
 //! helpers check the algorithm; see [`is_blake3`].
+//!
+//! # Quarantine and the responder
+//!
+//! A responder that supports the governance primitive MUST NOT serve a
+//! quarantined CID via `range_response`, even when the requester knows
+//! the CID (§8.2, §19.3), and MUST reject a length above the peer's
+//! negotiated `max_range_length` with `E_RANGE_INVALID`.
+//! [`bao_support::RangeResponder`] is the entry point that enforces
+//! both, and a governance-supporting responder SHOULD use it.
 
 use crate::codec::{as_u64, envelope, fields, verb_of};
 use crate::constants::MAX_MESSAGE_SIZE;
@@ -67,6 +76,41 @@ pub const MAX_RANGE_IN_SINGLE_RESPONSE: u64 = (MAX_MESSAGE_SIZE as u64 - 1024) /
 /// True if `cid` is a BLAKE3 identifier.
 pub fn is_blake3(cid: &CidOrV1, negotiated: HashAlgo) -> bool {
     cid.algo().unwrap_or(negotiated) == HashAlgo::Blake3
+}
+
+// -------------------------------------------------------------------------
+// Range splitting (§19.4)
+// -------------------------------------------------------------------------
+
+/// Split a large range into sub-ranges each within `max_per_request`.
+///
+/// §19.4 asks implementations to bound a single response's size; a caller
+/// that wants more than [`MAX_RANGE_IN_SINGLE_RESPONSE`] bytes issues
+/// multiple `fetch_range` requests and concatenates the responses. This
+/// returns the `(offset, length)` pairs for those requests.
+///
+/// Returns an error if `length` is zero or `max_per_request` is zero.
+pub fn split_range(
+    offset: u64,
+    length: u64,
+    max_per_request: u64,
+) -> Result<Vec<(u64, u64)>> {
+    if length == 0 {
+        return Err(Error::RangeInvalid("range length must be non-zero"));
+    }
+    if max_per_request == 0 {
+        return Err(Error::RangeInvalid("max_per_request must be non-zero"));
+    }
+    let mut out = Vec::new();
+    let mut remaining = length;
+    let mut cursor = offset;
+    while remaining > 0 {
+        let this = remaining.min(max_per_request);
+        out.push((cursor, this));
+        cursor = cursor.saturating_add(this);
+        remaining -= this;
+    }
+    Ok(out)
 }
 
 // -------------------------------------------------------------------------
@@ -337,7 +381,7 @@ pub mod bao_support {
 
         let mut extractor =
             ::bao::encode::SliceExtractor::new(Cursor::new(encoded), offset, length);
-        let mut proof = Vec::with_capacity(slice.len() + 512);
+        let mut proof = Vec::with_capacity(slice.len() + RESPONSE_OVERHEAD);
         extractor
             .read_to_end(&mut proof)
             .map_err(|e| Error::Transport(format!("bao extract: {e}")))?;
@@ -494,6 +538,87 @@ pub mod bao_support {
         verify_response(resp, negotiated)?;
         Ok(resp.bytes.clone())
     }
+
+    // ---------------------------------------------------------------------
+    // RangeResponder — cache + quarantine + negotiated cap (M7)
+    // ---------------------------------------------------------------------
+
+    /// A responder that serves byte ranges subject to three policies.
+    ///
+    /// The three belong together because they are the three things a
+    /// responder must consult before building a `range_response`:
+    ///
+    /// - §8.2 requires the quarantine check on a range request.
+    /// - §8.2 requires rejecting a length above the negotiated cap with
+    ///   `E_RANGE_INVALID`.
+    /// - §A.4 requires caching the chunk tree when possible.
+    ///
+    /// `max_range_length` is the peer's negotiated maximum, from the
+    /// handshake extension `max_range_length` (0x0C). A caller that did
+    /// not negotiate one SHOULD pass
+    /// [`MAX_RANGE_IN_SINGLE_RESPONSE`].
+    ///
+    /// A responder that supports the governance primitive **MUST** use
+    /// this type (or [`serve_range`]) rather than calling
+    /// [`extract_proof_cached`] directly, because §8.2 makes the
+    /// quarantine check mandatory.
+    pub struct RangeResponder<'a, Q: QuarantineCheck> {
+        cache: &'a mut BaoCache,
+        quarantine: &'a Q,
+        max_range_length: u64,
+    }
+
+    impl<'a, Q: QuarantineCheck> RangeResponder<'a, Q> {
+        /// Build a responder.
+        pub fn new(
+            cache: &'a mut BaoCache,
+            quarantine: &'a Q,
+            max_range_length: u64,
+        ) -> Self {
+            Self {
+                cache,
+                quarantine,
+                max_range_length,
+            }
+        }
+
+        /// The maximum length the responder will serve, which is the
+        /// smaller of the negotiated cap and the single-response cap.
+        pub fn effective_max_range_length(&self) -> u64 {
+            self.max_range_length
+                .min(super::MAX_RANGE_IN_SINGLE_RESPONSE)
+        }
+
+        /// Serve a range request.
+        ///
+        /// Checks, in order:
+        /// 1. The requested length against the negotiated and
+        ///    single-response caps (§8.2).
+        /// 2. The quarantine policy (§8.2, §19.3).
+        /// 3. The cached chunk tree for a hit; recomputes on a miss
+        ///    (§A.4).
+        pub fn serve(
+            &mut self,
+            request: &super::FetchRange,
+            payload: &[u8],
+            negotiated: HashAlgo,
+            now: Timestamp,
+        ) -> Result<ExtractedProof> {
+            request.check_length(self.effective_max_range_length())?;
+            if self.quarantine.is_quarantined(&request.cid, now) {
+                return Err(Error::Storage(quip_storage::Error::Quarantined));
+            }
+            extract_proof_cached(
+                self.cache,
+                &request.cid,
+                payload,
+                request.offset,
+                request.length,
+                negotiated,
+                now,
+            )
+        }
+    }
 }
 
 #[cfg(test)]
@@ -602,6 +727,39 @@ mod tests {
         assert!(is_blake3(&raw, HashAlgo::Blake3));
         assert!(!is_blake3(&raw, HashAlgo::Sha256));
     }
+
+    // ---- split_range (§19.4) ----
+
+    #[test]
+    fn split_range_covers_the_whole_span() {
+        let parts = split_range(0, 100, 32).unwrap();
+        assert_eq!(parts, vec![(0, 32), (32, 32), (64, 32), (96, 4)]);
+        let total: u64 = parts.iter().map(|(_, len)| len).sum();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn split_range_single_part_when_it_fits() {
+        let parts = split_range(500, 100, 1024).unwrap();
+        assert_eq!(parts, vec![(500, 100)]);
+    }
+
+    #[test]
+    fn split_range_respects_the_offset() {
+        let parts = split_range(1000, 70, 30).unwrap();
+        assert_eq!(parts, vec![(1000, 30), (1030, 30), (1060, 10)]);
+    }
+
+    #[test]
+    fn split_range_rejects_zero_length() {
+        assert!(split_range(0, 0, 32).is_err());
+    }
+
+    #[test]
+    fn split_range_rejects_zero_max_per_request() {
+        assert!(split_range(0, 100, 0).is_err());
+    }
+
     // ---- quarantine policy (§8.2, §19.3) ----
 
     fn raw_cid(b: u8) -> CidOrV1 {
@@ -657,9 +815,7 @@ mod tests {
         let t0 = Timestamp::from_millis(2_000);
 
         // Valid until t0 + 1000 ms.
-        store
-            .add_notice(notice(1, &[], 3_000), t0)
-            .unwrap();
+        store.add_notice(notice(1, &[], 3_000), t0).unwrap();
 
         assert!(QuarantineCheck::is_quarantined(&store, &target, t0));
         assert!(!QuarantineCheck::is_quarantined(
@@ -669,16 +825,31 @@ mod tests {
         ));
     }
 
-
-
     // ---- bao helpers (crypto feature only) ----
 
     #[cfg(feature = "crypto")]
     mod bao_tests {
         use super::*;
+        use crate::bao_cache::BaoCache;
         use crate::range::bao_support::{
             extract_proof, extract_proof_cached, verified_slice, verify_response, ExtractedProof,
+            RangeResponder,
         };
+
+        fn now() -> Timestamp {
+            Timestamp::from_millis(1_700_000_000_000)
+        }
+
+        fn response(cid: CidOrV1, offset: u64, length: u64, out: ExtractedProof) -> RangeResponse {
+            RangeResponse {
+                resource_id: b"r".to_vec(),
+                cid,
+                offset,
+                length,
+                bytes: out.slice,
+                proof: out.proof,
+            }
+        }
 
         #[test]
         fn extract_and_verify_chunk_aligned_range() {
@@ -865,24 +1036,6 @@ mod tests {
 
         // ---- cached path (§8.2, M7) ----
 
-        use crate::bao_cache::BaoCache;
-        use quip_core::time::Timestamp;
-
-        fn now() -> Timestamp {
-            Timestamp::from_millis(1_700_000_000_000)
-        }
-
-        fn response(cid: CidOrV1, offset: u64, length: u64, out: ExtractedProof) -> RangeResponse {
-            RangeResponse {
-                resource_id: b"r".to_vec(),
-                cid,
-                offset,
-                length,
-                bytes: out.slice,
-                proof: out.proof,
-            }
-        }
-
         #[test]
         fn cached_proof_verifies_with_the_unchanged_verifier() {
             let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
@@ -976,7 +1129,6 @@ mod tests {
                 assert_eq!(got.proof, expected_proof, "proof at {offset}+{length}");
             }
         }
-
 
         #[test]
         fn cached_path_rejects_the_same_inputs_as_uncached() {
@@ -1074,22 +1226,44 @@ mod tests {
             let big_tree = ::bao::encode::outboard_size(big.len() as u64) as usize;
             let mut cache = BaoCache::with_limits(8, big_tree, big_tree);
 
-            let first =
-                extract_proof_cached(&mut cache, &small_cid, &small, 0, 64, HashAlgo::Blake3, now())
-                    .unwrap();
+            let first = extract_proof_cached(
+                &mut cache,
+                &small_cid,
+                &small,
+                0,
+                64,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap();
             assert!(first.recomputed);
             assert!(cache.contains(&small_cid));
 
             // The larger resource evicts the smaller one.
-            let _ = extract_proof_cached(&mut cache, &big_cid, &big, 0, 64, HashAlgo::Blake3, now())
-                .unwrap();
+            let _ = extract_proof_cached(
+                &mut cache,
+                &big_cid,
+                &big,
+                0,
+                64,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap();
             assert!(!cache.contains(&small_cid), "small tree should be evicted");
 
             // Re-requesting the small resource rebuilds it; the proof still
             // verifies.
-            let again =
-                extract_proof_cached(&mut cache, &small_cid, &small, 0, 64, HashAlgo::Blake3, now())
-                    .unwrap();
+            let again = extract_proof_cached(
+                &mut cache,
+                &small_cid,
+                &small,
+                0,
+                64,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap();
             assert!(again.recomputed, "an evicted tree must be rebuilt");
 
             let resp = response(small_cid, 0, 64, again);
@@ -1127,5 +1301,106 @@ mod tests {
             assert!(verify_response(&resp, HashAlgo::Blake3).is_ok());
         }
 
+        // ---- RangeResponder (§8.2, §19.3, M7) ----
+
+        #[test]
+        fn responder_enforces_the_negotiated_cap() {
+            let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+            let q = NoQuarantine;
+            // A tight cap, far below MAX_RANGE_IN_SINGLE_RESPONSE.
+            let mut resp = RangeResponder::new(&mut cache, &q, 100);
+
+            let req = FetchRange {
+                resource_id: b"r".to_vec(),
+                cid,
+                offset: 0,
+                length: 200,
+            };
+            let err = resp
+                .serve(&req, &payload, HashAlgo::Blake3, now())
+                .unwrap_err();
+            assert!(matches!(err, Error::RangeInvalid(_)), "got {err:?}");
+            assert!(cache.is_empty(), "a rejected request must not populate");
+        }
+
+        #[test]
+        fn responder_checks_quarantine_before_serving() {
+            struct AlwaysQuarantined;
+            impl QuarantineCheck for AlwaysQuarantined {
+                fn is_quarantined(&self, _: &CidOrV1, _: Timestamp) -> bool {
+                    true
+                }
+            }
+
+            let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+            let q = AlwaysQuarantined;
+            let mut resp =
+                RangeResponder::new(&mut cache, &q, MAX_RANGE_IN_SINGLE_RESPONSE);
+
+            let req = FetchRange {
+                resource_id: b"r".to_vec(),
+                cid,
+                offset: 0,
+                length: 64,
+            };
+            let err = resp
+                .serve(&req, &payload, HashAlgo::Blake3, now())
+                .unwrap_err();
+            assert!(
+                matches!(err, Error::Storage(quip_storage::Error::Quarantined)),
+                "got {err:?}"
+            );
+            assert!(cache.is_empty(), "a rejected request must not populate");
+        }
+
+        #[test]
+        fn responder_serves_a_valid_request() {
+            let payload: Vec<u8> = (0u8..=255).cycle().take(4096).collect();
+            let cid = cid_blake3(&payload);
+            let mut cache = BaoCache::new();
+            let q = NoQuarantine;
+            let mut resp =
+                RangeResponder::new(&mut cache, &q, MAX_RANGE_IN_SINGLE_RESPONSE);
+
+            let req = FetchRange {
+                resource_id: b"r".to_vec(),
+                cid,
+                offset: 100,
+                length: 200,
+            };
+            let out = resp
+                .serve(&req, &payload, HashAlgo::Blake3, now())
+                .unwrap();
+            assert_eq!(out.slice, payload[100..300].to_vec());
+
+            let r = RangeResponse {
+                resource_id: b"r".to_vec(),
+                cid,
+                offset: 100,
+                length: 200,
+                bytes: out.slice,
+                proof: out.proof,
+            };
+            assert!(verify_response(&r, HashAlgo::Blake3).is_ok());
+        }
+
+        #[test]
+        fn responder_effective_cap_is_the_smaller_of_the_two() {
+            let mut cache = BaoCache::new();
+            let q = NoQuarantine;
+
+            let small = RangeResponder::new(&mut cache, &q, 100);
+            assert_eq!(small.effective_max_range_length(), 100);
+
+            let large = RangeResponder::new(&mut cache, &q, u64::MAX);
+            assert_eq!(
+                large.effective_max_range_length(),
+                MAX_RANGE_IN_SINGLE_RESPONSE
+            );
+        }
     }
 }

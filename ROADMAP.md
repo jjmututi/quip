@@ -30,7 +30,7 @@ row and the tag index in the same commit.
 | M4 | BFT consensus: wire codecs (M4a), driver (M4b) | M4a landed; M4b not started |
 | M5 | QUIC transport: endpoint, handshake, T0/T1/T2/T3 I/O | landed |
 | M6 | Integration: §16 flow, test vectors, CI | landed |
-| M7 | Hardening: rate limits, caches, quarantine, state machines | 5 of 10 landed |
+| M7 | Hardening: rate limits, caches, quarantine, state machines | 9 of 10 landed |
 | M8 | Range fetch: bao verified streaming | landed |
 
 **Demo-critical list is complete.** The §16 flow runs end-to-end through
@@ -45,7 +45,7 @@ All crates compile, every test passes, clippy and rustdoc are silent under
 `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    488 unit + 3 doc, exit 0
+cargo test --workspace --all-features                    545 unit + 3 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean

@@ -6,7 +6,7 @@
 //! are not yet modeled; they will land alongside the CTRL-verb dispatcher.
 
 use crate::error::{Error, Result};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
@@ -201,6 +201,101 @@ impl WitnessRingCache {
     }
 }
 
+// -------------------------------------------------------------------------
+// Witness ring participation cap (§19.4)
+// -------------------------------------------------------------------------
+
+/// Default cap on concurrent witness rings a node joins.
+///
+/// §19.4: "Witness ring load: cap the number of rings a witness actively
+/// participates in (MAX_CAPACITY = 10) to bound the cost of BFT
+/// consensus participation."
+pub const DEFAULT_MAX_RINGS: usize = 10;
+
+/// A node's own witness-ring participation tracker.
+///
+/// Tracks how many rings this node is currently an active member of. A
+/// node at capacity declines new ring invitations rather than silently
+/// overflowing, so its BFT participation cost stays bounded.
+#[derive(Clone, Debug)]
+pub struct WitnessLoad {
+    max_rings: usize,
+    active: BTreeSet<[u8; 32]>,
+}
+
+impl WitnessLoad {
+    /// A tracker with the §19.4 default of 10 rings.
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_MAX_RINGS)
+    }
+
+    /// A tracker with an explicit cap.
+    ///
+    /// `max_rings` is clamped to at least 1.
+    pub fn with_capacity(max_rings: usize) -> Self {
+        Self {
+            max_rings: max_rings.max(1),
+            active: BTreeSet::new(),
+        }
+    }
+
+    /// The configured cap.
+    pub fn max_rings(&self) -> usize {
+        self.max_rings
+    }
+
+    /// Number of rings currently joined.
+    pub fn active_count(&self) -> usize {
+        self.active.len()
+    }
+
+    /// True when the tracker is at its cap.
+    pub fn is_at_capacity(&self) -> bool {
+        self.active.len() >= self.max_rings
+    }
+
+    /// True if `ring` is currently joined.
+    pub fn contains(&self, ring: &[u8; 32]) -> bool {
+        self.active.contains(ring)
+    }
+
+    /// The set of joined rings, for inspection.
+    pub fn active(&self) -> &BTreeSet<[u8; 32]> {
+        &self.active
+    }
+
+    /// Try to join `ring`.
+    ///
+    /// Returns `Ok(())` if the ring was joined (or was already joined),
+    /// and [`Error::RateLimit`] if the tracker is at capacity.
+    pub fn try_join(&mut self, ring: [u8; 32]) -> Result<()> {
+        if self.active.contains(&ring) {
+            return Ok(());
+        }
+        if self.is_at_capacity() {
+            return Err(Error::RateLimit);
+        }
+        self.active.insert(ring);
+        Ok(())
+    }
+
+    /// Leave `ring`. Returns true if it was joined.
+    pub fn leave(&mut self, ring: &[u8; 32]) -> bool {
+        self.active.remove(ring)
+    }
+
+    /// Forget every ring.
+    pub fn clear(&mut self) {
+        self.active.clear();
+    }
+}
+
+impl Default for WitnessLoad {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,5 +354,75 @@ mod tests {
         assert_ne!(LOCAL_CLUSTER, REGIONAL_CLUSTER);
         assert_ne!(REGIONAL_CLUSTER, GLOBAL_CLUSTER);
         assert_ne!(LOCAL_CLUSTER, GLOBAL_CLUSTER);
+    }
+
+    // ---- witness load (§19.4) ----
+
+    #[test]
+    fn witness_load_starts_empty() {
+        let w = WitnessLoad::new();
+        assert_eq!(w.max_rings(), DEFAULT_MAX_RINGS);
+        assert_eq!(w.active_count(), 0);
+        assert!(!w.is_at_capacity());
+        assert!(w.active().is_empty());
+    }
+
+    #[test]
+    fn witness_load_accepts_up_to_the_cap() {
+        let mut w = WitnessLoad::with_capacity(3);
+        assert!(w.try_join([1; 32]).is_ok());
+        assert!(w.try_join([2; 32]).is_ok());
+        assert!(w.try_join([3; 32]).is_ok());
+        assert!(w.is_at_capacity());
+        assert!(matches!(w.try_join([4; 32]), Err(Error::RateLimit)));
+        assert_eq!(w.active_count(), 3);
+    }
+
+    #[test]
+    fn witness_load_join_is_idempotent() {
+        let mut w = WitnessLoad::with_capacity(1);
+        w.try_join([1; 32]).unwrap();
+        assert!(w.try_join([1; 32]).is_ok());
+        assert_eq!(w.active_count(), 1);
+    }
+
+    #[test]
+    fn witness_load_leave_frees_a_slot() {
+        let mut w = WitnessLoad::with_capacity(1);
+        w.try_join([1; 32]).unwrap();
+        assert!(w.try_join([2; 32]).is_err());
+        assert!(w.leave(&[1; 32]));
+        assert!(!w.leave(&[1; 32]));
+        assert!(w.try_join([2; 32]).is_ok());
+    }
+
+    #[test]
+    fn witness_load_contains_reports_membership() {
+        let mut w = WitnessLoad::new();
+        assert!(!w.contains(&[1; 32]));
+        w.try_join([1; 32]).unwrap();
+        assert!(w.contains(&[1; 32]));
+    }
+
+    #[test]
+    fn witness_load_clear_empties_the_set() {
+        let mut w = WitnessLoad::new();
+        w.try_join([1; 32]).unwrap();
+        w.try_join([2; 32]).unwrap();
+        w.clear();
+        assert_eq!(w.active_count(), 0);
+        assert!(!w.is_at_capacity());
+    }
+
+    #[test]
+    fn witness_load_cap_is_clamped() {
+        let w = WitnessLoad::with_capacity(0);
+        assert_eq!(w.max_rings(), 1);
+    }
+
+    #[test]
+    fn witness_load_default_matches_new() {
+        let w = WitnessLoad::default();
+        assert_eq!(w.max_rings(), DEFAULT_MAX_RINGS);
     }
 }

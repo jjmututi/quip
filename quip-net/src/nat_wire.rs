@@ -443,8 +443,16 @@ impl CandidateAnnounce {
 
 /// `relay_discovery` — a peer asks the DHT for relays to a target
 /// (§12.2).
+///
+/// The `request_id` is a freshly generated 16-byte value, unique among
+/// the requester's outstanding discoveries. A `RelayResponse` echoes
+/// both `request_id` and `target` so the requester can demultiplex
+/// responses without serializing discoveries per target.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RelayDiscovery {
+    /// Fresh 16-byte value, unique among the requester's outstanding
+    /// discoveries.
+    pub request_id: [u8; 16],
     /// The peer making the request.
     pub requester: NodeId,
     /// The peer the requester wants to reach.
@@ -463,6 +471,7 @@ impl RelayDiscovery {
         let msg = envelope(
             "relay_discovery",
             alloc::vec![
+                CborValue::Bytes(self.request_id.to_vec()),
                 CborValue::Bytes(self.requester.to_vec()),
                 CborValue::Bytes(self.target.to_vec()),
                 CborValue::Int(self.max_hops as i128),
@@ -480,15 +489,16 @@ impl RelayDiscovery {
             return Err(Error::BadFrame("not a relay_discovery"));
         }
         let f = fields(&v, "relay_discovery")?;
-        if f.len() != 5 {
+        if f.len() != 6 {
             return Err(Error::BadFrame("relay_discovery arity"));
         }
         Ok(Self {
-            requester: as_node_id(&f[0])?,
-            target: as_node_id(&f[1])?,
-            max_hops: as_u64(&f[2])?,
-            timestamp: Timestamp::from_millis(as_u64(&f[3])?),
-            signature: as_bytes_n::<64>(&f[4])?,
+            request_id: as_bytes_n::<16>(&f[0])?,
+            requester: as_node_id(&f[1])?,
+            target: as_node_id(&f[2])?,
+            max_hops: as_u64(&f[3])?,
+            timestamp: Timestamp::from_millis(as_u64(&f[4])?),
+            signature: as_bytes_n::<64>(&f[5])?,
         })
     }
 
@@ -497,6 +507,7 @@ impl RelayDiscovery {
         let msg = envelope(
             "relay_discovery",
             alloc::vec![
+                CborValue::Bytes(self.request_id.to_vec()),
                 CborValue::Bytes(self.requester.to_vec()),
                 CborValue::Bytes(self.target.to_vec()),
                 CborValue::Int(self.max_hops as i128),
@@ -802,6 +813,7 @@ mod tests {
     #[test]
     fn relay_discovery_roundtrip() {
         let m = RelayDiscovery {
+            request_id: [0x42; 16],
             requester: nid(1),
             target: nid(2),
             max_hops: 2,
@@ -811,10 +823,11 @@ mod tests {
         let bytes = m.to_bytes().unwrap();
         assert_eq!(RelayDiscovery::from_bytes(&bytes).unwrap(), m);
     }
-
+    
     #[test]
     fn relay_discovery_signing_payload_excludes_signature() {
         let m = RelayDiscovery {
+            request_id: [0x42; 16],
             requester: nid(1),
             target: nid(2),
             max_hops: 2,
@@ -824,7 +837,7 @@ mod tests {
         let payload = m.signing_payload().unwrap();
         let decoded = decode(&payload).unwrap();
         let f = crate::codec::fields(&decoded, "relay_discovery").unwrap();
-        assert_eq!(f.len(), 4);
+        assert_eq!(f.len(), 5, "request_id + requester + target + max_hops + timestamp");
     }
 
     // ---- RelayResponse ----

@@ -164,11 +164,20 @@ impl<D: DhtClient> NatDriver<D> {
                         addr: candidate.addr,
                     });
                 }
-                Outbound::RequestRelays { target, max_hops } => {
-                    // `relay_discovery` must carry the requester's
-                    // signature (§12.2); the application holds the
-                    // `Signer`.
-                    forwarded.push(NatEvent::RelayDiscoveryRequested { target, max_hops });
+                Outbound::RequestRelays {
+                    target,
+                    max_hops,
+                    request_id,
+                } => {
+                    // `relay_discovery` must carry the requester's signature
+                    // (§12.2); the application holds the `Signer`. The request_id
+                    // comes from the state machine so the matching response can be
+                    // demultiplexed by request_id and target.
+                    forwarded.push(NatEvent::RelayDiscoveryRequested {
+                        target,
+                        max_hops,
+                        request_id,
+                    });
                 }
             }
         }

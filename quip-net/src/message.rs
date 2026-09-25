@@ -1006,6 +1006,7 @@ mod tests {
         );
         assert_roundtrip(
             Message::RelayDiscovery(RelayDiscovery {
+                request_id: [0u8; 16],
                 requester: nid(1),
                 target: nid(2),
                 max_hops: 2,

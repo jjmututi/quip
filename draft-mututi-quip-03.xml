@@ -1,23 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<?xml-model href="rfc7991bis.rnc"?>
 <!DOCTYPE rfc [
   <!ENTITY nbsp "&#160;">
   <!ENTITY zwsp "&#8203;">
 ]>
-<rfc xmlns:xi="http://www.w3.org/2001/XInclude" version="3" 
-     category="std" ipr="trust200902" docName="draft-mututi-quip-03" 
-     consensus="true" submissionType="IETF" 
-     xmlns="urn:ietf:params:xml:ns:rfc-3.0">
+<rfc version="3"
+     category="std"
+     docName="draft-mututi-quip-03"
+     ipr="trust200902"
+     submissionType="IETF"
+     xml:lang="en"
+     consensus="true">
   
   <front>
     <title abbrev="QUIP">QUIC Identity Protocol</title>
     <seriesInfo name="Internet-Draft" value="draft-mututi-quip-03"/>
-    <author fullname="Junior Joseph Mututi" initials="J.J." surname="Mututi">
+    <author fullname="Junior Joseph Mututi" initials="J. J." surname="Mututi">
       <organization>Individual</organization>
       <address>
+        <postal>
+          <country>Zimbabwe</country>
+        </postal>
         <email>jjmututicloud@gmail.com</email>
-        <country>Zimbabwe</country>
       </address>
     </author>
-    <date year="2026" month="September" day="9"/>
+    <date year="2026" month="September" day="25"/>
     
     <abstract>
       <t>QUIP defines a brokerless federation protocol for peer-to-peer 
@@ -124,31 +131,31 @@
       federation systems, and peer-to-peer networks that require 
       self-sovereign identity and efficient state synchronization.</t>
       
-      <t><bcp14>Note on Governance:</bcp14> The governance primitives 
+      <t><strong>Note on Governance:</strong> The governance primitives 
       defined in <xref target="governance"/> are OPTIONAL. A QUIP 
       implementation that does not support these primitives remains 
       fully protocol-compliant.</t>
       
-      <t><bcp14>Note on Hash Algorithms:</bcp14> SHA-256 is the mandatory 
+      <t><strong>Note on Hash Algorithms:</strong> SHA-256 is the mandatory 
       baseline for CID generation. BLAKE3 is an OPTIONAL optimization 
       for performance-critical applications. Both algorithms produce 
       32-byte digests for consistent CID handling.</t>
       
-      <t><bcp14>Note on CIDv1 Tagging:</bcp14> To avoid ambiguity across 
+      <t><strong>Note on CIDv1 Tagging:</strong> To avoid ambiguity across 
       connections, QUIP supports CIDv1 with an algorithm tag as an 
       OPTIONAL extension. See <xref target="cidv1"/> for details. 
       Implementations that support CIDv1 <bcp14>MUST</bcp14> use it for 
       all persistent state (pins, quarantine, governance) when both 
       peers support it.</t>
       
-      <t><bcp14>Note on Merkle Range Fetching:</bcp14> QUIP defines an 
+      <t><strong>Note on Merkle Range Fetching:</strong> QUIP defines an 
       OPTIONAL Merkle range fetching mechanism built on BLAKE3's native 
       tree structure. See <xref target="merkle-range"/> for details. 
       Implementations that do not support this mechanism remain fully 
       protocol-compliant; the mechanism is gated by the 
       <tt>merkle_range</tt> capability bit and requires <tt>blake3</tt>.</t>
       
-      <t><bcp14>Note on NAT Traversal:</bcp14> QUIC, as a connection-oriented 
+      <t><strong>Note on NAT Traversal:</strong> QUIC, as a connection-oriented 
       protocol, requires a direct 5-tuple between endpoints. However, in 
       many deployment scenarios, peers are behind Network Address Translators 
       (NATs) that prevent direct inbound connections. QUIP uses the Coral 
@@ -156,7 +163,7 @@
       hole punching, and relay discovery. See <xref target="nat-traversal"/> 
       for details.</t>
       
-      <t><bcp14>Note on Coral DHT:</bcp14> The Coral DHT in QUIP uses 
+      <t><strong>Note on Coral DHT:</strong> The Coral DHT in QUIP uses 
       Kademlia XOR distance for routing within clusters. Coral provides 
       clustering, redundancy, and multiple lookup paths on top of the 
       base Kademlia routing. References to Kademlia XOR distance in the 
@@ -404,7 +411,7 @@
         truncation and recovery.</dd>
       </dl>
 
-      <t><bcp14>Protocol Constants Summary:</bcp14></t>
+      <t><strong>Protocol Constants Summary:</strong></t>
 
       <table>
         <thead>
@@ -423,6 +430,7 @@
           <tr><td>MAX_REPLAY_WINDOW</td><td>300000 milliseconds (5min)</td><td><xref target="seq-reset"/></td></tr>
           <tr><td>INF (pruned sentinel)</td><td>4294967295 (0xFFFFFFFF)</td><td><xref target="dvv"/></td></tr>
           <tr><td>MAX_MESSAGE_SIZE</td><td>65536 bytes</td><td><xref target="handshake"/></td></tr>
+          <tr><td>MAX_HANDSHAKE_BYTES</td><td>4096 bytes</td><td><xref target="handshake"/></td></tr>
           <tr><td>MAX_RANGES</td><td>1024</td><td><xref target="handshake"/></td></tr>
           <tr><td>PIN_CAPACITY</td><td>1000</td><td><xref target="handshake"/></td></tr>
           <tr><td>GOV_CAPACITY</td><td>100</td><td><xref target="handshake"/></td></tr>
@@ -492,6 +500,29 @@ Capabilities = &{
         ]]></artwork>
       </figure>
       
+      <t><strong>Framing:</strong> The handshake is the first message on the
+      Control Stream and is sent <strong>without</strong> the varint length
+      prefix that all other reliable-stream QUIP messages carry
+      (<xref target="tiers"/>). It is self-delimiting: it is a single
+      QUIP-CBOR array, and its end is determined by the CBOR decoder
+      itself. Every subsequent message on the Control Stream — including
+      the Key Claim exchange — carries the varint length prefix.</t>
+
+      <t>A receiver reads the handshake by attempting to decode a CBOR
+      array from the leading bytes of the stream. The first byte at which
+      the array successfully decodes marks the end of the handshake; the
+      byte immediately following it is the first byte of the next
+      message's varint prefix. Implementations <bcp14>MUST</bcp14>
+      reject a handshake that exceeds MAX_HANDSHAKE_BYTES (4096 bytes)
+      with E_BAD_ENCODING, and <bcp14>MUST NOT</bcp14> buffer more than
+      MAX_HANDSHAKE_BYTES during the probe. A conforming handshake is a
+      fixed three-element array whose fields are all small, so 4096 bytes
+      is generous relative to any valid handshake; the bound exists to
+      keep a misbehaving peer from forcing unbounded buffering before the
+      CBOR decoder can find a complete array. Because
+      MAX_HANDSHAKE_BYTES is far below MAX_MESSAGE_SIZE (65536 bytes),
+      it is the effective size limit for the handshake.</t>
+
       <t>The bitmask is interpreted as follows:</t>
       
       <ul>
@@ -516,7 +547,7 @@ Capabilities = &{
       capabilities exist, the connection <bcp14>MUST</bcp14> be closed with 
       error E_PROFILE_MISMATCH (error code 0x08).</t>
       
-      <t><bcp14>Capability Dependencies:</bcp14> Some capabilities require 
+      <t><strong>Capability Dependencies:</strong> Some capabilities require 
       others to function correctly. A peer <bcp14>MUST NOT</bcp14> advertise 
       a capability whose dependencies are not also advertised. The following 
       dependencies are normative:</t>
@@ -540,7 +571,7 @@ Capabilities = &{
       not at connection time, so that an inconsistent configuration never 
       reaches the wire.</t>
       
-      <t><bcp14>Capability Enforcement Invariant:</bcp14> Capability 
+      <t><strong>Capability Enforcement Invariant:</strong> Capability 
       advertisement is a commitment, not merely a claim. A peer that 
       advertises a capability bit <bcp14>MUST</bcp14> be prepared to 
       process every verb whose required capability includes that bit, 
@@ -550,12 +581,12 @@ Capabilities = &{
       receiving sides:</t>
       
       <ul>
-        <li><bcp14>Outbound:</bcp14> Before sending a verb, the sender 
+        <li><strong>Outbound:</strong> Before sending a verb, the sender 
         <bcp14>MUST</bcp14> verify that the verb's required capability 
         is present in the negotiated set. A violation <bcp14>MUST</bcp14> 
         be rejected locally with E_CAPABILITY_VIOLATION (error code 
         0x1A) and <bcp14>MUST NOT</bcp14> be placed on the wire.</li>
-        <li><bcp14>Inbound:</bcp14> Upon receiving a verb whose required 
+        <li><strong>Inbound:</strong> Upon receiving a verb whose required 
         capability is not in the negotiated set, the receiver 
         <bcp14>MUST</bcp14> reject it with E_CAPABILITY_VIOLATION 
         (error code 0x1A).</li>
@@ -567,7 +598,7 @@ Capabilities = &{
       becomes the negotiated intersection, and the peer is not expected 
       to handle capabilities it did not advertise.</t>
       
-      <t><bcp14>Version negotiation:</bcp14> Future versions <bcp14>MAY</bcp14> 
+      <t><strong>Version negotiation:</strong> Future versions <bcp14>MAY</bcp14> 
       define new ALPN identifiers (e.g., "quip-2"). The ALPN identifier "quip" 
       refers to version 1 of the protocol.</t>
       
@@ -588,18 +619,18 @@ Capabilities = &{
         <li><tt>0x0C</tt>: max_range_length (uint, default 1048576, for Merkle range fetching)</li>
       </ul>
       
-      <t><bcp14>Hash Algorithm Negotiation:</bcp14> The <tt>hash_algo</tt> 
+      <t><strong>Hash Algorithm Negotiation:</strong> The <tt>hash_algo</tt> 
       extension indicates the preferred hash algorithm for CID generation. 
       If both peers support BLAKE3 (bit 7 set in capabilities), they 
       <bcp14>MAY</bcp14> negotiate to use BLAKE3. If no agreement is reached, 
       the peers <bcp14>MUST</bcp14> use SHA-256.</t>
       
-      <t><bcp14>CIDv1 Negotiation:</bcp14> The <tt>cidv1_algo</tt> extension 
+      <t><strong>CIDv1 Negotiation:</strong> The <tt>cidv1_algo</tt> extension 
       indicates the preferred hash algorithm for CIDv1 generation. If both 
       peers support CIDv1 (bit 9 set), they <bcp14>MAY</bcp14> use tagged 
       identifiers. See <xref target="cidv1"/> for details.</t>
       
-      <t><bcp14>Merkle Range Negotiation:</bcp14> The 
+      <t><strong>Merkle Range Negotiation:</strong> The 
       <tt>max_range_length</tt> extension indicates the largest byte range 
       a peer will serve in a single <tt>fetch_range</tt> response. If 
       neither peer advertises this extension, the default of 
@@ -607,7 +638,7 @@ Capabilities = &{
       <bcp14>MUST NOT</bcp14> send a <tt>fetch_range</tt> request whose 
       <tt>length</tt> exceeds the remote peer's advertised maximum.</t>
       
-      <t><bcp14>CIDv1 Persistent State Requirement:</bcp14> If both peers 
+      <t><strong>CIDv1 Persistent State Requirement:</strong> If both peers 
       support CIDv1, they <bcp14>MUST</bcp14> use the tagged format for 
       all persistent state — including pins, quarantine notices, trusted 
       CID registrations, and derivative links — to ensure consistency 
@@ -651,7 +682,7 @@ Capabilities = &{
         other domain-specific information. Discovery is purely via the 
         Coral DHT.</t>
         
-        <t><bcp14>Ephemeral Session Key Derivation:</bcp14></t>
+        <t><strong>Ephemeral Session Key Derivation:</strong></t>
         
         <t>A Key Claim <bcp14>MAY</bcp14> be used to derive ephemeral session 
         keys via X25519 key exchange:</t>
@@ -676,7 +707,7 @@ Capabilities = &{
           chosen for simplicity and to enable direct cryptographic 
           verification of DHT routing.</t>
           
-          <t><bcp14>Mitigations:</bcp14></t>
+          <t><strong>Mitigations:</strong></t>
           <ul>
             <li>For privacy-sensitive applications, implementations 
             <bcp14>SHOULD</bcp14> use ephemeral SessionKeys for transport 
@@ -722,7 +753,7 @@ Deps = { * NodeId => counter: uint }
           <li>Map keys <bcp14>MUST</bcp14> use QUIP-CBOR canonical ordering.</li>
           <li>Pruned writers <bcp14>MAY</bcp14> be moved to the pruned array 
           when deps exceeds 1024 entries.</li>
-          <li><bcp14>Pruning and INF Sentinel:</bcp14> A writer moved to the 
+          <li><strong>Pruning and INF Sentinel:</strong> A writer moved to the 
           pruned array is treated as having counter INF (0xFFFFFFFF) in all 
           future merges. If that writer resumes writing, it <bcp14>MUST</bcp14> 
           publish a <tt>seq_reset</tt> attestation (<xref target="seq-reset"/>) 
@@ -734,15 +765,16 @@ Deps = { * NodeId => counter: uint }
           content-addressable.</li>
         </ol>
         
-        <t><bcp14>Comparison:</bcp14> DVV A is causally after DVV B if 
+        <t><strong>Comparison:</strong> DVV A is causally after DVV B if 
         <tt>A.dot.counter &gt; B.deps[A.dot.writer]</tt> or there exists a 
         writer where <tt>A.deps[writer] &gt; B.deps[writer]</tt>.</t>
         
-        <t><bcp14>Merge Algorithm:</bcp14> Given DVVs A and B:</t>
+        <t><strong>Merge Algorithm:</strong> Given DVVs A and B:</t>
         
         <ol>
           <li>Let C.deps = {} and C.pruned = []</li>
-          <li>For each writer w in union(A.deps.keys, B.deps.keys):
+          <li>
+            <t>For each writer w in union(A.deps.keys, B.deps.keys):</t>
             <ul>
               <li>If w is in A.pruned: a_counter = INF</li>
               <li>Else: a_counter = A.deps.get(w, 0)</li>
@@ -797,9 +829,9 @@ function merge(A, B):
           ]]></artwork>
         </figure>
         
-        <t><bcp14>CausalOrder Is a Derived Value:</bcp14> The classification 
+        <t><strong>CausalOrder Is a Derived Value:</strong> The classification 
         of two DVVs into one of {Less, Greater, Equal, Concurrent} — 
-        collectively called <em>CausalOrder</em> — is a <bcp14>derived value</bcp14>, 
+        collectively called <em>CausalOrder</em> — is a <strong>derived value</strong>, 
         not a wire type. Sync messages (<tt>get</tt>, <tt>set</tt>, 
         <tt>sync</tt>, <tt>rbsr_sync</tt>) carry DVV values; the receiver 
         re-derives the causal order by comparing the sender's DVV against 
@@ -821,7 +853,7 @@ function merge(A, B):
         representation is intentional and is a consequence of the causal 
         consistency model, not an omission.</t>
         
-        <t><bcp14>CID vs Pinning Relationship:</bcp14> Pinning applies 
+        <t><strong>CID vs Pinning Relationship:</strong> Pinning applies 
         only to immutable CIDs. Mutable DVV resources are not pinned; they 
         are synced via DVV merge and RBSR. This separation preserves the 
         causal consistency model of DVV while enabling content-addressed 
@@ -864,18 +896,18 @@ function merge(A, B):
           <t>TOFU is the only bootstrapping mechanism — no DNS, no WebPKI, 
           no CA. All trust builds from first contact.</t>
           
-          <t><bcp14>TOFU Weaknesses:</bcp14> TOFU is vulnerable to 
-          first-contact man-in-the-middle attacks. <bcp14>Out-of-band 
+          <t><strong>TOFU Weaknesses:</strong> TOFU is vulnerable to 
+          first-contact man-in-the-middle attacks. <strong>Out-of-band 
           verification of Key Claims (e.g., QR codes, physical presence) 
-          is REQUIRED for high-security applications.</bcp14> The witness 
-          network does <bcp14>NOT</bcp14> mitigate a compromised first 
+          is REQUIRED for high-security applications.</strong> The witness 
+          network does <strong>NOT</strong> mitigate a compromised first 
           contact if the adversary also controls the DHT bootstrap view. 
           Subsequent connections use the cached Key Claim and are protected 
           by witness-ring diversity, but the initial contact remains a 
           trust bootstrap that QUIP does not protect against without 
           external verification.</t>
           
-          <t><bcp14>Security Model Note:</bcp14> The witness ring cannot 
+          <t><strong>Security Model Note:</strong> The witness ring cannot 
           rescue a poisoned bootstrap. If an adversary controls both the 
           first contact and the DHT bootstrap view, the peer's view of the 
           ring is attacker-controlled. The protocol's visible failure modes 
@@ -894,7 +926,7 @@ function merge(A, B):
           DHT provides clustering, redundancy, and attack circumvention 
           (<xref target="coral-dht"/>).</t>
           
-          <t><bcp14>Protocol Constants (Fixed):</bcp14></t>
+          <t><strong>Protocol Constants (Fixed):</strong></t>
           
           <table>
             <thead>
@@ -950,7 +982,7 @@ function merge(A, B):
             </tbody>
           </table>
           
-          <t><bcp14>Kademlia XOR Distance:</bcp14> The XOR operation defines 
+          <t><strong>Kademlia XOR Distance:</strong> The XOR operation defines 
           the distance metric used by Kademlia routing. For two 32-byte 
           values a and b, distance(a, b) = a XOR b. This distance metric 
           has the following properties that make it suitable for routing: 
@@ -971,13 +1003,14 @@ distance(a, b) = a XOR b  (32-byte XOR)
           <t>The XOR metric is described in detail in the original Kademlia 
           specification <xref target="KADEMLIA"/>.</t>
           
-          <t><bcp14>NAT-Aware Witness Selection Algorithm:</bcp14></t>
+          <t><strong>NAT-Aware Witness Selection Algorithm:</strong></t>
           
           <ol>
             <li>Peer P wants to find witnesses for target T</li>
             <li>P performs independent Coral DHT lookups on 3 paths</li>
             <li>For each path, P queries for the k=16 closest nodes to T</li>
-            <li>P filters candidates based on reachability:
+            <li>
+              <t>P filters candidates based on reachability:</t>
               <ul>
                 <li>Known reachable peers (from ConnectivityAnnounce)</li>
                 <li>Known relay support</li>
@@ -989,7 +1022,8 @@ distance(a, b) = a XOR b  (32-byte XOR)
             <li>If paths agree on ≥3 witnesses, accept the ring</li>
             <li>If paths disagree, initiate spillover mechanism 
             (<xref target="spillover-mechanism"/>)</li>
-            <li>If fewer than 7 reachable candidates:
+            <li>
+              <t>If fewer than 7 reachable candidates:</t>
               <ul>
                 <li>Use Coral DHT relays to reach NATed candidates</li>
                 <li>If relays unavailable, use MIN_WITNESSES (4)</li>
@@ -1027,7 +1061,7 @@ function find_witnesses(target, epoch, k=7):
             ]]></artwork>
           </figure>
           
-          <t><bcp14>Spillover Handling:</bcp14> When an attacker on the
+          <t><strong>Spillover Handling:</strong> When an attacker on the
           path falsely rejects witnesses or prompts for spillover:</t>
           
           <ol>
@@ -1040,7 +1074,7 @@ function find_witnesses(target, epoch, k=7):
             <li>If no consensus, P uses fallback witnesses from earlier epochs</li>
           </ol>
           
-          <t><bcp14>Epoch-Based Rotation:</bcp14> Witness rings rotate every 
+          <t><strong>Epoch-Based Rotation:</strong> Witness rings rotate every 
           ROTATION_INTERVAL (24 hours). The epoch is defined as:</t>
           
           <figure>
@@ -1051,7 +1085,7 @@ epoch = floor(current_time / ROTATION_INTERVAL)
           
           <t>The ring_id <bcp14>SHOULD</bcp14> include the epoch to distinguish 
           rings from different rotation periods. However, including the epoch 
-          in distance calculations does <bcp14>NOT</bcp14> prevent a Sybil 
+          in distance calculations does <strong>NOT</strong> prevent a Sybil 
           attacker from occupying a ring for the entire epoch; it only ensures 
           that the ring membership resets each epoch.</t>
           
@@ -1062,7 +1096,7 @@ epoch = floor(current_time / ROTATION_INTERVAL)
             <li>Natural churn handling (witnesses that go offline are replaced)</li>
           </ul>
           
-          <t>What rotation <bcp14>does not</bcp14> provide:</t>
+          <t>What rotation <strong>does not</strong> provide:</t>
           <ul>
             <li>Cryptographic nonce-binding (see <xref target="future-work"/>)</li>
             <li>Immediate eviction of malicious witnesses within an epoch</li>
@@ -1070,7 +1104,7 @@ epoch = floor(current_time / ROTATION_INTERVAL)
           
           <t>For a discussion of the security implications of Coral DHT clustering on this rotation mechanism, see <xref target="security-coral-sybil"/>.</t>
           
-          <t><bcp14>Sybil Resistance:</bcp14> The Kademlia XOR distance 
+          <t><strong>Sybil Resistance:</strong> The Kademlia XOR distance 
           metric provides Sybil resistance through the computational cost of 
           generating NodeIds that are XOR-close to a target. The cost 
           increases exponentially as the attacker attempts to place multiple 
@@ -1080,14 +1114,14 @@ epoch = floor(current_time / ROTATION_INTERVAL)
           number of attempts. See <xref target="sybil-analysis"/> for 
           a detailed analysis.</t>
           
-          <t><bcp14>Three-Path Trade-off:</bcp14> The 3-path approach increases 
+          <t><strong>Three-Path Trade-off:</strong> The 3-path approach increases 
           lookup bandwidth by approximately 3× compared to single-path Kademlia. 
           However, this is acceptable given the security benefits and the 
           relatively low frequency of witness discovery (once per 24 hours 
           per witness ring). For performance-sensitive operations, implementations 
           MAY cache witness ring results across connections.</t>
           
-          <t><bcp14>Path Independence vs. Path Integrity:</bcp14> The 3-path 
+          <t><strong>Path Independence vs. Path Integrity:</strong> The 3-path 
           defense assumes ≤ 1 path is attacker-controlled. However, under an 
           eclipse or bootstrap-poisoning attack, all three paths may run 
           through attacker-controlled nodes while remaining disjoint. 
@@ -1123,7 +1157,7 @@ WitnessStatement = [
             ]]></artwork>
           </figure>
           
-          <t><bcp14>Witness Validity:</bcp14></t>
+          <t><strong>Witness Validity:</strong></t>
           
           <ul>
             <li>A witness statement is valid for 24 hours from timestamp</li>
@@ -1131,7 +1165,7 @@ WitnessStatement = [
             <li>Witnesses <bcp14>SHOULD</bcp14> re-issue statements every 12 hours</li>
           </ul>
           
-          <t><bcp14>KT_VERIFIED Status:</bcp14> The label "verified" describes 
+          <t><strong>KT_VERIFIED Status:</strong> The label "verified" describes 
           witness-ring corroboration, not absolute proof of identity — with 
           f=2 Byzantine faults tolerated out of 7 witnesses, VERIFIED status 
           is probabilistic and trustworthy but not an unconditional 
@@ -1172,7 +1206,7 @@ WitnessStatement = [
             </tbody>
           </table>
           
-          <t><bcp14>Verification Threshold:</bcp14></t>
+          <t><strong>Verification Threshold:</strong></t>
           
           <ul>
             <li>4+ independent witnesses from the DHT ring (MIN_WITNESSES)</li>
@@ -1191,7 +1225,7 @@ WitnessStatement = [
           for high-stakes operations. With 7 witnesses, the protocol can 
           tolerate f=2 Byzantine faults.</t>
           
-          <t><bcp14>Quorum Intersection:</bcp14> Any two BFT quorums of 5-of-7 
+          <t><strong>Quorum Intersection:</strong> Any two BFT quorums of 5-of-7 
           intersect in ≥ 3 nodes. Since at most 2 are Byzantine, every quorum 
           contains ≥ 3 honest members, and any two quorums share ≥ 1 honest 
           member. This yields safety: no two conflicting operations (e.g., 
@@ -1202,7 +1236,7 @@ WitnessStatement = [
           <t>Formally: for quorums Q₁, Q₂ ⊆ R, |Q₁| = |Q₂| = 5, |R| = 7 ⇒ 
           |Q₁ ∩ Q₂| ≥ 3 > 2 = f.</t>
           
-          <t><bcp14>NAT-Aware Consensus:</bcp14> Witnesses that are behind
+          <t><strong>NAT-Aware Consensus:</strong> Witnesses that are behind
           NATs can participate in consensus through relays:</t>
           
           <ul>
@@ -1212,7 +1246,7 @@ WitnessStatement = [
             <li>Consensus messages are sent through relays if direct is unavailable</li>
           </ul>
           
-          <t><bcp14>Degraded Consensus Mode:</bcp14> When the full witness
+          <t><strong>Degraded Consensus Mode:</strong> When the full witness
           ring cannot be reached due to NAT or network issues:</t>
           
           <ul>
@@ -1222,7 +1256,7 @@ WitnessStatement = [
             <li>When connectivity is restored, state is reconciled</li>
           </ul>
           
-          <t><bcp14>Degraded Mode Security Implications:</bcp14> In DEGRADED 
+          <t><strong>Degraded Mode Security Implications:</strong> In DEGRADED 
           mode (3 of 4 witnesses, DEGRADED_QUORUM), the protocol tolerates 
           only f=1 Byzantine faults. Critical operations <bcp14>MUST</bcp14> 
           be delayed until full consensus (5 of 7) is restored. The following 
@@ -1242,7 +1276,7 @@ WitnessStatement = [
           alert operators if DEGRADED mode persists for more than 
           5 minutes.</t>
           
-          <t><bcp14>BFT Message Types:</bcp14></t>
+          <t><strong>BFT Message Types:</strong></t>
           
           <figure>
             <artwork type="text/plain"><![CDATA[
@@ -1361,36 +1395,13 @@ FrostRingSig = {
             ]]></artwork>
           </figure>
 
-          <section anchor="bft-operations" numbered="true">
-            <name>Operations</name>
-            <t>An <em>Operation</em> is a CBOR item with the following properties:</t>
-            <ul>
-              <li>Its encoding <bcp14>MUST</bcp14> be canonical QUIP-CBOR (<xref target="cbor"/>). The signing payload of <tt>bft_preprepare</tt> includes the operation as encoded on the wire; non-canonical operations will cause verification failures.</li>
-              <li>An operation <bcp14>MUST</bcp14> have a <tt>kind</tt> — a text string identifying what class of state transition it represents. The kinds currently defined by this specification are <tt>"key_rotation"</tt>, <tt>"revocation"</tt>, <tt>"witness_membership_change"</tt>, and <tt>"resource_ownership_transfer"</tt>. Applications <bcp14>MAY</bcp14> define additional kinds.</li>
-              <li>An operation <bcp14>MUST</bcp14> have a <tt>subject</tt> — the state it acts on. Two operations with different subjects never conflict.</li>
-              <li>An operation <bcp14>MUST</bcp14> define, as part of its application-layer specification, a conflict relation with other operations of the same kind. Two operations of the same kind conflict if applying both produces a state that would not have been produced by applying either alone.</li>
-              <li>Witnesses <bcp14>MUST NOT</bcp14> interpret operation payloads beyond the <tt>kind</tt> and <tt>subject</tt> fields. Application-layer conflict detection is performed by the operation's registered handler, not by the ring itself.</li>
-              <li>Operation size: operations <bcp14>SHOULD</bcp14> be at most 4 KiB. Larger operations <bcp14>MAY</bcp14> be accepted but <bcp14>SHOULD</bcp14> be rate-limited or rejected on a per-ring basis. Implementations <bcp14>MAY</bcp14> advertise a per-ring operation size cap in the ring's membership announcement.</li>
-            </ul>
-            <t>The CDDL for <tt>Operation</tt> is defined with the BFT messages above:</t>
-            <figure>
-              <artwork type="text/plain"><![CDATA[
-Operation = {
-  kind: tstr,              ; operation kind
-  subject: bytes,          ; opaque subject identifier
-  body: any                ; application-defined payload
-}
-              ]]></artwork>
-            </figure>
-          </section>
+          <t><strong>Pre-prepare digest semantics:</strong> For a <tt>bft_preprepare</tt> message, <tt>digest</tt> is <tt>SHA-256(ring_id || view || sequence || QUIP-CBOR-encode(operation))</tt>, where <tt>ring_id</tt> is the 32-byte ring identifier, <tt>view</tt> and <tt>sequence</tt> are encoded as 8-byte big-endian unsigned integers, and <tt>||</tt> denotes byte concatenation. Witnesses <bcp14>MUST</bcp14> recompute this digest from the received fields and reject the message with E_BFT_FAILURE (error code 0x0B) if it does not match.</t>
 
-          <t><bcp14>Pre-prepare digest semantics:</bcp14> For a <tt>bft_preprepare</tt> message, <tt>digest</tt> is <tt>SHA-256(ring_id || view || sequence || QUIP-CBOR-encode(operation))</tt>, where <tt>ring_id</tt> is the 32-byte ring identifier, <tt>view</tt> and <tt>sequence</tt> are encoded as 8-byte big-endian unsigned integers, and <tt>||</tt> denotes byte concatenation. Witnesses <bcp14>MUST</bcp14> recompute this digest from the received fields and reject the message with E_BFT_FAILURE (error code 0x0B) if it does not match.</t>
+          <t><strong>New-view prepared messages:</strong> Each entry in <tt>prepared_messages</tt> is a complete <tt>bft_preprepare</tt> message as it would appear on the wire, including the primary's signature. It is not a digest. The new primary re-proposes these messages, and witnesses re-verify the primary's signature.</t>
 
-          <t><bcp14>New-view prepared messages:</bcp14> Each entry in <tt>prepared_messages</tt> is a complete <tt>bft_preprepare</tt> message as it would appear on the wire, including the primary's signature. It is not a digest. The new primary re-proposes these messages, and witnesses re-verify the primary's signature.</t>
-
-          <t><bcp14>State-transfer signing payload:</bcp14> For <tt>bft_state_transfer</tt>, the <tt>ring_signature</tt> covers the message array with the <tt>ring_signature</tt> element removed, encoded with QUIP-CBOR. This is consistent with <xref target="signing-convention"/>.</t>
+          <t><strong>State-transfer signing payload:</strong> For <tt>bft_state_transfer</tt>, the <tt>ring_signature</tt> covers the message array with the <tt>ring_signature</tt> element removed, encoded with QUIP-CBOR. This is consistent with <xref target="signing-convention"/>.</t>
           
-          <t><bcp14>BFT Quorum Rules:</bcp14></t>
+          <t><strong>BFT Quorum Rules:</strong></t>
           
           <ul>
             <li>A quorum is 5 of 7 witnesses (VIEW_CHANGE_QUORUM = 5).</li>
@@ -1398,8 +1409,9 @@ Operation = {
             at least VIEW_CHANGE_QUORUM (5) valid view-change messages.</li>
             <li>A checkpoint <bcp14>MUST</bcp14> be signed by at least 
             VIEW_CHANGE_QUORUM (5) witnesses to be considered stable.</li>
-            <li>A state transfer <bcp14>MUST</bcp14> include a 
-            <tt>RingSignature</tt> that is either:
+            <li>
+              <t>A state transfer <bcp14>MUST</bcp14> include a 
+              <tt>RingSignature</tt> that is either:</t>
               <ul>
                 <li>5 individual Ed25519 signatures from distinct witnesses, 
                 ordered by canonical NodeId with corresponding signer list, or</li>
@@ -1410,7 +1422,7 @@ Operation = {
             before accepting any state transfer.</li>
           </ul>
           
-          <t><bcp14>Ring Signature Validation:</bcp14> Recipients of a 
+          <t><strong>Ring Signature Validation:</strong> Recipients of a 
           <tt>bft_state_transfer</tt> <bcp14>MUST</bcp14> validate the 
           <tt>RingSignature</tt> by either:</t>
           
@@ -1422,7 +1434,7 @@ Operation = {
             against the group public key and the state digest.</li>
           </ul>
           
-          <t><bcp14>Consensus Flow:</bcp14></t>
+          <t><strong>Consensus Flow:</strong></t>
           
           <ol>
             <li>Primary proposes operation (PRE-PREPARE)</li>
@@ -1432,13 +1444,33 @@ Operation = {
             <li>Operation is applied to DVV</li>
           </ol>
           
-          <t><bcp14>View Changes:</bcp14> If the primary is suspected faulty, 
-          witnesses initiate a view change. The new primary is the next node 
-          in the ring (deterministic rotation). The view change includes 
-          quorum certificates for prepared messages and the latest stable 
-          checkpoint to ensure safety across view changes.</t>
+          <t><strong>View Changes:</strong> If the primary is suspected
+          faulty, witnesses initiate a view change. Ring membership is
+          ordered by canonical NodeId order (bytewise lexicographic over
+          the 32-byte NodeId). The primary for view <tt>v</tt> is the
+          member at position <tt>v mod |R|</tt> in that order. This is
+          a deterministic assignment: every honest witness computes the
+          same primary for a given view number from the same ring
+          membership, without coordination. Provided the ring membership
+          is unchanged, a view change from view <tt>v</tt> to view
+          <tt>v + 1</tt> advances the primary to the next member in
+          canonical order, wrapping at the end. When membership changes
+          between views, <tt>v mod |R|</tt> still determines the primary
+          but the "next member" relationship may not hold across the
+          change.</t>
+
+          <t>When <tt>|R| &lt; WITNESS_COUNT</tt> (for example, in
+          DEGRADED mode), the ordering is applied to the reachable
+          members of the ring, not the full nominal ring. Implementations
+          <bcp14>MUST</bcp14> agree on the reachable subset before
+          applying the rotation; disagreement about membership is handled
+          as a view-change failure and forces a further view bump.</t>
+
+          <t>The view change includes quorum certificates for prepared
+          messages and the latest stable checkpoint to ensure safety
+          across view changes.</t>
           
-          <t><bcp14>Consensus Requirements:</bcp14> Operations in QUIP fall 
+          <t><strong>Consensus Requirements:</strong> Operations in QUIP fall 
           into two categories:</t>
           
           <table>
@@ -1464,7 +1496,7 @@ Operation = {
             </tbody>
           </table>
           
-          <t><bcp14>Optimistic Execution Eligibility:</bcp14> An operation is
+          <t><strong>Optimistic Execution Eligibility:</strong> An operation is
           eligible for optimistic execution if:</t>
           <ul>
             <li>It does not change the membership of a witness ring</li>
@@ -1473,7 +1505,7 @@ Operation = {
             <li>The peer has KT_VERIFIED status for the NodeId</li>
           </ul>
           <t>Peers with KT_PENDING status <bcp14>MAY</bcp14> issue writes, 
-          but such writes are <bcp14>NOT</bcp14> eligible for optimistic 
+          but such writes are <strong>NOT</strong> eligible for optimistic 
           execution; they MUST await BFT confirmation. This is an intentional 
           liveness trade-off for new peers.</t>
           
@@ -1482,7 +1514,7 @@ Operation = {
           witness ring is only involved if the conflict cannot be resolved
           causally.</t>
           
-          <t><bcp14>Optimistic Mode:</bcp14> For eligible operations 
+          <t><strong>Optimistic Mode:</strong> For eligible operations 
           (approximately 95% of writes), peers use optimistic execution:</t>
           
           <ul>
@@ -1494,6 +1526,29 @@ Operation = {
           <t>This provides low latency for normal operations. See 
           <xref target="performance-expectations"/> for performance 
           expectations.</t>
+
+          <section anchor="bft-operations" numbered="true">
+            <name>Operations</name>
+            <t>An <em>Operation</em> is a CBOR item with the following properties:</t>
+            <ul>
+              <li>Its encoding <bcp14>MUST</bcp14> be canonical QUIP-CBOR (<xref target="cbor"/>). The signing payload of <tt>bft_preprepare</tt> includes the operation as encoded on the wire; non-canonical operations will cause verification failures.</li>
+              <li>An operation <bcp14>MUST</bcp14> have a <tt>kind</tt> — a text string identifying what class of state transition it represents. The kinds currently defined by this specification are <tt>"key_rotation"</tt>, <tt>"revocation"</tt>, <tt>"witness_membership_change"</tt>, and <tt>"resource_ownership_transfer"</tt>. Applications <bcp14>MAY</bcp14> define additional kinds.</li>
+              <li>An operation <bcp14>MUST</bcp14> have a <tt>subject</tt> — the state it acts on. Two operations with different subjects never conflict.</li>
+              <li>An operation <bcp14>MUST</bcp14> define, as part of its application-layer specification, a conflict relation with other operations of the same kind. Two operations of the same kind conflict if applying both produces a state that would not have been produced by applying either alone.</li>
+              <li>Witnesses <bcp14>MUST NOT</bcp14> interpret operation payloads beyond the <tt>kind</tt> and <tt>subject</tt> fields. Application-layer conflict detection is performed by the operation's registered handler, not by the ring itself.</li>
+              <li>Operation size: operations <bcp14>SHOULD</bcp14> be at most 4 KiB. Larger operations <bcp14>MAY</bcp14> be accepted but <bcp14>SHOULD</bcp14> be rate-limited or rejected on a per-ring basis. Implementations <bcp14>MAY</bcp14> advertise a per-ring operation size cap in the ring's membership announcement.</li>
+            </ul>
+            <t>The CDDL for <tt>Operation</tt> is defined with the BFT messages above:</t>
+            <figure>
+              <artwork type="text/plain"><![CDATA[
+Operation = {
+  kind: tstr,              ; operation kind
+  subject: bytes,          ; opaque subject identifier
+  body: any                ; application-defined payload
+}
+              ]]></artwork>
+            </figure>
+          </section>
         </section>
         
         <!-- ========================================================== -->
@@ -1506,7 +1561,7 @@ Operation = {
           state truncation, recovery, and state transfer. It <bcp14>SHOULD</bcp14> 
           be enabled for long-running witness rings.</t>
           
-          <t><bcp14>Checkpoint Flow:</bcp14></t>
+          <t><strong>Checkpoint Flow:</strong></t>
           
           <ol>
             <li>When a witness's sequence number reaches a multiple of 
@@ -1521,7 +1576,7 @@ Operation = {
             from peers with the stable checkpoint.</li>
           </ol>
           
-          <t><bcp14>Checkpoint Constants:</bcp14></t>
+          <t><strong>Checkpoint Constants:</strong></t>
           
           <figure>
             <artwork type="text/plain"><![CDATA[
@@ -1530,7 +1585,7 @@ VIEW_CHANGE_QUORUM = 5     ; Quorum size for view changes and checkpoints
             ]]></artwork>
           </figure>
           
-          <t><bcp14>State Transfer:</bcp14> A witness that has fallen behind 
+          <t><strong>State Transfer:</strong> A witness that has fallen behind 
           can request state transfer from the ring:</t>
           
           <ol>
@@ -1542,6 +1597,32 @@ VIEW_CHANGE_QUORUM = 5     ; Quorum size for view changes and checkpoints
             the state.</li>
             <li>The lagging witness resumes participation from the checkpoint.</li>
           </ol>
+
+          <t><strong>State Format:</strong> The <tt>state</tt> field is an
+          opaque byte string whose internal structure is defined by the
+          application that uses the BFT ring. This specification does not
+          mandate a serialization. The following requirements apply:</t>
+
+          <ul>
+            <li>The <tt>checkpoint_digest</tt> field
+            <bcp14>MUST</bcp14> be the SHA-256 of the <tt>state</tt>
+            bytes as transmitted.</li>
+            <li>The <tt>state</tt> bytes <bcp14>MUST</bcp14> be
+            deterministically decodable by any implementation of the
+            same application, so that a lagging witness from a different
+            codebase can reconstruct the ring's state without ambiguity.
+            Applications <bcp14>SHOULD</bcp14> define their state
+            serialization in a companion specification.</li>
+            <li>At minimum, the state <bcp14>SHOULD</bcp14> encode the
+            DVV the ring is tracking, the current view and sequence
+            number, and any operations applied since the last stable
+            checkpoint. The choice of encoding is the application's.</li>
+            <li>A recipient that cannot decode the state
+            <bcp14>MUST</bcp14> reject the transfer with E_BFT_FAILURE
+            (error code 0x0B) rather than apply a state it cannot
+            validate. Silently accepting an unparseable state is a
+            protocol violation.</li>
+          </ul>
           
           <t>Checkpointing is recommended for deployments with high churn 
           or long-running rings.</t>
@@ -1569,11 +1650,11 @@ KeyRotation = [
             ]]></artwork>
           </figure>
           
-          <t><bcp14>Witness Requirement:</bcp14> A new key <bcp14>MUST</bcp14> 
+          <t><strong>Witness Requirement:</strong> A new key <bcp14>MUST</bcp14> 
           be witnessed by 2+ existing witnesses before KT_VERIFIED status 
           transfers.</t>
           
-          <t><bcp14>Discontinuous Identity Mode:</bcp14> Users <bcp14>MAY</bcp14> 
+          <t><strong>Discontinuous Identity Mode:</strong> Users <bcp14>MAY</bcp14> 
           break the rotation chain permanently:</t>
           
           <figure>
@@ -1592,7 +1673,7 @@ Discontinuity = [
           
           <ul>
             <li>No cryptographic link between old and new identities</li>
-            <li>KT_VERIFIED status does <bcp14>NOT</bcp14> transfer</li>
+            <li>KT_VERIFIED status does <strong>NOT</strong> transfer</li>
             <li>Old NodeId <bcp14>MUST</bcp14> be tombstoned</li>
           </ul>
         </section>
@@ -1619,7 +1700,7 @@ SeqReset = [
             ]]></artwork>
           </figure>
           
-          <t><bcp14>Protocol Constant:</bcp14></t>
+          <t><strong>Protocol Constant:</strong></t>
           
           <figure>
             <artwork type="text/plain"><![CDATA[
@@ -1629,7 +1710,7 @@ MAX_REPLAY_WINDOW = 300000  ; 300 seconds (5 minutes), expressed in Unix
             ]]></artwork>
           </figure>
           
-          <t><bcp14>Acceptance Condition:</bcp14> Given <tt>last_seen_time</tt> 
+          <t><strong>Acceptance Condition:</strong> Given <tt>last_seen_time</tt> 
           (Unix milliseconds) from this NodeId:</t>
           
           <ul>
@@ -1645,7 +1726,7 @@ MAX_REPLAY_WINDOW = 300000  ; 300 seconds (5 minutes), expressed in Unix
           field in this document, and <bcp14>MUST NOT</bcp14> be modified 
           by implementations.</t>
           
-          <t><bcp14>Replay Window Security:</bcp14> The two-sided check 
+          <t><strong>Replay Window Security:</strong> The two-sided check 
           enforces the clock skew assumption (A6 in <xref target="security-model"/>). 
           Messages with timestamps more than 5 minutes in the future are 
           rejected to prevent attackers from exploiting unbounded future 
@@ -1663,7 +1744,7 @@ MAX_REPLAY_WINDOW = 300000  ; 300 seconds (5 minutes), expressed in Unix
           constants are derived from a specific adversary model and 
           engineering trade-offs.</t>
           
-          <t><bcp14>Adversary Model:</bcp14> We assume an adversary that 
+          <t><strong>Adversary Model:</strong> We assume an adversary that 
           can compromise up to 2 witnesses in any ring. This is consistent 
           with a Byzantine fault tolerance threshold of f=2, which requires 
           at least 3f+1 = 7 witnesses. The adversary is assumed to have:</t>
@@ -1678,7 +1759,7 @@ MAX_REPLAY_WINDOW = 300000  ; 300 seconds (5 minutes), expressed in Unix
             <li>No ability to control 4+ witnesses in a ring simultaneously</li>
           </ul>
           
-          <t><bcp14>Why 7 Witnesses:</bcp14></t>
+          <t><strong>Why 7 Witnesses:</strong></t>
           
           <ul>
             <li><em>BFT threshold:</em> 3f+1 with f=2 yields 7 witnesses. 
@@ -1702,7 +1783,7 @@ MAX_REPLAY_WINDOW = 300000  ; 300 seconds (5 minutes), expressed in Unix
             against the assumed adversary.</li>
           </ul>
           
-          <t><bcp14>Why 24-Hour Rotation:</bcp14></t>
+          <t><strong>Why 24-Hour Rotation:</strong></t>
           
           <ul>
             <li><em>Security:</em> Limits the <em>duration</em> of any 
@@ -1724,7 +1805,7 @@ MAX_REPLAY_WINDOW = 300000  ; 300 seconds (5 minutes), expressed in Unix
             compromise.</li>
           </ul>
           
-          <t><bcp14>Engineering Trade-offs:</bcp14></t>
+          <t><strong>Engineering Trade-offs:</strong></t>
           
           <ul>
             <li><em>Latency:</em> 7 witnesses require 5 responses for 
@@ -1735,7 +1816,7 @@ MAX_REPLAY_WINDOW = 300000  ; 300 seconds (5 minutes), expressed in Unix
             (7) is simpler to implement than a variable number of witnesses.</li>
           </ul>
           
-          <t><bcp14>Future Flexibility:</bcp14> While version 1 fixes these 
+          <t><strong>Future Flexibility:</strong> While version 1 fixes these 
           constants, future versions <bcp14>MAY</bcp14> consider:</t>
           
           <ul>
@@ -1776,7 +1857,7 @@ RevocationNotice = [
         ]]></artwork>
       </figure>
       
-      <t><bcp14>Tombstoning Condition:</bcp14></t>
+      <t><strong>Tombstoning Condition:</strong></t>
       
       <ul>
         <li>5+ valid revocation notices from distinct reporters</li>
@@ -1800,13 +1881,13 @@ RevocationNotice = [
       policies, algorithms, and evidence requirements are left to 
       applications.</t>
       
-      <t><bcp14>Note:</bcp14> The primitives defined in this section are 
+      <t><strong>Note:</strong> The primitives defined in this section are 
       <bcp14>OPTIONAL</bcp14> application-layer conventions, not protocol-enforced 
       guarantees. A QUIP implementation that does not support governance 
       primitives remains fully protocol-compliant. Support is advertised via 
       the <tt>governance</tt> capability bit (<xref target="handshake"/>).</t>
 
-      <t>Witnesses perform only <bcp14>syntactic validation</bcp14> (signatures, 
+      <t>Witnesses perform only <strong>syntactic validation</strong> (signatures, 
       timestamps, quotas). They <bcp14>MUST NOT</bcp14> judge the semantic 
       correctness of application-defined claims (e.g., whether a DMCA claim 
       is valid). Applications MUST define their own evidence rules.</t>
@@ -1844,12 +1925,12 @@ TrustedCIDRegistration = [
           <li>Any other application-defined metadata</li>
         </ul>
         
-        <t><bcp14>Verification:</bcp14> The CID in the registration 
+        <t><strong>Verification:</strong> The CID in the registration 
         <bcp14>MUST</bcp14> match the content referenced. Implementations 
         <bcp14>MAY</bcp14> verify application-defined metadata (e.g., 
         that perceptual hashes are consistent with the content).</t>
         
-        <t><bcp14>Delegation:</bcp14> The owner <bcp14>MAY</bcp14> delegate 
+        <t><strong>Delegation:</strong> The owner <bcp14>MAY</bcp14> delegate 
         governance authority to other NodeIds:</t>
         
         <figure>
@@ -1904,7 +1985,7 @@ QuarantineNotice = [
           ]]></artwork>
         </figure>
         
-        <t><bcp14>Quarantine Effect:</bcp14> Quarantine is an advisory 
+        <t><strong>Quarantine Effect:</strong> Quarantine is an advisory 
         discoverability filter, not a deletion or access-control mechanism. 
         Quarantined CIDs:</t>
         <ul>
@@ -1920,7 +2001,7 @@ QuarantineNotice = [
           immutability guarantees.</li>
         </ul>
         
-        <t><bcp14>Witness Ring Validation:</bcp14> Quarantine requests 
+        <t><strong>Witness Ring Validation:</strong> Quarantine requests 
         <bcp14>SHOULD</bcp14> be validated by the witness ring (5 of 7 
         witnesses) before being applied. The validation policy 
         (e.g., evidence requirements, reason codes) is application-
@@ -1928,7 +2009,7 @@ QuarantineNotice = [
         <bcp14>MUST</bcp14> be a valid <tt>RingSignature</tt> as defined 
         in <xref target="bft"/>.</t>
         
-        <t><bcp14>Quarantine Removal:</bcp14> A quarantine <bcp14>MAY</bcp14> 
+        <t><strong>Quarantine Removal:</strong> A quarantine <bcp14>MAY</bcp14> 
         be removed by:</t>
         <ul>
           <li>Expiration of <tt>valid_until</tt></li>
@@ -2015,7 +2096,7 @@ DerivativeLink = [
         the governance primitives. These are illustrative and not 
         protocol requirements.</t>
         
-        <t><bcp14>Example 1: Perceptual Hash-Based Takedown:</bcp14></t>
+        <t><strong>Example 1: Perceptual Hash-Based Takedown:</strong></t>
         <ul>
           <li>Application defines perceptual hash algorithms (pHash, 
           dHash, etc.) in <tt>app_metadata</tt></li>
@@ -2025,7 +2106,7 @@ DerivativeLink = [
           <li>Witness ring validates based on application-defined evidence</li>
         </ul>
         
-        <t><bcp14>Example 2: DMCA Takedown:</bcp14></t>
+        <t><strong>Example 2: DMCA Takedown:</strong></t>
         <ul>
           <li>Copyright holder registers tCID with ownership claim</li>
           <li>Copyright holder delegates to DMCA agent</li>
@@ -2035,7 +2116,7 @@ DerivativeLink = [
           <li>Network quarantines the content</li>
         </ul>
         
-        <t><bcp14>Example 3: Right to be Forgotten:</bcp14></t>
+        <t><strong>Example 3: Right to be Forgotten:</strong></t>
         <ul>
           <li>User registers tCID for their personal data</li>
           <li>User submits <tt>quarantine</tt> with <tt>reason="RtBF"</tt></li>
@@ -2106,23 +2187,23 @@ HashAlgo = &{
         ]]></artwork>
       </figure>
       
-      <t><bcp14>CID Generation:</bcp14></t>
+      <t><strong>CID Generation:</strong></t>
       <ul>
         <li><tt>cid_sha256 = SHA-256(payload)</tt></li>
         <li><tt>cid_blake3 = BLAKE3(payload)</tt></li>
       </ul>
       
-      <t><bcp14>CID Verification:</bcp14> Receivers <bcp14>MUST</bcp14> 
+      <t><strong>CID Verification:</strong> Receivers <bcp14>MUST</bcp14> 
       verify that the hash of the received payload matches the CID 
       using the algorithm indicated in the handshake. For CIDv1, the 
       algorithm is indicated in the CID itself. Mismatches <bcp14>MUST</bcp14> 
       be rejected with E_CID_MISMATCH (error code 0x0C).</t>
       
-      <t><bcp14>Algorithm Negotiation:</bcp14> Peers <bcp14>SHOULD</bcp14> 
+      <t><strong>Algorithm Negotiation:</strong> Peers <bcp14>SHOULD</bcp14> 
       negotiate the hash algorithm during the handshake. If no agreement 
       is reached, the peers <bcp14>MUST</bcp14> fall back to SHA-256.</t>
       
-      <t><bcp14>Algorithm Comparison:</bcp14></t>
+      <t><strong>Algorithm Comparison:</strong></t>
       
       <table>
         <thead>
@@ -2161,7 +2242,7 @@ HashAlgo = &{
         </tbody>
       </table>
       
-      <t><bcp14>BLAKE3 Advantages:</bcp14></t>
+      <t><strong>BLAKE3 Advantages:</strong></t>
       <ul>
         <li><em>Performance:</em> BLAKE3 is approximately 3× faster than 
         SHA-256 for large data, making it ideal for content-addressed 
@@ -2175,7 +2256,7 @@ HashAlgo = &{
         key derivation and keyed hashing without a separate HMAC layer.</li>
       </ul>
       
-      <t><bcp14>Why SHA-256 is Mandatory:</bcp14> SHA-256 ensures broad 
+      <t><strong>Why SHA-256 is Mandatory:</strong> SHA-256 ensures broad 
       compatibility with existing systems and meets regulatory requirements 
       for FIPS-compliant environments. BLAKE3 is provided as an OPTIONAL 
       optimization for performance-critical applications.</t>
@@ -2200,7 +2281,7 @@ CIDv1 = {
         ]]></artwork>
         </figure>
         
-        <t><bcp14>Tagging:</bcp14> A CIDv1 is encoded as a CBOR map or as a 
+        <t><strong>Tagging:</strong> A CIDv1 is encoded as a CBOR map or as a 
         binary prefix followed by the digest. The RECOMMENDED binary format 
         is a single byte prefix (hash_algo) followed by the 32-byte digest:</t>
         
@@ -2210,7 +2291,7 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
         ]]></artwork>
         </figure>
         
-        <t><bcp14>Usage:</bcp14> When both peers support CIDv1 (bit 9 set 
+        <t><strong>Usage:</strong> When both peers support CIDv1 (bit 9 set 
         in capabilities), they <bcp14>MUST</bcp14> use CIDv1 for all 
         persistent state — including pins, quarantine notices, trusted 
         CID registrations, and derivative links. Raw CIDs <bcp14>MAY</bcp14> 
@@ -2227,19 +2308,19 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
           <li>DVV state CIDs are unambiguous</li>
         </ul>
         
-        <t><bcp14>Negotiation:</bcp14> The <tt>cidv1_algo</tt> handshake 
+        <t><strong>Negotiation:</strong> The <tt>cidv1_algo</tt> handshake 
         extension indicates the preferred algorithm for CIDv1. If both 
         peers support CIDv1, they <bcp14>MUST</bcp14> use the tagged 
         format for all content identifiers. If no agreement is reached, 
         peers <bcp14>MUST</bcp14> fall back to raw CIDs with the algorithm 
         indicated by <tt>hash_algo</tt>.</t>
         
-        <t><bcp14>Migration:</bcp14> Implementations that support CIDv1 
+        <t><strong>Migration:</strong> Implementations that support CIDv1 
         <bcp14>SHOULD</bcp14> continue to accept raw CIDs for backward 
         compatibility but <bcp14>MUST</bcp14> prefer CIDv1 for new 
         persistent state.</t>
         
-        <t><bcp14>Future Work:</bcp14> Full CIDv1 with multicodec prefix 
+        <t><strong>Future Work:</strong> Full CIDv1 with multicodec prefix 
         (IPFS-compatible) is deferred to <xref target="future-work"/>.</t>
       </section>
       
@@ -2257,7 +2338,7 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
         is only available when both peers advertise <tt>merkle_range</tt> 
         and <tt>blake3</tt>.</t>
         
-        <t><bcp14>Requirement:</bcp14> Range fetching is only defined for 
+        <t><strong>Requirement:</strong> Range fetching is only defined for 
         resources whose CID is a BLAKE3 CID (either a raw CID produced 
         with <tt>hash_algo = 1</tt> or a CIDv1 with <tt>hash_algo = 1</tt>). 
         SHA-256 CIDs do not support range fetching because SHA-256 has no 
@@ -2266,14 +2347,14 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
         <tt>blake3</tt>; see the capability dependencies in 
         <xref target="handshake"/>.</t>
         
-        <t><bcp14>Chunk Structure:</bcp14> BLAKE3 divides the input into 
+        <t><strong>Chunk Structure:</strong> BLAKE3 divides the input into 
         chunks of BLAKE3_CHUNK_SIZE (1024 bytes). The tree of chunk 
         chaining values is defined in the BLAKE3 specification 
         <xref target="BLAKE3"/>. QUIP does not redefine this structure; 
         it uses BLAKE3's native tree as the source of both the CID and 
         the range proofs.</t>
         
-        <t><bcp14>Range Request:</bcp14> A range request specifies a 
+        <t><strong>Range Request:</strong> A range request specifies a 
         resource, a BLAKE3 CID, a byte offset, and a byte length. The 
         responder returns the requested bytes and a proof that those 
         bytes belong to the subtree whose chaining values fold up to 
@@ -2281,13 +2362,13 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
         defined in the BLAKE3 specification. QUIP treats the proof as 
         an opaque byte string whose interpretation is defined by BLAKE3.</t>
         
-        <t><bcp14>Verification:</bcp14> The client receives the range 
+        <t><strong>Verification:</strong> The client receives the range 
         bytes and the proof, and verifies them against the CID using 
         BLAKE3's verification procedure. If verification fails, the 
         client <bcp14>MUST</bcp14> reject the response with 
         E_PROOF_INVALID (error code 0x1C).</t>
         
-        <t><bcp14>Range Bounds:</bcp14> The range 
+        <t><strong>Range Bounds:</strong> The range 
         <tt>[offset, offset + length)</tt> <bcp14>MUST</bcp14> fall 
         entirely within the resource. Requests whose range extends past 
         the end of the resource <bcp14>MUST</bcp14> be rejected with 
@@ -2296,7 +2377,7 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
         advertised <tt>max_range_length</tt>) <bcp14>MUST</bcp14> be 
         rejected with E_RANGE_INVALID.</t>
         
-        <t><bcp14>Range Length Cap:</bcp14> To bound the memory cost 
+        <t><strong>Range Length Cap:</strong> To bound the memory cost 
         of a single response, a range request <bcp14>MUST NOT</bcp14> 
         exceed MAX_RANGE_LENGTH (1048576 bytes, 1 MiB) unless both 
         peers negotiated a larger <tt>max_range_length</tt> via the 
@@ -2304,7 +2385,7 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
         than the cap <bcp14>SHOULD</bcp14> issue multiple range 
         requests in parallel, each covering a distinct range.</t>
         
-        <t><bcp14>Responder Without a Cached Chunk Tree:</bcp14> A 
+        <t><strong>Responder Without a Cached Chunk Tree:</strong> A 
         responder that advertises <tt>merkle_range</tt> is not required 
         to keep the chunk tree resident for every resource it holds. If 
         a <tt>fetch_range</tt> request arrives for a resource whose chunk 
@@ -2321,20 +2402,20 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
         recomputation and rejection is a local policy decision; the 
         protocol does not mandate either behavior.</t>
         
-        <t><bcp14>Rate Limiting:</bcp14> Range requests are subject to 
+        <t><strong>Rate Limiting:</strong> Range requests are subject to 
         the same per-NodeId rate limits as other SYNC verbs. 
         Implementations <bcp14>SHOULD</bcp14> additionally cap the 
         total bytes served per connection per unit time to bound the 
         cost of a peer issuing many small range requests.</t>
         
-        <t><bcp14>Interaction with Other Verbs:</bcp14> Range fetching 
+        <t><strong>Interaction with Other Verbs:</strong> Range fetching 
         is additive. It does not modify the behavior of <tt>get</tt>, 
         <tt>set</tt>, <tt>sync</tt>, <tt>rbsr_sync</tt>, or the BULK 
         verbs. A resource whose entire content is needed 
         <bcp14>SHOULD</bcp14> be fetched via the normal whole-resource 
         mechanisms; range fetching is for partial reads.</t>
         
-        <t><bcp14>Use Cases:</bcp14> Merkle range fetching is 
+        <t><strong>Use Cases:</strong> Merkle range fetching is 
         applicable whenever the content format exposes stable structure 
         that a consumer can address by offset:</t>
         
@@ -2369,9 +2450,9 @@ cidv1_bytes = [hash_algo: uint8] + [digest: 32-byte hash]
       <t>To defend against endpoint compromise, QUIP supports threshold 
       signatures using the FROST scheme <xref target="FROST"/>.</t>
       
-      <t><bcp14>Threshold Scheme:</bcp14> <tt>FROST(Ed25519, SHA-512, t, n)</tt></t>
+      <t><strong>Threshold Scheme:</strong> <tt>FROST(Ed25519, SHA-512, t, n)</tt></t>
       
-      <t><bcp14>Threshold Signature Format:</bcp14></t>
+      <t><strong>Threshold Signature Format:</strong></t>
       
       <figure>
         <artwork type="text/plain"><![CDATA[
@@ -2392,7 +2473,7 @@ ThresholdSignature = {
       logic. Key rotation requires t-of-n participants to sign the rotation 
       message.</t>
       
-      <t><bcp14>Ring Signature Compatibility:</bcp14> The FROST aggregate 
+      <t><strong>Ring Signature Compatibility:</strong> The FROST aggregate 
       signature format in <tt>FrostRingSig</tt> (<xref target="bft"/>) uses 
       the same FROST scheme. Witnesses implementing checkpointing 
       <bcp14>SHOULD</bcp14> support both individual and FROST aggregate 
@@ -2409,17 +2490,17 @@ ThresholdSignature = {
       constraints:</t>
       
       <ul>
-        <li><bcp14>Integers:</bcp14> Shortest form only.</li>
-        <li><bcp14>Maps:</bcp14> Keys sorted by bytewise lexicographic order.</li>
-        <li><bcp14>Floats:</bcp14> Prohibited. Use integer + scale.</li>
-        <li><bcp14>Tags:</bcp14> No CBOR tags are used for QUIP messages. All messages begin with the string "quip-v1" as the first array element.</li>
-        <li><bcp14>Indefinite lengths:</bcp14> Prohibited.</li>
+        <li><strong>Integers:</strong> Shortest form only.</li>
+        <li><strong>Maps:</strong> Keys sorted by bytewise lexicographic order.</li>
+        <li><strong>Floats:</strong> Prohibited. Use integer + scale.</li>
+        <li><strong>Tags:</strong> No CBOR tags are used for QUIP messages. All messages begin with the string "quip-v1" as the first array element.</li>
+        <li><strong>Indefinite lengths:</strong> Prohibited.</li>
       </ul>
       
       <t>Non-canonical CBOR <bcp14>MUST</bcp14> be rejected with error 
       E_BAD_ENCODING.</t>
       
-      <t><bcp14>Version Gate:</bcp14> Implementations that dispatch on 
+      <t><strong>Version Gate:</strong> Implementations that dispatch on 
       element 1 of the top-level array <bcp14>MUST</bcp14> treat element 0 
       as a version gate: if element 0 is not the string <tt>"quip-v1"</tt>, 
       the message <bcp14>MUST</bcp14> be rejected with E_BAD_ENCODING 
@@ -2445,7 +2526,7 @@ ThresholdSignature = {
         <tt>SpilloverResponse</tt>, <tt>CrossPathValidation</tt>, 
         <tt>CrossPathResult</tt>, and all BFT message types.</t>
         
-        <t><bcp14>Signing Payload Definition:</bcp14></t>
+        <t><strong>Signing Payload Definition:</strong></t>
         
         <figure>
           <artwork type="text/plain"><![CDATA[
@@ -2458,32 +2539,33 @@ signing_payload = QUIP-CBOR-encode(
         <t>The signing payload is defined as follows:</t>
         
         <ol>
-          <li><bcp14>Remove the signature element entirely</bcp14> from 
+          <li><strong>Remove the signature element entirely</strong> from 
           the message array. The element is omitted, not zeroed, not 
           replaced with null, and not truncated in place. If the 
           signature field is named <tt>signature</tt>, <tt>owner_sig</tt>, 
           <tt>witness_sig</tt>, <tt>primary_sig</tt>, or 
           <tt>ring_signature</tt>, that entire field is removed.</li>
-          <li><bcp14>Re-encode the remaining array</bcp14> using the 
+          <li><strong>Re-encode the remaining array</strong> using the 
           canonical QUIP-CBOR rules of this section. The result is the 
           <tt>signing_payload</tt>.</li>
-          <li><bcp14>Compute the signature</bcp14> over <tt>signing_payload</tt> 
+          <li><strong>Compute the signature</strong> over <tt>signing_payload</tt> 
           using Ed25519 <xref target="RFC8032"/>. The signature is the 
           raw 64-byte Ed25519 signature.</li>
         </ol>
         
-        <t><bcp14>Signature Algorithm:</bcp14> Ed25519 <xref target="RFC8032"/>. 
+        <t><strong>Signature Algorithm:</strong> Ed25519 <xref target="RFC8032"/>. 
         No other signature algorithm is defined for version 1 of this 
         protocol.</t>
         
-        <t><bcp14>Verification Procedure:</bcp14></t>
+        <t><strong>Verification Procedure:</strong></t>
         
         <ol>
           <li>Extract the signature element from the received message.</li>
           <li>Re-encode the message array without that element using 
           QUIP-CBOR (canonical form as defined in <xref target="cbor"/>).</li>
-          <li>Verify the Ed25519 signature against the signer's public 
-          key:
+          <li>
+            <t>Verify the Ed25519 signature against the signer's public 
+            key:</t>
             <ul>
               <li>For self-signed messages (e.g., <tt>KeyClaim</tt>, 
               <tt>SeqReset</tt>), the signer's public key is the 
@@ -2499,13 +2581,13 @@ signing_payload = QUIP-CBOR-encode(
           verification fails.</li>
         </ol>
         
-        <t><bcp14>Ring Signature Signing:</bcp14> For messages containing 
+        <t><strong>Ring Signature Signing:</strong> For messages containing 
         a <tt>ring_signature</tt> field (e.g., <tt>QuarantineNotice</tt>, 
         <tt>bft_state_transfer</tt>), all signatures within the ring 
         signature cover the same signing payload:</t>
         
         <ul>
-          <li><bcp14>IndividualRingSig:</bcp14> Each signature in 
+          <li><strong>IndividualRingSig:</strong> Each signature in 
           <tt>signatures[i]</tt> is computed by <tt>signers[i]</tt> over 
           the same <tt>signing_payload</tt> (the enclosing message with 
           the <tt>ring_signature</tt> element removed). The signer list 
@@ -2515,7 +2597,7 @@ signing_payload = QUIP-CBOR-encode(
           The <tt>ring_signature</tt> element is removed <em>as a whole</em> 
           before encoding — the individual signatures inside it are not 
           separately excluded.</li>
-          <li><bcp14>FrostRingSig:</bcp14> The FROST aggregate signature 
+          <li><strong>FrostRingSig:</strong> The FROST aggregate signature 
           is computed by the FROST group over the same 
           <tt>signing_payload</tt> (the enclosing message with the 
           <tt>ring_signature</tt> element removed). The FROST verification 
@@ -2523,7 +2605,7 @@ signing_payload = QUIP-CBOR-encode(
           group public key.</li>
         </ul>
         
-        <t><bcp14>Nested Signatures:</bcp14> If a signed message contains 
+        <t><strong>Nested Signatures:</strong> If a signed message contains 
         another signed message as an embedded value (for example, a 
         <tt>CrossPathValidation</tt> message embedding one or more signed 
         <tt>LookupResponse</tt> values in its <tt>path_responses</tt> 
@@ -2534,7 +2616,7 @@ signing_payload = QUIP-CBOR-encode(
         preserve the encoded bytes of any nested signed message when 
         computing the outer signing payload.</t>
         
-        <t><bcp14>Multiple Signatures on the Same Message:</bcp14> 
+        <t><strong>Multiple Signatures on the Same Message:</strong> 
         Messages that require multiple independent signatures (e.g., a 
         message co-signed by two NodeIds) are represented as separate 
         fields, not as a single field of multiple signatures. Each such 
@@ -2542,7 +2624,7 @@ signing_payload = QUIP-CBOR-encode(
         Implementations <bcp14>MUST NOT</bcp14> interpret the removal of 
         one signature field as also removing another.</t>
         
-        <t><bcp14>Determinism Requirement:</bcp14> Because the signing 
+        <t><strong>Determinism Requirement:</strong> Because the signing 
         payload is derived by removing an element and re-encoding, 
         implementations <bcp14>MUST</bcp14> use QUIP-CBOR canonical 
         encoding (as defined in <xref target="cbor"/>) at every step. 
@@ -2552,7 +2634,7 @@ signing_payload = QUIP-CBOR-encode(
         would cause the re-encoded payload to differ from the signer's 
         intent and cause verification failure.</t>
         
-        <t><bcp14>Test Vectors:</bcp14> Implementers <bcp14>SHOULD</bcp14> 
+        <t><strong>Test Vectors:</strong> Implementers <bcp14>SHOULD</bcp14> 
         use the test vectors published at the URL given in 
         <xref target="test-vectors"/> to validate their signing and 
         verification implementation. The test vectors cover at least:
@@ -2571,7 +2653,7 @@ signing_payload = QUIP-CBOR-encode(
       <t>QUIP uses four dedicated transport tiers to eliminate head-of-line 
       blocking and ensure deterministic behavior.</t>
       
-      <t><bcp14>Wire Format:</bcp14></t>
+      <t><strong>Wire Format:</strong></t>
       
       <figure>
         <artwork type="text/plain"><![CDATA[
@@ -2636,7 +2718,7 @@ one QUIP-CBOR object per datagram):
           </tr>
           <tr>
             <td>T3 Event</td>
-            <td>QUIC DATAGRAM (RFC 9221)</td>
+            <td>QUIC DATAGRAM (<xref target="RFC9221"/>)</td>
             <td>Media, telemetry, presence, ephemeral events, pin gossip</td>
             <td>Drop if congested</td>
             <td>Unreliable datagram</td>
@@ -2647,7 +2729,7 @@ one QUIP-CBOR object per datagram):
       <t>These stream IDs are reserved QUIC stream IDs. Implementations 
       <bcp14>MUST NOT</bcp14> use these IDs for non-QUIP traffic.</t>
       
-      <t><bcp14>Flow Control Frames:</bcp14></t>
+      <t><strong>Flow Control Frames:</strong></t>
       
       <ul>
         <li><tt>BLOCK(0x01)</tt>: Receiver cannot accept more data</li>
@@ -2655,7 +2737,7 @@ one QUIP-CBOR object per datagram):
         <li><tt>WINDOW(0x03)</tt>: Receiver advertises available capacity in bytes</li>
       </ul>
       
-      <t><bcp14>Flow Control State Machine (T1/T2 streams):</bcp14></t>
+      <t><strong>Flow Control State Machine (T1/T2 streams):</strong></t>
       
       <table>
         <thead>
@@ -2694,7 +2776,7 @@ one QUIP-CBOR object per datagram):
         </tbody>
       </table>
       
-      <t><bcp14>T1 SYNC Stream State Machine (stream 4):</bcp14></t>
+      <t><strong>T1 SYNC Stream State Machine (stream 4):</strong></t>
       
       <table>
         <thead>
@@ -2813,7 +2895,7 @@ one QUIP-CBOR object per datagram):
       connections. This section describes the NAT traversal mechanisms used 
       by QUIP.</t>
       
-      <t><bcp14>Core Principle:</bcp14> QUIP does not rely on centralized 
+      <t><strong>Core Principle:</strong> QUIP does not rely on centralized 
       NAT traversal servers. Instead, NAT traversal is performed using the 
       Coral DHT for address discovery, hole punching coordination, and relay 
       selection, ensuring the protocol remains brokerless and decentralized.</t>
@@ -2835,7 +2917,7 @@ one QUIP-CBOR object per datagram):
           through the DHT</li>
         </ul>
         
-        <t><bcp14>Address Type:</bcp14> All NAT traversal messages share 
+        <t><strong>Address Type:</strong> All NAT traversal messages share 
         a single <tt>Address</tt> type, defined once here and used 
         throughout this section:</t>
         
@@ -2849,7 +2931,7 @@ Address = {
           ]]></artwork>
         </figure>
         
-        <t><bcp14>Connectivity Announcement:</bcp14> Each peer publishes
+        <t><strong>Connectivity Announcement:</strong> Each peer publishes
         its connectivity information to the Coral DHT:</t>
         
         <figure>
@@ -2860,8 +2942,7 @@ ConnectivityAnnounce = [
   node_id: NodeId,
   external_addr: Address,      ; DHT-observed external address
   internal_addr: Address,      ; Internal address (if known)
-  nat_type: uint,              ; 0 = unknown, 1 = open, 2 = cone, 
-                               ; 3 = restricted, 4 = symmetric
+  nat_type: uint,              ; See "NAT Type Values" below.
   port_preservation: bool,     ; Whether NAT preserves source port
   relay_capable: bool,         ; Can relay for others
   capacity: uint,              ; Relay capacity (if relay_capable)
@@ -2871,20 +2952,67 @@ ConnectivityAnnounce = [
           ]]></artwork>
         </figure>
         
-        <t><bcp14>DHT-Assisted Address Discovery:</bcp14> Implementations
+        <t><strong>NAT Type Values:</strong></t>
+
+        <table>
+          <thead>
+            <tr>
+              <th>Value</th>
+              <th>Name</th>
+              <th>Meaning</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>0</td>
+              <td>unknown</td>
+              <td>NAT type not yet determined; external address
+              observations are insufficient to classify it.</td>
+            </tr>
+            <tr>
+              <td>1</td>
+              <td>open</td>
+              <td>Directly reachable; no NAT in the path. The observed
+              external address equals the internal address.</td>
+            </tr>
+            <tr>
+              <td>2</td>
+              <td>cone</td>
+              <td>Full-cone or restricted-cone NAT. The external IP is
+              stable across destinations; the external port is stable
+              across destinations (full-cone) or stable once a
+              destination has been contacted (restricted-cone).</td>
+            </tr>
+            <tr>
+              <td>3</td>
+              <td>restricted</td>
+              <td>Port-restricted cone. The external IP is stable but
+              the external port varies with the destination's IP.</td>
+            </tr>
+            <tr>
+              <td>4</td>
+              <td>symmetric</td>
+              <td>External IP or port varies per destination. Direct
+              connectivity is not achievable and a relay is required.
+              See <xref target="nat-relay"/>.</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <t><strong>DHT-Assisted Address Discovery:</strong> Implementations
         SHOULD use the Coral DHT to request address discovery from other
         peers. A peer MAY ask multiple independent DHT peers to report the
         source Address observed for its request and use the most consistent
         result as external_addr. Implementations MUST NOT depend on STUN
         or any centralized address-discovery service.</t>
         
-        <t><bcp14>Connectivity TTL:</bcp14> Connectivity announcements
+        <t><strong>Connectivity TTL:</strong> Connectivity announcements
         have a TTL of CONNECTIVITY_TTL (600 seconds, 10 minutes). Peers 
         SHOULD re-announce every 480 seconds (8 minutes) to maintain 
         freshness. This longer TTL reduces DHT traffic while maintaining 
         timely connectivity information.</t>
         
-        <t><bcp14>Adaptive Re-announce:</bcp14> Peers MAY adjust re-announce
+        <t><strong>Adaptive Re-announce:</strong> Peers MAY adjust re-announce
         frequency based on observed churn rate. In stable networks, peers
         MAY extend re-announce intervals up to 90% of TTL. In high-churn
         networks, peers SHOULD reduce intervals to 50% of TTL.</t>
@@ -2899,7 +3027,7 @@ ConnectivityAnnounce = [
         <t>The Coral DHT provides a decentralized relay system for
         peers behind NATs that cannot establish direct connections.</t>
         
-        <t><bcp14>Relay Discovery:</bcp14> Peers discover relays by
+        <t><strong>Relay Discovery:</strong> Peers discover relays by
         querying the Coral DHT for nodes that advertise relay capability:</t>
         
         <figure>
@@ -2936,7 +3064,7 @@ RelayEntry = {
           ]]></artwork>
         </figure>
 
-        <t><bcp14>Request/response correlation:</bcp14> A requester may have
+        <t><strong>Request/response correlation:</strong> A requester may have
         multiple <tt>relay_discovery</tt> requests outstanding for different
         targets. To allow a driver to demultiplex responses without
         serializing discoveries per target:</t>
@@ -2965,7 +3093,7 @@ RelayEntry = {
         in-flight discoveries while still demultiplexing responses
         unambiguously.</t>
         
-        <t><bcp14>Relay Selection Algorithm:</bcp14> Peers select relays
+        <t><strong>Relay Selection Algorithm:</strong> Peers select relays
         using the following criteria:</t>
         
         <ol>
@@ -2976,7 +3104,7 @@ RelayEntry = {
           <li>Historical reliability (prefer relays with good uptime)</li>
         </ol>
         
-        <t><bcp14>Relay Selection Attack Mitigations:</bcp14> An attacker
+        <t><strong>Relay Selection Attack Mitigations:</strong> An attacker
         could operate relays that refuse to forward traffic or selectively
         drop packets. To mitigate this:</t>
         
@@ -2997,7 +3125,7 @@ RelayEntry = {
           relays may indicate an attack</li>
         </ul>
         
-        <t><bcp14>Relay Chaining:</bcp14> When direct connectivity is
+        <t><strong>Relay Chaining:</strong> When direct connectivity is
         impossible, peers MAY chain multiple relays (up to RELAY_HOP_LIMIT):</t>
         
         <figure>
@@ -3016,7 +3144,7 @@ RelayHop = {
           ]]></artwork>
         </figure>
 
-        <t><bcp14>Relay-hop key encapsulation:</bcp14> <tt>encrypted_key</tt>
+        <t><strong>Relay-hop key encapsulation:</strong> <tt>encrypted_key</tt>
         is an HPKE <xref target="RFC9180"/> seal in <tt>mode_base</tt>,
         using the suite:</t>
 
@@ -3033,7 +3161,7 @@ RelayHop = {
         <tt>age</tt>). The HPKE <tt>info</tt> string is the UTF-8 encoding
         of <tt>"QUIP-relay-hop-v1"</tt>; the <tt>aad</tt> is empty.</t>
 
-        <t><bcp14>Plaintext layout:</bcp14> The plaintext is the symmetric
+        <t><strong>Plaintext layout:</strong> The plaintext is the symmetric
         traffic key that the relay uses to decrypt the relayed payload for
         this hop, followed by the trailing portion of the relay chain beyond
         this hop (encoded as a QUIP-CBOR <tt>RelayChain</tt>). The exact
@@ -3044,7 +3172,7 @@ RelayHop = {
         derived X25519 key with the suite above and the plaintext layout
         just described.</t>
 
-        <t><bcp14>Chain order:</bcp14> The <tt>hops</tt> array in
+        <t><strong>Chain order:</strong> The <tt>hops</tt> array in
         <tt>RelayChain</tt> is ordered from the sender outward: <tt>hops[0]</tt>
         is the first relay the sender sends to, <tt>hops[n-1]</tt> is the
         last relay before the target. Each <tt>RelayHop.relay_id</tt> names
@@ -3058,7 +3186,7 @@ RelayHop = {
         the suite above can interoperate with any other implementation that
         follows this section.</t>
 
-        <t><bcp14>Base-mode rationale:</bcp14> HPKE <tt>mode_base</tt> (no
+        <t><strong>Base-mode rationale:</strong> HPKE <tt>mode_base</tt> (no
         sender authentication inside HPKE) is used deliberately. The relay
         chain as a whole is signed by its sender (see
         <xref target="signing-convention"/>); per-hop sender authentication
@@ -3066,20 +3194,20 @@ RelayHop = {
         a relay chain verify the sender's signature at the chain level, not
         per hop.</t>
         
-        <t><bcp14>Relay Chaining Performance:</bcp14> Relay chains of 
+        <t><strong>Relay Chaining Performance:</strong> Relay chains of 
         RELAY_HOP_LIMIT (2) hops add approximately 100-300ms of latency 
         per hop. For latency-sensitive operations (T3 datagrams, real-time 
         media), implementations SHOULD use direct connections when possible 
         and MAY bypass relays for high-priority traffic if direct connectivity 
         is available.</t>
         
-        <t><bcp14>Relay Capacity Management:</bcp14> Relays SHOULD
+        <t><strong>Relay Capacity Management:</strong> Relays SHOULD
         limit their capacity to prevent DoS. The RECOMMENDED capacity
         is RELAY_CAPACITY (1000) concurrent relay connections. Relays
         SHOULD evict least-recently-used connections when capacity is
         exceeded.</t>
         
-        <t><bcp14>Relay Security Model:</bcp14> Relays are selected from 
+        <t><strong>Relay Security Model:</strong> Relays are selected from 
         the Coral DHT using the same XOR distance metric and multiple 
         paths. A malicious relay cannot corrupt traffic as all communication 
         is QUIC+TLS 1.3 encrypted. However, a relay could refuse to forward 
@@ -3092,7 +3220,7 @@ RelayHop = {
           <li>Rate-limit relay connections per NodeId</li>
         </ul>
         
-        <t><bcp14>Relay Sybil Protection:</bcp14> The same XOR distance 
+        <t><strong>Relay Sybil Protection:</strong> The same XOR distance 
         metric that protects witness rings protects relay selection. An 
         attacker must control XOR-close relay nodes to influence selection, 
         which is computationally infeasible. Additionally, the 3-path 
@@ -3133,7 +3261,7 @@ Candidate = {
           ]]></artwork>
         </figure>
         
-        <t><bcp14>Candidate Gathering:</bcp14> Peers gather candidates
+        <t><strong>Candidate Gathering:</strong> Peers gather candidates
         from:</t>
         
         <ul>
@@ -3144,7 +3272,7 @@ Candidate = {
           <li><em>Peer-reflexive candidates:</em> Via connectivity checks</li>
         </ul>
         
-        <t><bcp14>Candidate Prioritization:</bcp14> Candidates SHOULD be 
+        <t><strong>Candidate Prioritization:</strong> Candidates SHOULD be 
         prioritized using the following scheme (highest to lowest):</t>
         
         <ul>
@@ -3159,7 +3287,7 @@ Candidate = {
         alternatives. Implementations MAY adjust priorities based on 
         observed performance.</t>
         
-        <t><bcp14>Connectivity Checks:</bcp14> Peers perform connectivity
+        <t><strong>Connectivity Checks:</strong> Peers perform connectivity
         checks using QUIC's path validation mechanism:</t>
         
         <ol>
@@ -3169,8 +3297,50 @@ Candidate = {
           <li>A responds to valid paths</li>
           <li>Both peers record reachable paths</li>
         </ol>
+
+        <t><strong>Path Validation Without an Endpoint:</strong> The
+        mechanism above describes the check at the protocol level. At the
+        transport level, a QUIP driver that does not own a QUIC
+        <tt>Endpoint</tt> cannot perform QUIC path validation directly.
+        The RECOMMENDED approach is for the application that owns the
+        <tt>Endpoint</tt> to perform the check on the driver's
+        behalf:</t>
+
+        <ol>
+          <li>The driver signals the application that a probe is
+          needed, passing the candidate address and the session
+          identifier.</li>
+          <li>The application opens a short-lived QUIC connection to
+          the candidate address with the same ALPN as the main
+          connection. The connection establishment itself is the
+          reachability check; the probe is not a migration of the main
+          connection and does not validate a path on it. Where the
+          application's QUIC stack exposes the path validation
+          procedure of <xref target="RFC9000"/>, Section 8.2, the
+          application <bcp14>MAY</bcp14> use it as an additional
+          liveness signal.</li>
+          <li>The application reports success or failure back to the
+          driver, together with the session identifier so the result
+          can be matched to the outstanding probe.</li>
+          <li>The application closes the probe connection regardless
+          of outcome. Probe connections are not retained and are not
+          reused for application traffic.</li>
+        </ol>
+
+        <t>A probe connection <bcp14>MUST</bcp14> use a fresh QUIC
+        connection, not an existing one. The client certificate on a
+        probe connection <bcp14>MUST NOT</bcp14> be assumed to
+        authenticate either party: the probe's purpose is to establish
+        reachability, not identity. A candidate that succeeds is
+        recorded by the driver in the session's candidate table; a
+        candidate that fails is marked so the driver does not re-probe
+        it during the same session. Implementations
+        <bcp14>SHOULD</bcp14> cap the number of concurrent probe
+        connections per session (RECOMMENDED: 3) and
+        <bcp14>SHOULD</bcp14> apply the 5-second connectivity-check
+        timeout recommended in <xref target="nat-impl"/>.</t>
         
-        <t><bcp14>Candidate Security:</bcp14> An attacker could inject
+        <t><strong>Candidate Security:</strong> An attacker could inject
         false candidates to cause connection attempts to malicious endpoints.
         To prevent this:</t>
         
@@ -3191,7 +3361,7 @@ Candidate = {
           session_id; candidates from different sessions are rejected</li>
         </ul>
         
-        <t><bcp14>Protocol Constant:</bcp14></t>
+        <t><strong>Protocol Constant:</strong></t>
         <figure>
           <artwork type="text/plain"><![CDATA[
 CANDIDATE_TTL = 30  ; seconds
@@ -3208,7 +3378,7 @@ CANDIDATE_TTL = 30  ; seconds
       
       <t>QUIP uses a Coral DHT for resilient witness discovery, NAT traversal, and resource discovery. QUIP-Coral is based on the Coral DHT design <xref target="CORAL"/> with the following adaptations for federation and identity. Coral's two principal goals—avoiding hot spots and finding nearby data without querying distant nodes—align directly with QUIP's requirements for witness ring discovery and decentralized persistence.</t>
 
-      <t><bcp14>Coral DHT Structure:</bcp14> The Coral DHT organizes peers into hierarchical clusters based on network proximity. Each peer belongs to one cluster at each level. The current implementation uses a three-level hierarchy consistent with the Coral design <xref target="CORAL"/>:</t>
+      <t><strong>Coral DHT Structure:</strong> The Coral DHT organizes peers into hierarchical clusters based on network proximity. Each peer belongs to one cluster at each level. The current implementation uses a three-level hierarchy consistent with the Coral design <xref target="CORAL"/>:</t>
 
       <table>
         <thead>
@@ -3222,19 +3392,19 @@ CANDIDATE_TTL = 30  ; seconds
         <tbody>
           <tr>
             <td>Level 2 (Local)</td>
-            <td><bcp14>≤ 30ms</bcp14></td>
+            <td><strong>≤ 30ms</strong></td>
             <td>City/region</td>
             <td>Fast witness discovery for nearby peers</td>
           </tr>
           <tr>
             <td>Level 1 (Regional)</td>
-            <td><bcp14>≤ 100ms</bcp14></td>
+            <td><strong>≤ 100ms</strong></td>
             <td>Continent</td>
             <td>Fallback for regional witness discovery</td>
           </tr>
           <tr>
             <td>Level 0 (Global)</td>
-            <td><bcp14>∞</bcp14></td>
+            <td><strong>∞</strong></td>
             <td>Planet-wide</td>
             <td>Global witness discovery with 3 paths</td>
           </tr>
@@ -3243,7 +3413,7 @@ CANDIDATE_TTL = 30  ; seconds
 
       <t>Each cluster is named by an m-bit cluster identifier (<tt>cid</tt>); the global <tt>cid<sub>0</sub></tt> is predefined as <tt>0<sup>m</sup></tt>. Nodes maintain the same NodeId in all clusters to which they belong, enabling seamless lookup continuation across levels. For a discussion of why these thresholds were chosen, see <xref target="coral-measurements"/>.</t>
 
-      <t><bcp14>Constants:</bcp14> The following constants apply to Coral DHT operation:</t>
+      <t><strong>Constants:</strong> The following constants apply to Coral DHT operation:</t>
 
       <table>
         <thead>
@@ -3276,14 +3446,14 @@ CANDIDATE_TTL = 30  ; seconds
         
         <t>Coral introduces the Distributed Sloppy Hash Table (DSHT) abstraction <xref target="CORAL"/>, which is specifically suited to locating replicated resources. DSHTs sacrifice the consistency of DHTs to support both frequent fetches and frequent stores of the same hash table key. The fundamental observation is that a node does not need to know every replicated location of a resource—it only needs a single, valid, nearby copy.</t>
         
-        <t><bcp14>DSHT Operations:</bcp14></t>
+        <t><strong>DSHT Operations:</strong></t>
         
         <ul>
           <li><tt>put(key, value)</tt>: Stores a value under a key. A key may have multiple values.</li>
           <li><tt>get(key)</tt>: Returns some subset of the values stored under a key.</li>
         </ul>
         
-        <t><bcp14>Sloppy Storage:</bcp14> Each node stores only some maximum number of values for a particular key. When the number of values exceeds this maximum, they are spread across multiple nodes via "spillover." When a node's list under a key is full, the inserting node backtracks one hop on the lookup path and appends the value there. This eliminates hot spots—multiple stores on the same key will not overload any one node.</t>
+        <t><strong>Sloppy Storage:</strong> Each node stores only some maximum number of values for a particular key. When the number of values exceeds this maximum, they are spread across multiple nodes via "spillover." When a node's list under a key is full, the inserting node backtracks one hop on the lookup path and appends the value there. This eliminates hot spots—multiple stores on the same key will not overload any one node.</t>
         
         <t>In QUIP, DSHT is used for:</t>
         <ul>
@@ -3300,9 +3470,9 @@ CANDIDATE_TTL = 30  ; seconds
       <section anchor="coral-acceptance" numbered="true">
         <name>Cluster Acceptance</name>
         
-        <t>A node <bcp14>MUST</bcp14> only join a cluster if it is <em>acceptable</em>, meaning that the latency to at least <bcp14>CLUSTER_ACCEPTANCE_PERCENTILE</bcp14> (90%) of nodes in the cluster is below the cluster's RTT threshold. This property is easy for a node to test by collecting round-trip times to a subset of nodes in the cluster, perhaps by simply looking up its own identifier as part of joining.</t>
+        <t>A node <bcp14>MUST</bcp14> only join a cluster if it is <em>acceptable</em>, meaning that the latency to at least <strong>CLUSTER_ACCEPTANCE_PERCENTILE</strong> (90%) of nodes in the cluster is below the cluster's RTT threshold. This property is easy for a node to test by collecting round-trip times to a subset of nodes in the cluster, perhaps by simply looking up its own identifier as part of joining.</t>
 
-        <t><bcp14>Acceptance Testing:</bcp14> To determine if a cluster is acceptable, a node <bcp14>SHOULD</bcp14>:</t>
+        <t><strong>Acceptance Testing:</strong> To determine if a cluster is acceptable, a node <bcp14>SHOULD</bcp14>:</t>
 
         <ol>
           <li>Obtain a random subset of at least 20 nodes from the cluster</li>
@@ -3311,7 +3481,7 @@ CANDIDATE_TTL = 30  ; seconds
           <li>If the 90th percentile RTT is ≤ the cluster threshold, the cluster is acceptable</li>
         </ol>
 
-        <t><bcp14>Rejection:</bcp14> If a cluster is not acceptable, the node <bcp14>MUST NOT</bcp14> join it and <bcp14>MUST</bcp14> attempt to find a lower-level cluster or create a new one. A node unable to find an acceptable cluster creates a new one with a random <tt>cid</tt>.</t>
+        <t><strong>Rejection:</strong> If a cluster is not acceptable, the node <bcp14>MUST NOT</bcp14> join it and <bcp14>MUST</bcp14> attempt to find a lower-level cluster or create a new one. A node unable to find an acceptable cluster creates a new one with a random <tt>cid</tt>.</t>
       </section>
 
       <!-- ========================================================== -->
@@ -3322,15 +3492,15 @@ CANDIDATE_TTL = 30  ; seconds
         
         <t>New nodes discover clusters using network topology hints and the DSHT interface.</t>
 
-        <t><bcp14>Gateway Router Discovery:</bcp14> Upon joining the network, a node <bcp14>SHOULD</bcp14>:</t>
+        <t><strong>Gateway Router Discovery:</strong> Upon joining the network, a node <bcp14>SHOULD</bcp14>:</t>
 
         <ol>
           <li>Perform a traceroute to a known bootstrap node</li>
-          <li>Extract the first <bcp14>GATEWAY_ROUTER_COUNT</bcp14> (5) gateway router IP addresses</li>
+          <li>Extract the first <strong>GATEWAY_ROUTER_COUNT</strong> (5) gateway router IP addresses</li>
           <li>For each gateway router IP <tt>ip</tt>, perform <tt>put(hash(ip), nodeaddr)</tt> in the global cluster (level 0)</li>
         </ol>
 
-        <t><bcp14>Cluster Lookup:</bcp14> A new node looking for a nearby cluster <bcp14>SHOULD</bcp14>:</t>
+        <t><strong>Cluster Lookup:</strong> A new node looking for a nearby cluster <bcp14>SHOULD</bcp14>:</t>
 
         <ol>
           <li>Perform traceroute to a bootstrap node</li>
@@ -3340,7 +3510,7 @@ CANDIDATE_TTL = 30  ; seconds
           <li>Test these nodes for cluster acceptability using the procedure in <xref target="coral-acceptance"/></li>
         </ol>
 
-        <t><bcp14>Fallback:</bcp14> If no acceptable cluster is found via gateway routers, the node <bcp14>MUST</bcp14> use the configured bootstrap nodes to join the global cluster and discover clusters through normal DHT lookups.</t>
+        <t><strong>Fallback:</strong> If no acceptable cluster is found via gateway routers, the node <bcp14>MUST</bcp14> use the configured bootstrap nodes to join the global cluster and discover clusters through normal DHT lookups.</t>
       </section>
 
       <!-- ========================================================== -->
@@ -3364,7 +3534,7 @@ CANDIDATE_TTL = 30  ; seconds
         
         <t>This produces an avalanche effect as more and more nodes switch to the larger cluster.</t>
 
-        <t><bcp14>Preference Function (δ):</bcp14> To prevent oscillations between similarly sized clusters, nodes <bcp14>MUST</bcp14> use a preference function <tt>δ</tt> that shifts every <bcp14>MERGE_DELTA_INTERVAL</bcp14> (1 hour). A node selects the larger cluster only if:</t>
+        <t><strong>Preference Function (δ):</strong> To prevent oscillations between similarly sized clusters, nodes <bcp14>MUST</bcp14> use a preference function <tt>δ</tt> that shifts every <strong>MERGE_DELTA_INTERVAL</strong> (1 hour). A node selects the larger cluster only if:</t>
 
         <figure>
           <artwork type="text/plain"><![CDATA[
@@ -3381,14 +3551,14 @@ CANDIDATE_TTL = 30  ; seconds
           ]]></artwork>
         </figure>
 
-        <t><bcp14>Merging Behavior:</bcp14></t>
+        <t><strong>Merging Behavior:</strong></t>
 
         <ul>
           <li>If <tt>|log(sizeA) - log(sizeB)| &gt; δ</tt>, the node <bcp14>MUST</bcp14> join the larger cluster</li>
           <li>If <tt>|log(sizeA) - log(sizeB)| ≤ δ</tt>, the node <bcp14>MUST</bcp14> join the cluster with the lower <tt>cluster_id</tt> (deterministic tie-breaking)</li>
         </ul>
 
-        <t><bcp14>Stability Guarantee:</bcp14> This preference function ensures that clusters of disproportionate size merge immediately, while similarly sized clusters eventually converge to a stable state when <tt>δ = 2</tt> forces flow to the lower <tt>cluster_id</tt>.</t>
+        <t><strong>Stability Guarantee:</strong> This preference function ensures that clusters of disproportionate size merge immediately, while similarly sized clusters eventually converge to a stable state when <tt>δ = 2</tt> forces flow to the lower <tt>cluster_id</tt>.</t>
       </section>
 
       <!-- ========================================================== -->
@@ -3397,11 +3567,11 @@ CANDIDATE_TTL = 30  ; seconds
       <section anchor="coral-splitting" numbered="true">
         <name>Cluster Splitting</name>
         
-        <t>If a cluster's 90th percentile RTT exceeds its threshold for more than <bcp14>CLUSTER_HEARTBEAT * 3</bcp14> (3 minutes), the cluster <bcp14>SHOULD</bcp14> split.</t>
+        <t>If a cluster's 90th percentile RTT exceeds its threshold for more than <strong>CLUSTER_HEARTBEAT * 3</strong> (3 minutes), the cluster <bcp14>SHOULD</bcp14> split.</t>
 
-        <t><bcp14>Split Center:</bcp14> Each cluster defines a <em>center</em> <tt>c</tt> as the node closest to <tt>hash(cluster_id)</tt> in the DSHT. Define <tt>cid<sup>N</sup> = hash(cid)</tt> and <tt>cid<sup>F</sup></tt> as <tt>cid<sup>N</sup></tt> with the high-order bit flipped. The cluster center <tt>c</tt> is the node closest to key <tt>cid<sup>N</sup></tt> in the DSHT.</t>
+        <t><strong>Split Center:</strong> Each cluster defines a <em>center</em> <tt>c</tt> as the node closest to <tt>hash(cluster_id)</tt> in the DSHT. Define <tt>cid<sup>N</sup> = hash(cid)</tt> and <tt>cid<sup>F</sup></tt> as <tt>cid<sup>N</sup></tt> with the high-order bit flipped. The cluster center <tt>c</tt> is the node closest to key <tt>cid<sup>N</sup></tt> in the DSHT.</t>
 
-        <t><bcp14>Split Algorithm:</bcp14> When a node detects that its cluster needs to split:</t>
+        <t><strong>Split Algorithm:</strong> When a node detects that its cluster needs to split:</t>
 
         <ol>
           <li>The node performs a <tt>get</tt> on <tt>hash(cid<sup>N</sup>)</tt></li>
@@ -3411,7 +3581,7 @@ CANDIDATE_TTL = 30  ; seconds
           <li>If neither cluster is acceptable, the node creates a new cluster with a random <tt>cluster_id</tt></li>
         </ol>
 
-        <t><bcp14>Sloppy Replication for Splits:</bcp14> To avoid overloading the center <tt>c</tt>, nodes <bcp14>MAY</bcp14> use sloppy replication:</t>
+        <t><strong>Sloppy Replication for Splits:</strong> To avoid overloading the center <tt>c</tt>, nodes <bcp14>MAY</bcp14> use sloppy replication:</t>
 
         <ul>
           <li>Nodes that have already split <bcp14>SHOULD</bcp14> perform <tt>put(cid<sup>N</sup>, nodeaddr)</tt> in the old cluster</li>
@@ -3419,7 +3589,7 @@ CANDIDATE_TTL = 30  ; seconds
           <li>Nodes that find <tt>cid<sup>N</sup></tt> acceptable join it without pinging the center</li>
         </ul>
 
-        <t><bcp14>Split Limit:</bcp14> If a node fails to find an acceptable cluster after <bcp14>MAX_SPLIT_ATTEMPTS</bcp14> (RECOMMENDED: 3), it <bcp14>MUST</bcp14> create a new cluster with a random <tt>cluster_id</tt>. Except in the case of pathological network topologies, a small number of splits should suffice to reach a stable state.</t>
+        <t><strong>Split Limit:</strong> If a node fails to find an acceptable cluster after <strong>MAX_SPLIT_ATTEMPTS</strong> (RECOMMENDED: 3), it <bcp14>MUST</bcp14> create a new cluster with a random <tt>cluster_id</tt>. Except in the case of pathological network topologies, a small number of splits should suffice to reach a stable state.</t>
       </section>
 
       <!-- ========================================================== -->
@@ -3430,7 +3600,7 @@ CANDIDATE_TTL = 30  ; seconds
         
         <t>Nodes <bcp14>MUST</bcp14> maintain an estimate of their cluster size for merging decisions. The expected O(log n) number of routing RPCs provides a rough estimate of total network size.</t>
 
-        <t><bcp14>Size Estimation Method:</bcp14> Nodes estimate cluster size using the routing table size of the underlying lookup protocol:</t>
+        <t><strong>Size Estimation Method:</strong> Nodes estimate cluster size using the routing table size of the underlying lookup protocol:</t>
 
         <figure>
           <artwork type="text/plain"><![CDATA[
@@ -3440,9 +3610,9 @@ size = 2^(average_routing_table_size)
 
         <t>where <tt>average_routing_table_size</tt> is the average number of nodes in the routing table entries at each distance level.</t>
 
-        <t><bcp14>Size Propagation:</bcp14> When a node switches clusters, it <bcp14>MUST</bcp14> reply to requests from its old cluster with the cluster information tuple defined in <xref target="coral-merging"/>.</t>
+        <t><strong>Size Propagation:</strong> When a node switches clusters, it <bcp14>MUST</bcp14> reply to requests from its old cluster with the cluster information tuple defined in <xref target="coral-merging"/>.</t>
 
-        <t><bcp14>Size Validation:</bcp14> Nodes <bcp14>SHOULD</bcp14> cross-validate cluster size estimates from multiple sources before using them for merging decisions.</t>
+        <t><strong>Size Validation:</strong> Nodes <bcp14>SHOULD</bcp14> cross-validate cluster size estimates from multiple sources before using them for merging decisions.</t>
       </section>
 
       <!-- ========================================================== -->
@@ -3475,7 +3645,7 @@ LookupPath = {
         ]]></artwork>
       </figure>
       
-      <t><bcp14>Independent Paths:</bcp14> QUIP provides at least LOOKUP_PATHS (3) independent lookup paths per key. Each path uses different DHT nodes, preventing:</t>
+      <t><strong>Independent Paths:</strong> QUIP provides at least LOOKUP_PATHS (3) independent lookup paths per key. Each path uses different DHT nodes, preventing:</t>
       
       <ul>
         <li><em>Path-based witness rejection:</em> An attacker cannot reject a witness by controlling a single path</li>
@@ -3483,7 +3653,7 @@ LookupPath = {
         <li><em>Sybil attacks:</em> Coral's redundancy makes Sybil attacks more expensive</li>
       </ul>
       
-      <t><bcp14>Path Verification:</bcp14> Lookup responses include cryptographic proof that each path was followed correctly:</t>
+      <t><strong>Path Verification:</strong> Lookup responses include cryptographic proof that each path was followed correctly:</t>
       
       <figure>
         <artwork type="text/plain"><![CDATA[
@@ -3507,7 +3677,7 @@ PathProof = {
         ]]></artwork>
       </figure>
       
-      <t><bcp14>Path Independence:</bcp14> The 3 lookup paths <bcp14>MUST</bcp14> be independent. Two paths are independent if they share no nodes and originate from different clusters. If path independence cannot be verified, the peer <bcp14>MUST</bcp14> raise the consensus threshold to 3-of-3.</t>
+      <t><strong>Path Independence:</strong> The 3 lookup paths <bcp14>MUST</bcp14> be independent. Two paths are independent if they share no nodes and originate from different clusters. If path independence cannot be verified, the peer <bcp14>MUST</bcp14> raise the consensus threshold to 3-of-3.</t>
       </section>
 
       <!-- ========================================================== -->
@@ -3553,7 +3723,7 @@ SpilloverResponse = [
         ]]></artwork>
           </figure>
           
-          <t><bcp14>Spillover Trigger Conditions:</bcp14></t>
+          <t><strong>Spillover Trigger Conditions:</strong></t>
           
           <ul>
             <li>Witness rejection without valid cryptographic proof</li>
@@ -3563,7 +3733,7 @@ SpilloverResponse = [
             <li>DHT node returns inconsistent DVV states</li>
           </ul>
           
-          <t><bcp14>Spillover Algorithm:</bcp14></t>
+          <t><strong>Spillover Algorithm:</strong></t>
           
           <ol>
             <li>Peer P detects a witness rejection or spillover prompt</li>
@@ -3578,7 +3748,7 @@ SpilloverResponse = [
             <li>If persistent disagreement, P escalates to fallback witnesses</li>
           </ol>
           
-          <t><bcp14>Spillover Denial-of-Service Protection:</bcp14> An attacker could trigger spillover without succeeding in false witness rejection, causing performance degradation. To prevent this:</t>
+          <t><strong>Spillover Denial-of-Service Protection:</strong> An attacker could trigger spillover without succeeding in false witness rejection, causing performance degradation. To prevent this:</t>
           
           <ul>
             <li><em>Rate limiting:</em> Spillover requests are rate-limited to 10 per minute per NodeId (see below)</li>
@@ -3588,7 +3758,7 @@ SpilloverResponse = [
             <li><em>Exponential backoff:</em> After 3 failed spillover attempts, the peer MUST wait 30 seconds before retrying</li>
           </ul>
           
-          <t><bcp14>Spillover Rate Limiting:</bcp14> Spillover rate limiting MUST be enforced per NodeId across all connections. The RECOMMENDED limit is 10 spillover requests per minute per NodeId. A NodeId that exceeds the limit SHOULD be temporarily blacklisted for 5 minutes. The blacklisting MUST be applied consistently across all connected peers to prevent circumvention through connection switching.</t>
+          <t><strong>Spillover Rate Limiting:</strong> Spillover rate limiting MUST be enforced per NodeId across all connections. The RECOMMENDED limit is 10 spillover requests per minute per NodeId. A NodeId that exceeds the limit SHOULD be temporarily blacklisted for 5 minutes. The blacklisting MUST be applied consistently across all connected peers to prevent circumvention through connection switching.</t>
         </section>
         
         <section anchor="coral-validation" numbered="true">
@@ -3623,7 +3793,7 @@ CrossPathResult = [
         ]]></artwork>
           </figure>
           
-          <t><bcp14>Validation Rules:</bcp14></t>
+          <t><strong>Validation Rules:</strong></t>
           
           <ul>
             <li>Each path's witness ring must have MIN_WITNESSES (4+) witnesses</li>
@@ -3633,7 +3803,7 @@ CrossPathResult = [
             <li>Persistent disagreement triggers a network-wide alert</li>
           </ul>
           
-          <t><bcp14>Cross-Path Collusion Detection:</bcp14> An attacker could control 2 of 3 paths by compromising nodes on multiple paths. To detect this:</t>
+          <t><strong>Cross-Path Collusion Detection:</strong> An attacker could control 2 of 3 paths by compromising nodes on multiple paths. To detect this:</t>
           
           <ul>
             <li><em>Path independence verification:</em> QUIP ensures that paths use disjoint sets of nodes. Implementations SHOULD verify that no node appears on more than one path.</li>
@@ -3668,7 +3838,7 @@ CrossPathResult = [
         
         <t>This adaptation is appropriate because witness discovery requires the same properties as content discovery: resilience to attacks, geographic distribution, and fault tolerance. By applying Coral's principles to the routing layer, QUIP achieves these properties without requiring content caching infrastructure.</t>
         
-        <t><bcp14>QUIP-Specific Extensions to Coral:</bcp14></t>
+        <t><strong>QUIP-Specific Extensions to Coral:</strong></t>
         
         <ul>
           <li><em>Multiple lookup paths (3):</em> Extends Coral's single-lookup design for path-based attack resilience</li>
@@ -3910,11 +4080,11 @@ query_quarantined = [
           ]]></artwork>
         </figure>
         
-        <t><bcp14>Nullable positional fields:</bcp14> In <tt>set</tt>,
+        <t><strong>Nullable positional fields:</strong> In <tt>set</tt>,
         <tt>query_pins</tt>, and <tt>query_quarantined</tt>, a <tt>null</tt>
         in a positional slot means "this filter is absent" and is permitted
-        <bcp14>only</bcp14> when a later positional slot in the same message
-        is non-null. A <tt>null</tt> at the <bcp14>last</bcp14> occupied
+        <strong>only</strong> when a later positional slot in the same message
+        is non-null. A <tt>null</tt> at the <strong>last</strong> occupied
         position is <bcp14>NOT RECOMMENDED</bcp14> — senders <bcp14>SHOULD</bcp14>
         omit the trailing field instead, and receivers <bcp14>SHOULD</bcp14>
         normalize a trailing <tt>null</tt> to absence. A <tt>null</tt> in a
@@ -3950,7 +4120,7 @@ query_quarantined = [
           </tbody>
         </table>
         
-        <t><bcp14>RBSR Fingerprint Algorithms:</bcp14></t>
+        <t><strong>RBSR Fingerprint Algorithms:</strong></t>
         
         <ul>
           <li><tt>algo=0 (XOR):</tt> <bcp14>MUST</bcp14> be implemented. 
@@ -3967,12 +4137,12 @@ query_quarantined = [
         via the <tt>rbsr_algo</tt> handshake extension (0x08). If no agreement 
         is reached, the peer <bcp14>MUST</bcp14> fall back to XOR (algo=0).</t>
         
-        <t><bcp14>Hash Algorithm in SET:</bcp14> The <tt>hash_algo</tt> 
+        <t><strong>Hash Algorithm in SET:</strong> The <tt>hash_algo</tt> 
         field in the <tt>set</tt> verb indicates the algorithm used to 
         generate the CID. If omitted, SHA-256 is assumed. For CIDv1, the 
         algorithm is indicated in the CID itself and this field is ignored.</t>
         
-        <t><bcp14>Nullable <tt>previous_cid</tt>:</bcp14> When a sender wishes to
+        <t><strong>Nullable previous_cid:</strong> When a sender wishes to
         signal <tt>hash_algo</tt> without a <tt>previous_cid</tt> — for example,
         to declare the algorithm used for the current <tt>cid</tt> on a first
         write — it <bcp14>MUST</bcp14> encode the <tt>previous_cid</tt> slot as
@@ -3984,7 +4154,7 @@ query_quarantined = [
         because it is indistinguishable from a future extension that might
         assign a non-<tt>uint</tt> meaning to that slot.</t>
         
-        <t><bcp14>Merkle Range Fetching:</bcp14> The <tt>fetch_range</tt>
+        <t><strong>Merkle Range Fetching:</strong> The <tt>fetch_range</tt>
         verb is defined in <xref target="merkle-range"/>. It requires the
         <tt>merkle_range</tt> capability bit and a BLAKE3 CID. Requests
         whose <tt>cid</tt> is not a BLAKE3 CID <bcp14>MUST</bcp14> be
@@ -3992,7 +4162,7 @@ query_quarantined = [
         proof fails verification <bcp14>MUST</bcp14> be rejected with
         E_PROOF_INVALID (error code 0x1C).</t>
         
-        <t><bcp14>CausalOrder Is Not a Wire Type:</bcp14> Sync verbs carry 
+        <t><strong>CausalOrder Is Not a Wire Type:</strong> Sync verbs carry 
         DVV values, not CausalOrder classifications. The receiver re-derives 
         the causal relationship from the DVVs as specified in 
         <xref target="dvv"/>. Implementations <bcp14>MUST NOT</bcp14> add a 
@@ -4070,19 +4240,19 @@ pin_announce = [
         <t>The event_type is an open-ended string. Applications define their 
         own event types. No acknowledgment is expected or provided.</t>
         
-        <t><bcp14>Pin Announcement:</bcp14> Peers <bcp14>SHOULD</bcp14> 
+        <t><strong>Pin Announcement:</strong> Peers <bcp14>SHOULD</bcp14> 
         broadcast pin announcements via T3 to propagate pinning intent 
         across the network. Implementations <bcp14>SHOULD</bcp14> limit 
         pin announcements to 100 per minute per NodeId to prevent DoS.</t>
         
-        <t><bcp14>Pin Announcement Credibility:</bcp14> The <tt>witness_sig</tt> 
+        <t><strong>Pin Announcement Credibility:</strong> The <tt>witness_sig</tt> 
         in a <tt>pin_announce</tt> is a single witness signature that provides 
         credibility to the pin request. This is distinct from a witness ring 
         signature (5 of 7) used for consensus operations. Implementations 
         <bcp14>SHOULD</bcp14> verify that the witness is a member of the 
         current witness ring for the resource being announced.</t>
         
-        <t><bcp14>TTL Units:</bcp14> TTL is specified in seconds. 
+        <t><strong>TTL Units:</strong> TTL is specified in seconds. 
         A TTL of 0 selects the default TTL (RECOMMENDED: 7 days / 604800 seconds). 
         A TTL of <tt>0xFFFFFFFF</tt> indicates indefinite storage 
         (subject to capacity constraints). Peers <bcp14>SHOULD</bcp14> 
@@ -4099,11 +4269,12 @@ pin_announce = [
         a resource is hosted. The discovery mechanism is NAT-aware and
         uses the Coral DHT's multiple paths.</t>
         
-        <t><bcp14>Discovery Flow:</bcp14></t>
+        <t><strong>Discovery Flow:</strong></t>
         
         <ol>
-          <li>A peer announces a resource via <tt>resource_announce</tt> 
-          on T0. The announcement includes:
+          <li>
+            <t>A peer announces a resource via <tt>resource_announce</tt> 
+            on T0. The announcement includes:</t>
             <ul>
               <li>resource_id — the name of the resource</li>
               <li>latest_cid — the current CID (or CIDv1) of the resource</li>
@@ -4112,14 +4283,16 @@ pin_announce = [
               <li>relay_locations — Coral DHT relays that can serve the resource</li>
             </ul>
           </li>
-          <li>A peer queries for a resource via <tt>query_resource</tt> 
-          on T0. The query includes:
+          <li>
+            <t>A peer queries for a resource via <tt>query_resource</tt> 
+            on T0. The query includes:</t>
             <ul>
               <li>resource_id — the name to look up</li>
               <li>OPTIONAL cid — a specific version (CID or CIDv1) to look up</li>
             </ul>
           </li>
-          <li>The Coral DHT stores resource metadata with multiple replicas:
+          <li>
+            <t>The Coral DHT stores resource metadata with multiple replicas:</t>
             <ul>
               <li><tt>resource_id</tt> → list of location hints</li>
               <li>Location hints are <tt>NodeId</tt>s that can serve the content</li>
@@ -4130,7 +4303,7 @@ pin_announce = [
           re-announce the resource with the new CID.</li>
         </ol>
         
-        <t><bcp14>NAT-Aware Fetching:</bcp14> When fetching a resource:</t>
+        <t><strong>NAT-Aware Fetching:</strong> When fetching a resource:</t>
         
         <ol>
           <li>Peer P queries the Coral DHT for resource locations</li>
@@ -4141,13 +4314,13 @@ pin_announce = [
           <li>P verifies content integrity via CID</li>
         </ol>
         
-        <t><bcp14>NAT-Hosted Resources:</bcp14> If the resource host is
+        <t><strong>NAT-Hosted Resources:</strong> If the resource host is
         behind a NAT, the resource_announce MUST include relay_locations.
         The host SHOULD maintain relay connections to ensure the resource
         remains available to external peers. If no relay_locations are
         available, the resource is considered local-only.</t>
         
-        <t><bcp14>Resource Hosting Recommendations:</bcp14></t>
+        <t><strong>Resource Hosting Recommendations:</strong></t>
         
         <ul>
           <li><em>Public resources:</em> Peers hosting public resources
@@ -4158,17 +4331,17 @@ pin_announce = [
           refresh their resource announcements to maintain discoverability</li>
         </ul>
         
-        <t><bcp14>Stale Discovery:</bcp14> Location hints in the DHT may 
+        <t><strong>Stale Discovery:</strong> Location hints in the DHT may 
         become stale. A peer that cannot fetch a resource from a location 
         hint <bcp14>MAY</bcp14> query the witness ring for the resource's 
         current location or fall back to DHT re-resolution.</t>
         
-        <t><bcp14>Cross-Verification:</bcp14> Implementations 
+        <t><strong>Cross-Verification:</strong> Implementations 
         <bcp14>SHOULD</bcp14> cross-verify resource announcements with 
         the witness ring before trusting location hints to prevent 
         location spoofing attacks.</t>
         
-        <t><bcp14>Quarantine and Discovery:</bcp14> If the governance 
+        <t><strong>Quarantine and Discovery:</strong> If the governance 
         primitive is supported, quarantined CIDs <bcp14>MUST NOT</bcp14> 
         be returned in query responses. The error E_QUARANTINED 
         (error code 0x10) <bcp14>SHOULD</bcp14> be returned instead.</t>
@@ -4375,7 +4548,7 @@ pin_announce = [
       
       <t>QUIC connection with ALPN "quip".</t>
       
-      <t><bcp14>Handshake Sequencing with NAT Traversal and Candidate Prioritization:</bcp14></t>
+      <t><strong>Handshake Sequencing with NAT Traversal and Candidate Prioritization:</strong></t>
       
       <ol>
         <li>Client sends handshake <xref target="handshake"/> on T0</li>
@@ -4662,7 +4835,7 @@ Alice                                   Bob
       <section anchor="model-core" numbered="true">
         <name>Core Guarantee: Sybil Cost as the Safety Anchor</name>
         
-        <t><bcp14>Claim 1 (Ring takeover infeasibility).</bcp14> Placing k 
+        <t><strong>Claim 1 (Ring takeover infeasibility).</strong> Placing k 
         nodes within T's 7-nearest-neighbor set requires finding NodeIds in a 
         distance ball whose expected search cost is Θ(2²⁵⁶ / 2^d). For k = 3 
         (the minimum to break BFT safety), the adversary must simultaneously 
@@ -4673,7 +4846,7 @@ Alice                                   Bob
         honest placement cheap and adversarial placement exponentially 
         expensive.</t>
         
-        <t><bcp14>Note on Mass Placement:</bcp14> The infeasibility argument 
+        <t><strong>Note on Mass Placement:</strong> The infeasibility argument 
         assumes targeted placement near a specific target. An attacker who 
         operates a large population of honest-looking nodes (e.g., a botnet) 
         occupies a share of nearby slots proportional to their density. The 
@@ -4682,7 +4855,7 @@ Alice                                   Bob
         composition and is an environmental assumption (A3) that the protocol 
         cannot verify. This is a documented limitation of the model.</t>
         
-        <t><bcp14>Claim 2 (Quorum intersection).</bcp14> Any two BFT quorums 
+        <t><strong>Claim 2 (Quorum intersection).</strong> Any two BFT quorums 
         of 5-of-7 intersect in ≥ 3 nodes. Since at most 2 are Byzantine, 
         every quorum contains ≥ 3 honest members, and any two quorums share 
         ≥ 1 honest member. This yields:</t>
@@ -4738,7 +4911,7 @@ Alice                                   Bob
           </tbody>
         </table>
         
-        <t><bcp14>Explicit non-goals (the ring does not provide):</bcp14></t>
+        <t><strong>Explicit non-goals (the ring does not provide):</strong></t>
         <ul>
           <li>Absolute proof of real-world identity (VERIFIED is probabilistic, not CA-grade).</li>
           <li>Protection against first-contact MITM (TOFU caveat).</li>
@@ -4827,8 +5000,8 @@ Alice                                   Bob
         assumption from network-level and operational attacks.</t>
         
         <t>The model's known soft spot is the TOFU first contact, which the 
-        protocol correctly refuses to overclaim. <bcp14>Without out-of-band 
-        verification, the witness ring cannot rescue a poisoned bootstrap.</bcp14></t>
+        protocol correctly refuses to overclaim. <strong>Without out-of-band 
+        verification, the witness ring cannot rescue a poisoned bootstrap.</strong></t>
         
         <t>The trust assumptions A3 (≤ 2 Byzantine witnesses) and A4 (≤ 1 
         attacker-controlled path) are environmental: the protocol can detect 
@@ -4860,17 +5033,17 @@ Alice                                   Bob
       <section anchor="security-nat" numbered="true">
         <name>NAT Traversal Security</name>
         
-        <t><bcp14>Relay Security:</bcp14> Coral DHT relays are untrusted.
+        <t><strong>Relay Security:</strong> Coral DHT relays are untrusted.
         All traffic through relays MUST be encrypted with the same
         QUIC+TLS 1.3 protection used for direct connections. Relays
         cannot decrypt or inspect traffic.</t>
         
-        <t><bcp14>Relay DoS:</bcp14> Malicious peers could overload relays
+        <t><strong>Relay DoS:</strong> Malicious peers could overload relays
         by requesting many connections. Relays SHOULD enforce rate limiting
         and connection caps. The RECOMMENDED rate limit is 100 connections
         per minute per NodeId.</t>
         
-        <t><bcp14>NAT Spoofing:</bcp14> Peers could falsely advertise
+        <t><strong>NAT Spoofing:</strong> Peers could falsely advertise
         external addresses to misdirect traffic. Implementations SHOULD
         verify connectivity announcements through multiple DHT paths
         and SHOULD NOT trust unverified announcements.</t>
@@ -4879,11 +5052,11 @@ Alice                                   Bob
       <section anchor="security-spillover" numbered="true">
         <name>Spillover Security</name>
         
-        <t><bcp14>Spillover Abuse:</bcp14> Malicious peers could repeatedly
+        <t><strong>Spillover Abuse:</strong> Malicious peers could repeatedly
         trigger spillover to overwhelm the DHT. Implementations SHOULD
         rate-limit spillover requests to 10 per minute per NodeId.</t>
         
-        <t><bcp14>Spillover Consensus:</bcp14> The 2-of-3 consensus
+        <t><strong>Spillover Consensus:</strong> The 2-of-3 consensus
         threshold provides protection against path-based attacks. However,
         if an attacker controls 2 paths, they could force a false consensus.
         Implementations SHOULD monitor for path overlap and alert on
@@ -4893,11 +5066,11 @@ Alice                                   Bob
       <section anchor="hash-security" numbered="true">
         <name>Hash Algorithm Security</name>
         
-        <t><bcp14>SHA-256:</bcp14> SHA-256 is a NIST-approved hash function 
+        <t><strong>SHA-256:</strong> SHA-256 is a NIST-approved hash function 
         with no known practical collisions. It is the mandatory baseline 
         for QUIP CIDs and provides 128 bits of post-quantum security.</t>
         
-        <t><bcp14>BLAKE3:</bcp14> BLAKE3 is a modern hash function based on 
+        <t><strong>BLAKE3:</strong> BLAKE3 is a modern hash function based on 
         the BLAKE2/ChaCha architecture. It provides the same 256-bit security 
         as SHA-256 and is considered secure for all cryptographic purposes. 
         BLAKE3 is specified in the BLAKE3 specification 
@@ -4906,20 +5079,20 @@ Alice                                   Bob
         the algorithm has been extensively cryptanalyzed and is widely 
         deployed in production systems.</t>
         
-        <t><bcp14>Algorithm Agility:</bcp14> Both algorithms produce the 
+        <t><strong>Algorithm Agility:</strong> Both algorithms produce the 
         same digest size (32 bytes), enabling consistent CID handling 
         regardless of which algorithm is used. The handshake extension 
         <tt>hash_algo</tt> negotiates the algorithm. If no agreement is 
         reached, peers <bcp14>MUST</bcp14> fall back to SHA-256.</t>
         
-        <t><bcp14>Algorithm Downgrade Attacks:</bcp14> An adversary could 
+        <t><strong>Algorithm Downgrade Attacks:</strong> An adversary could 
         attempt to force a downgrade to a weaker hash algorithm. Since 
         both SHA-256 and BLAKE3 provide equivalent security levels 
         (256-bit), this is not a concern. If future algorithms are added, 
         implementations <bcp14>SHOULD</bcp14> require explicit opt-in for 
         weaker algorithms.</t>
         
-        <t><bcp14>CIDv1 Tagging:</bcp14> The OPTIONAL CIDv1 extension 
+        <t><strong>CIDv1 Tagging:</strong> The OPTIONAL CIDv1 extension 
         (<xref target="cidv1"/>) prevents ambiguity across connections by 
         including the hash algorithm in the identifier. Implementations 
         <bcp14>MUST</bcp14> use CIDv1 for persistent state when both peers 
@@ -4929,26 +5102,26 @@ Alice                                   Bob
       <section anchor="security-merkle-range" numbered="true">
         <name>Merkle Range Fetching Security</name>
         
-        <t><bcp14>Proof Forgery:</bcp14> A malicious responder could 
+        <t><strong>Proof Forgery:</strong> A malicious responder could 
         attempt to return bytes that do not match the requested range, 
         accompanied by a forged proof. The client verifies the proof 
         against the CID using BLAKE3's verification procedure; a forged 
         proof is detected and rejected with E_PROOF_INVALID (error code 
         0x1C).</t>
         
-        <t><bcp14>Range Amplification:</bcp14> A malicious requester 
+        <t><strong>Range Amplification:</strong> A malicious requester 
         could issue many small range requests to consume server CPU. 
         Implementations <bcp14>SHOULD</bcp14> enforce per-NodeId rate 
         limits on <tt>fetch_range</tt> as with other SYNC verbs, and 
         <bcp14>SHOULD</bcp14> apply a per-connection byte-per-second 
         cap independent of the number of requests.</t>
         
-        <t><bcp14>Range Length Cap:</bcp14> MAX_RANGE_LENGTH bounds the 
+        <t><strong>Range Length Cap:</strong> MAX_RANGE_LENGTH bounds the 
         memory cost of a single response. A responder <bcp14>MUST</bcp14> 
         reject requests whose <tt>length</tt> exceeds the negotiated 
         maximum with E_RANGE_INVALID (error code 0x1B).</t>
         
-        <t><bcp14>Responder Tree Recomputation:</bcp14> A responder that 
+        <t><strong>Responder Tree Recomputation:</strong> A responder that 
         does not have the chunk tree cached faces a CPU amplification 
         risk if it recomputes the tree on every <tt>fetch_range</tt> 
         request, because recomputation is O(resource_size) while a 
@@ -4958,14 +5131,14 @@ Alice                                   Bob
         that cannot bound the recomputation cost <bcp14>SHOULD</bcp14> 
         reject such requests with E_RANGE_INVALID (error code 0x1B).</t>
         
-        <t><bcp14>Timing Side Channels:</bcp14> Merkle range fetching 
+        <t><strong>Timing Side Channels:</strong> Merkle range fetching 
         reveals which portions of a resource a peer is interested in. 
         This is inherent to any partial retrieval scheme and is 
         equivalent to the information revealed by HTTP Range requests. 
         Deployments that require access-pattern privacy 
         <bcp14>SHOULD</bcp14> use full-resource downloads instead.</t>
         
-        <t><bcp14>Interaction with Quarantine:</bcp14> Range fetching 
+        <t><strong>Interaction with Quarantine:</strong> Range fetching 
         is subject to the same quarantine policy as other reads. A 
         quarantined CID <bcp14>MUST NOT</bcp14> be served via 
         <tt>range_response</tt>, even if the requester knows the exact 
@@ -5000,13 +5173,13 @@ DoS Mitigation (RECOMMENDED defaults):
           ]]></artwork>
         </figure>
         
-        <t><bcp14>Rate Limiting:</bcp14> Peers <bcp14>SHOULD</bcp14> enforce 
+        <t><strong>Rate Limiting:</strong> Peers <bcp14>SHOULD</bcp14> enforce 
         a per-NodeId limit of 1000 operations per minute on T0 and T1 
         traffic. Requests beyond this limit <bcp14>MUST</bcp14> be rejected 
         with E_RATE_LIMIT (error code 0x03), with a short burst allowance 
         (RECOMMENDED: 100 operations) to absorb legitimate bursts.</t>
         
-        <t><bcp14>Memory Bounds:</bcp14> A single QUIP message 
+        <t><strong>Memory Bounds:</strong> A single QUIP message 
         <bcp14>MUST NOT</bcp14> exceed 64 KB (see the 
         <tt>max_message_size</tt> handshake extension in 
         <xref target="handshake"/>); oversized messages 
@@ -5016,46 +5189,46 @@ DoS Mitigation (RECOMMENDED defaults):
         per-message cap <bcp14>MUST</bcp14> be split across multiple 
         <tt>fetch_range</tt> requests.</t>
         
-        <t><bcp14>Connection Throttling:</bcp14> A peer <bcp14>SHOULD</bcp14> 
+        <t><strong>Connection Throttling:</strong> A peer <bcp14>SHOULD</bcp14> 
         limit concurrent T2 (BULK) streams per connection to 256 and 
         <bcp14>SHOULD</bcp14> apply exponential backoff after repeated 
         protocol errors from the same NodeId, capped at 60 seconds 
         (1 minute) between retries.</t>
         
-        <t><bcp14>Witness Ring Load:</bcp14> A witness <bcp14>SHOULD</bcp14> 
+        <t><strong>Witness Ring Load:</strong> A witness <bcp14>SHOULD</bcp14> 
         cap the number of rings it actively participates in 
         (MAX_CAPACITY = 10) to bound the cost of BFT consensus 
         participation, and <bcp14>MAY</bcp14> decline new ring 
         assignments once at capacity.</t>
         
-        <t><bcp14>Pin Flooding:</bcp14> Peers <bcp14>SHOULD</bcp14> limit 
+        <t><strong>Pin Flooding:</strong> Peers <bcp14>SHOULD</bcp14> limit 
         pin announcements to 100 per minute per NodeId to prevent DoS. 
         A peer <bcp14>MAY</bcp14> ignore pins from unverified NodeIds.</t>
         
-        <t><bcp14>CID Collision Resistance:</bcp14> SHA-256 and BLAKE3 
+        <t><strong>CID Collision Resistance:</strong> SHA-256 and BLAKE3 
         are assumed collision-resistant. Implementations <bcp14>SHOULD</bcp14> 
         reject CIDs that do not match the payload hash with error 
         E_CID_MISMATCH (error code 0x0C).</t>
         
-        <t><bcp14>Resource Exhaustion via Pinning:</bcp14> Implementations 
+        <t><strong>Resource Exhaustion via Pinning:</strong> Implementations 
         <bcp14>SHOULD</bcp14> limit the number of pinned resources per peer 
         to 1000. The <tt>pin_capacity</tt> handshake extension 
         (<xref target="handshake"/>) can be used to advertise capacity.</t>
         
-        <t><bcp14>RBSR Range Attacks:</bcp14> A malicious peer could request 
+        <t><strong>RBSR Range Attacks:</strong> A malicious peer could request 
         many small ranges to cause CPU exhaustion. Implementations 
         <bcp14>SHOULD</bcp14> limit RBSR requests to 1024 ranges 
         (max_ranges handshake extension) and impose per-request 
         computational limits.</t>
         
-        <t><bcp14>Resource Discovery Attacks:</bcp14> A malicious peer 
+        <t><strong>Resource Discovery Attacks:</strong> A malicious peer 
         <bcp14>MAY</bcp14> announce false resource locations to redirect 
         traffic. Implementations <bcp14>SHOULD</bcp14> cross-verify 
         resource announcements with the witness ring before trusting 
         location hints. The error E_RESOURCE_STALE (error code 0x0F) 
         is provided for stale discovery handling.</t>
         
-        <t><bcp14>Content Poisoning:</bcp14> A malicious peer could 
+        <t><strong>Content Poisoning:</strong> A malicious peer could 
         announce a resource with a valid CID but serve malicious bytes. 
         CID verification at fetch time catches this: the fetched payload 
         <bcp14>MUST</bcp14> match the CID. To mitigate discovery-layer 
@@ -5066,7 +5239,7 @@ DoS Mitigation (RECOMMENDED defaults):
       <section anchor="governance-security" numbered="true">
         <name>Governance Primitive Security</name>
         
-        <t><bcp14>False Governance Attacks:</bcp14> An adversary could 
+        <t><strong>False Governance Attacks:</strong> An adversary could 
         submit false quarantine requests. Mitigations include:</t>
         <ul>
           <li>Witness ring validation (5 of 7 witnesses required)</li>
@@ -5078,7 +5251,7 @@ DoS Mitigation (RECOMMENDED defaults):
           100/min per NodeId)</li>
         </ul>
         
-        <t><bcp14>Delegation Abuse:</bcp14> Stolen or compromised NodeIds 
+        <t><strong>Delegation Abuse:</strong> Stolen or compromised NodeIds 
         could be used to issue governance operations. Mitigations include:</t>
         <ul>
           <li>Short-lived delegation certificates</li>
@@ -5087,17 +5260,17 @@ DoS Mitigation (RECOMMENDED defaults):
           <li>Application-defined permission bits</li>
         </ul>
         
-        <t><bcp14>Quarantine Evasion:</bcp14> Content can be modified to 
+        <t><strong>Quarantine Evasion:</strong> Content can be modified to 
         evade detection. This is a fundamental limitation. Applications 
         <bcp14>SHOULD</bcp14> use multiple detection mechanisms and 
         maintain escalation paths for manual review.</t>
         
-        <t><bcp14>Privacy Implications:</bcp14> Governance metadata 
+        <t><strong>Privacy Implications:</strong> Governance metadata 
         (perceptual hashes, evidence) may reveal content characteristics. 
         Applications <bcp14>SHOULD</bcp14> consider privacy implications 
         when designing governance policies.</t>
         
-        <t><bcp14>DoS via Quarantine:</bcp14> An adversary could submit 
+        <t><strong>DoS via Quarantine:</strong> An adversary could submit 
         many quarantine requests. Implementations <bcp14>SHOULD</bcp14> 
         rate-limit governance operations and require witness ring 
         validation to prevent abuse.</t>
@@ -5106,7 +5279,7 @@ DoS Mitigation (RECOMMENDED defaults):
       <section anchor="sybil-analysis" numbered="true">
         <name>Sybil Attack Analysis</name>
         
-        <t><bcp14>XOR Distance Search Problem:</bcp14> Given a target NodeId T, 
+        <t><strong>XOR Distance Search Problem:</strong> Given a target NodeId T, 
         finding a NodeId N such that distance(T, N) &lt; d is a search problem 
         over the 32-byte space. The XOR metric provides no exploitable 
         structure; the expected number of attempts to find a node within 
@@ -5118,7 +5291,7 @@ DoS Mitigation (RECOMMENDED defaults):
         A discussion of quantitative models for Kademlia Sybil resistance 
         can be found in <xref target="SITESH"/>, <xref target="BAUMGART"/>.</t>
         
-        <t><bcp14>Mass Placement vs. Targeted Placement:</bcp14> The analysis 
+        <t><strong>Mass Placement vs. Targeted Placement:</strong> The analysis 
         above applies to targeted placement near a specific target. An attacker 
         operating a large honest-looking node population (e.g., a botnet) 
         occupies a share of nearby slots proportional to their density. The 
@@ -5126,13 +5299,13 @@ DoS Mitigation (RECOMMENDED defaults):
         targeted placement expensive. This is an environmental assumption 
         (A3 in <xref target="security-model"/>) that the protocol cannot verify.</t>
         
-        <t><bcp14>Relationship to Witness Constants:</bcp14> The cost 
+        <t><strong>Relationship to Witness Constants:</strong> The cost 
         analysis justifies the choice of f=2 (7 witnesses) in 
         <xref target="witness-constants"/>. Controlling 3+ witnesses 
         in a ring is computationally infeasible for targeted attacks; 
         mass attacks depend on network composition.</t>
         
-        <t><bcp14>Multiple Paths and Sybil Attacks:</bcp14> The Coral DHT's
+        <t><strong>Multiple Paths and Sybil Attacks:</strong> The Coral DHT's
         multiple lookup paths make Sybil attacks more expensive. An attacker
         must control nodes on multiple paths to successfully corrupt witness
         discovery. This multiplies the cost of Sybil attacks by a factor
@@ -5153,7 +5326,7 @@ DoS Mitigation (RECOMMENDED defaults):
         clustering affect the Sybil resistance of the witness
         ring selection?</t>
         
-        <t><bcp14>Clustering as a Performance Optimization:</bcp14>
+        <t><strong>Clustering as a Performance Optimization:</strong>
         In QUIP, Coral DHT clustering is used primarily as a
         performance optimization for routing and NAT traversal.
         The fundamental witness selection mechanism remains
@@ -5165,7 +5338,7 @@ DoS Mitigation (RECOMMENDED defaults):
           chosen as the witness ring.</li>
           <li>Clustering is used to accelerate lookups and to
           filter candidates for reachability (e.g., via
-          ConnectivityAnnounce), but it does <bcp14>NOT</bcp14>
+          ConnectivityAnnounce), but it does <strong>NOT</strong>
           modify the XOR distance calculation or the rule that
           the nearest nodes form the ring.</li>
           <li>Therefore, the Sybil resistance analysis in
@@ -5174,7 +5347,7 @@ DoS Mitigation (RECOMMENDED defaults):
           remains valid for targeted attacks.</li>
         </ul>
         
-        <t><bcp14>Attack Scenario with Clustering:</bcp14>
+        <t><strong>Attack Scenario with Clustering:</strong>
         An adversary with resources in a target region could
         attempt a Sybil attack by generating NodeIds that are
         XOR-close to the target and also satisfy the cluster
@@ -5184,7 +5357,7 @@ DoS Mitigation (RECOMMENDED defaults):
         not only XOR-close but also network-proximate to the
         target region.</t>
         
-        <t><bcp14>Quantitative Analysis:</bcp14> The reduction
+        <t><strong>Quantitative Analysis:</strong> The reduction
         in search space depends on the geographic distribution
         of honest nodes and the attacker's ability to place
         infrastructure in the target cluster. In a dense global
@@ -5206,7 +5379,7 @@ DoS Mitigation (RECOMMENDED defaults):
           LOOKUP_PATHS and spillover mechanisms).</li>
         </ul>
         
-        <t><bcp14>Conclusion:</bcp14> In the current design,
+        <t><strong>Conclusion:</strong> In the current design,
         clustering does not weaken the fundamental Sybil
         resistance of the XOR distance metric, because witness
         eligibility remains purely based on XOR distance.
@@ -5220,7 +5393,9 @@ DoS Mitigation (RECOMMENDED defaults):
         in the Coral DHT model is deferred to future work.</t>
       </section>
     </section>
-    
+  </middle>
+  
+  <back>
     <!-- ============================================================ -->
     <!-- 20. References -->
     <!-- ============================================================ -->
@@ -5370,12 +5545,11 @@ DoS Mitigation (RECOMMENDED defaults):
         <seriesInfo name="ICPADS" value="2007"/>
       </reference>
     </references>
-  </middle>
-  
-  <back>
+
     <!-- ============================================================ -->
     <!-- Appendix A: Implementation Guidance -->
     <!-- ============================================================ -->
+
     <section anchor="implementation-guidance" numbered="false">
       <name>Appendix A: Implementation Guidance (Non-Normative)</name>
       
@@ -5388,7 +5562,7 @@ DoS Mitigation (RECOMMENDED defaults):
         Kademlia XOR distance metric, witness selection algorithm, multiple 
         lookup paths, and spillover mechanisms.</t>
         
-        <t><bcp14>Bootstrap Node Selection:</bcp14></t>
+        <t><strong>Bootstrap Node Selection:</strong></t>
         
         <ol>
           <li>Implementations <bcp14>SHOULD</bcp14> ship with at least 5 
@@ -5396,7 +5570,7 @@ DoS Mitigation (RECOMMENDED defaults):
           <li>Coral DHT bootstrap nodes <bcp14>SHOULD</bcp14> be geographically 
           diverse to enable proper clustering. New peers <bcp14>SHOULD</bcp14> 
           bootstrap from multiple clusters to get a balanced view of the network.</li>
-          <li>Bootstrap nodes are <bcp14>NOT</bcp14> trusted parties — they 
+          <li>Bootstrap nodes are <strong>NOT</strong> trusted parties — they 
           are used only to obtain an initial set of DHT contacts. They 
           <bcp14>MUST NOT</bcp14> be treated as witnesses or authorities.</li>
           <li>Once a peer has joined the DHT, all further routing and 
@@ -5404,7 +5578,7 @@ DoS Mitigation (RECOMMENDED defaults):
           bootstrap nodes carry no special trust after initial join.</li>
         </ol>
         
-        <t><bcp14>Malicious Bootstrap Node Mitigations:</bcp14> A malicious
+        <t><strong>Malicious Bootstrap Node Mitigations:</strong> A malicious
         bootstrap node can only supply a biased initial contact list.
         However, if multiple bootstrap nodes are compromised, they could
         partition new peers. Implementations SHOULD:</t>
@@ -5421,13 +5595,13 @@ DoS Mitigation (RECOMMENDED defaults):
           the user</li>
         </ul>
         
-        <t><bcp14>Bootstrap Diversity Requirement:</bcp14> Implementations
+        <t><strong>Bootstrap Diversity Requirement:</strong> Implementations
         <bcp14>SHOULD</bcp14> maintain a list of at least 5 bootstrap nodes
         operated by independent entities. The list SHOULD be configurable
         by the user to allow alternative bootstrap paths in case of
         censorship or compromise.</t>
         
-        <t><bcp14>No Bootstrap Nodes Available:</bcp14> If a peer cannot 
+        <t><strong>No Bootstrap Nodes Available:</strong> If a peer cannot 
         reach any configured bootstrap node, it <bcp14>SHOULD</bcp14> fall 
         back to any DHT contacts learned from prior sessions (a persisted 
         routing table), and <bcp14>MAY</bcp14> use local network discovery 
@@ -5436,24 +5610,24 @@ DoS Mitigation (RECOMMENDED defaults):
         Claims as PENDING until DHT connectivity is established, since 
         witness verification is not possible without it.</t>
         
-        <t><bcp14>Bootstrap Security:</bcp14> Because bootstrap nodes are 
+        <t><strong>Bootstrap Security:</strong> Because bootstrap nodes are 
         untrusted, a compromised or malicious bootstrap node can at most 
         supply a biased initial contact list. However, if an adversary 
         controls the bootstrap AND intercepts the first contact, they can 
         direct the peer to a Sybil-dominated DHT view. Normal Kademlia 
         routing and witness diversity (<xref target="dht-discovery"/>) 
-        mitigate this <bcp14>after</bcp14> the peer has established 
+        mitigate this <strong>after</strong> the peer has established 
         multiple independent DHT connections. Out-of-band verification 
         of the initial Key Claim is REQUIRED to eliminate this vector.</t>
         
-        <t><bcp14>Persisted Routing Table:</bcp14> Implementations 
+        <t><strong>Persisted Routing Table:</strong> Implementations 
         <bcp14>SHOULD</bcp14> persist DHT routing table state between 
         sessions to reduce reliance on bootstrap nodes and improve startup 
         time. Persisted contacts <bcp14>MUST</bcp14> be validated before 
         use (e.g., by checking that they are still reachable and have not 
         expired).</t>
         
-        <t><bcp14>Multiple Path Implementation:</bcp14></t>
+        <t><strong>Multiple Path Implementation:</strong></t>
         
         <ol>
           <li>Each lookup path uses a different set of DHT nodes</li>
@@ -5481,7 +5655,7 @@ DoS Mitigation (RECOMMENDED defaults):
           Suitable for security-critical datasets.</li>
         </ul>
         
-        <t><bcp14>Algorithm Selection Guidance:</bcp14></t>
+        <t><strong>Algorithm Selection Guidance:</strong></t>
         
         <ul>
           <li><em>XOR:</em> Use for most applications. Fastest, sufficient 
@@ -5492,7 +5666,7 @@ DoS Mitigation (RECOMMENDED defaults):
           (e.g., financial data, code repositories).</li>
         </ul>
         
-        <t><bcp14>Range Size Selection:</bcp14> Implementations 
+        <t><strong>Range Size Selection:</strong> Implementations 
         <bcp14>SHOULD</bcp14> choose range sizes based on expected data 
         size and network conditions. Typical values:</t>
         
@@ -5502,11 +5676,11 @@ DoS Mitigation (RECOMMENDED defaults):
           <li>Large datasets (&gt;100MB): 1-16MB ranges</li>
         </ul>
         
-        <t><bcp14>Fingerprint Caching:</bcp14> Implementations 
+        <t><strong>Fingerprint Caching:</strong> Implementations 
         <bcp14>SHOULD</bcp14> cache fingerprints for frequently-synced 
         resources to avoid recomputation.</t>
         
-        <t><bcp14>Algorithm Negotiation:</bcp14> Peers <bcp14>SHOULD</bcp14> 
+        <t><strong>Algorithm Negotiation:</strong> Peers <bcp14>SHOULD</bcp14> 
         negotiate the fingerprint algorithm via the <tt>rbsr_algo</tt> 
         handshake extension (0x08). If no agreement is reached, the peer 
         <bcp14>MUST</bcp14> fall back to XOR (algo=0).</t>
@@ -5519,14 +5693,14 @@ DoS Mitigation (RECOMMENDED defaults):
         This is equivalent to the multihash encoding without the 
         multicodec prefix.</t>
         
-        <t><bcp14>SHA-256 Implementation:</bcp14></t>
+        <t><strong>SHA-256 Implementation:</strong></t>
         <ul>
           <li><tt>cid = SHA-256(payload)</tt></li>
           <li>Available in all standard libraries</li>
           <li>FIPS-compliant</li>
         </ul>
         
-        <t><bcp14>BLAKE3 Implementation:</bcp14></t>
+        <t><strong>BLAKE3 Implementation:</strong></t>
         <ul>
           <li><tt>cid = BLAKE3(payload)</tt></li>
           <li>Requires BLAKE3 library (<tt>blake3</tt> crate in Rust, 
@@ -5534,7 +5708,7 @@ DoS Mitigation (RECOMMENDED defaults):
           <li>Not FIPS-compliant</li>
         </ul>
         
-        <t><bcp14>CIDv1 Implementation:</bcp14> When both peers support 
+        <t><strong>CIDv1 Implementation:</strong> When both peers support 
         CIDv1 (bit 9 in capabilities), implementations <bcp14>MUST</bcp14> 
         use the tagged format for persistent state:</t>
         <ul>
@@ -5544,17 +5718,17 @@ DoS Mitigation (RECOMMENDED defaults):
           governance, and any state that persists across connections</li>
         </ul>
         
-        <t><bcp14>CID in DVV:</bcp14> The CID in the Dot struct 
+        <t><strong>CID in DVV:</strong> The CID in the Dot struct 
         (<xref target="dvv"/>) references the same CID as the corresponding 
         set operation. This ensures that the DVV state is content-addressable 
         and enables CAS (compare-and-swap) operations.</t>
         
-        <t><bcp14>Hash Algorithm Negotiation:</bcp14> Peers <bcp14>SHOULD</bcp14> 
+        <t><strong>Hash Algorithm Negotiation:</strong> Peers <bcp14>SHOULD</bcp14> 
         negotiate the hash algorithm via the <tt>hash_algo</tt> handshake 
         extension. If no agreement is reached, the peer <bcp14>MUST</bcp14> 
         fall back to SHA-256 (algo=0).</t>
         
-        <t><bcp14>BLAKE3 Performance Notes:</bcp14></t>
+        <t><strong>BLAKE3 Performance Notes:</strong></t>
         <ul>
           <li>BLAKE3 is approximately 3× faster than SHA-256 for large data</li>
           <li>BLAKE3 supports parallel execution on multi-core systems</li>
@@ -5566,7 +5740,7 @@ DoS Mitigation (RECOMMENDED defaults):
       <section anchor="merkle-range-impl" numbered="false">
         <name>A.4 Merkle Range Fetching Implementation</name>
         
-        <t><bcp14>BLAKE3 Library Support:</bcp14> BLAKE3 libraries that 
+        <t><strong>BLAKE3 Library Support:</strong> BLAKE3 libraries that 
         support the verified streaming API (e.g., the Rust <tt>blake3</tt> 
         crate's <tt>Hasher</tt> and <tt>ChunkState</tt> types, or the 
         official reference implementations) provide the primitive 
@@ -5574,7 +5748,7 @@ DoS Mitigation (RECOMMENDED defaults):
         <bcp14>SHOULD</bcp14> use a library with native support rather 
         than reimplementing the tree structure.</t>
         
-        <t><bcp14>Chunk Alignment:</bcp14> Range requests are not required 
+        <t><strong>Chunk Alignment:</strong> Range requests are not required 
         to be chunk-aligned. The responder <bcp14>SHOULD</bcp14> compute 
         the smallest set of BLAKE3 subtrees that covers the requested 
         range and return a proof composed of the sibling chaining values 
@@ -5583,21 +5757,21 @@ DoS Mitigation (RECOMMENDED defaults):
         the request strictly specifies; the wire response still contains 
         exactly the requested bytes plus the proof.</t>
         
-        <t><bcp14>Proof Size:</bcp14> The proof size is proportional to 
+        <t><strong>Proof Size:</strong> The proof size is proportional to 
         log<sub>2</sub>(resource_size / chunk_size) × 32 bytes plus the 
         size of the covering subtree's chaining values. For a 1 GiB 
         resource and a 64 KiB range, the proof is on the order of a 
         few kilobytes. This is small relative to the transferred bytes 
         for any reasonable range length.</t>
         
-        <t><bcp14>Range Length Trade-off:</bcp14> Small ranges (below 
+        <t><strong>Range Length Trade-off:</strong> Small ranges (below 
         BLAKE3_CHUNK_SIZE × 8 or so) pay a proportionally larger proof 
         overhead. Implementations <bcp14>SHOULD</bcp14> prefer ranges of 
         at least 8 KiB to amortize proof cost, and <bcp14>MAY</bcp14> 
         batch multiple small logical ranges into a single physical 
         request when the caller controls the request granularity.</t>
         
-        <t><bcp14>Responder State:</bcp14> The responder needs the 
+        <t><strong>Responder State:</strong> The responder needs the 
         resource's chunk tree to construct proofs. Implementations 
         <bcp14>SHOULD</bcp14> cache the tree alongside the blob when 
         the resource is written with <tt>merkle_range</tt> enabled. 
@@ -5612,12 +5786,12 @@ DoS Mitigation (RECOMMENDED defaults):
         responder that cannot bound the recomputation cost 
         <bcp14>SHOULD</bcp14> reject the request rather than recompute.</t>
         
-        <t><bcp14>Client Verification:</bcp14> The client MUST run the 
+        <t><strong>Client Verification:</strong> The client MUST run the 
         full BLAKE3 verification procedure against the CID, not merely 
         check the proof's structure. Structural checks alone do not 
         detect adversarial proofs.</t>
         
-        <t><bcp14>Quarantine Integration:</bcp14> When the governance 
+        <t><strong>Quarantine Integration:</strong> When the governance 
         primitive is supported, the responder <bcp14>MUST</bcp14> apply 
         the same quarantine policy to range responses as to whole-resource 
         reads. A quarantined CID is not served via <tt>fetch_range</tt>, 
@@ -5627,21 +5801,22 @@ DoS Mitigation (RECOMMENDED defaults):
       <section anchor="nat-impl" numbered="false">
         <name>A.5 NAT Traversal Implementation</name>
         
-        <t><bcp14>DHT Address Discovery:</bcp14> Implementations SHOULD
+        <t><strong>DHT Address Discovery:</strong> Implementations SHOULD
         discover external addresses using Coral DHT peers rather than
         STUN. A peer SHOULD request address observations from multiple
         independent DHT peers, verify the returned observations, and use
         the most consistent external address. Implementations MUST NOT
         require STUN or any centralized address-discovery service.</t>
         
-        <t><bcp14>NAT Type Detection:</bcp14> NAT type detection SHOULD use
+        <t><strong>NAT Type Detection:</strong> NAT type detection SHOULD use
         Coral DHT connectivity probes from multiple independent peers. The
         RECOMMENDED approach is:</t>
         
         <ol>
           <li>Send connectivity probes from 3 distinct Coral DHT peers</li>
           <li>Compare observed addresses from different sources</li>
-          <li>Infer NAT type from consistency of observed addresses:
+          <li>
+            <t>Infer NAT type from consistency of observed addresses:</t>
             <ul>
               <li>All same: open or cone NAT</li>
               <li>Different ports, same IP: restricted cone NAT</li>
@@ -5650,7 +5825,7 @@ DoS Mitigation (RECOMMENDED defaults):
           </li>
         </ol>
         
-        <t><bcp14>Relay Discovery Correlation:</bcp14> Implementations
+        <t><strong>Relay Discovery Correlation:</strong> Implementations
         that issue multiple concurrent <tt>relay_discovery</tt> requests
         <bcp14>MUST</bcp14> generate a fresh, unique <tt>request_id</tt>
         for each and match responses by both <tt>request_id</tt> and
@@ -5658,7 +5833,7 @@ DoS Mitigation (RECOMMENDED defaults):
         arrival order or on the target field alone to demultiplex
         responses. See <xref target="nat-relay"/>.</t>
 
-        <t><bcp14>Relay-hop HPKE:</bcp14> Implementations that emit or
+        <t><strong>Relay-hop HPKE:</strong> Implementations that emit or
         consume multi-hop relay chains <bcp14>MUST</bcp14> implement the
         HPKE suite defined in <xref target="nat-relay"/>: <tt>DHKEM(X25519,
         HKDF-SHA256)</tt> / <tt>HKDF-SHA256</tt> / <tt>ChaCha20Poly1305</tt>,
@@ -5673,7 +5848,7 @@ DoS Mitigation (RECOMMENDED defaults):
         their own birational map; use the library-provided one and verify
         it against the RFC 8032 test vectors.</t>
         
-        <t><bcp14>Relay Selection:</bcp14> When selecting relays,
+        <t><strong>Relay Selection:</strong> When selecting relays,
         implementations SHOULD consider:</t>
         <ul>
           <li>XOR distance to the target (prefer closer relays)</li>
@@ -5682,11 +5857,11 @@ DoS Mitigation (RECOMMENDED defaults):
           <li>Historical reliability (prefer relays with good uptime)</li>
         </ul>
         
-        <t><bcp14>Connectivity Checks:</bcp14> Implementations SHOULD
+        <t><strong>Connectivity Checks:</strong> Implementations SHOULD
         perform connectivity checks in parallel to minimize latency.
         The RECOMMENDED timeout for connectivity checks is 5 seconds.</t>
         
-        <t><bcp14>Fallback Behavior:</bcp14> If all connectivity checks
+        <t><strong>Fallback Behavior:</strong> If all connectivity checks
         fail, implementations SHOULD:</t>
         <ol>
           <li>Retry with different relay nodes</li>
@@ -5698,25 +5873,25 @@ DoS Mitigation (RECOMMENDED defaults):
       <section anchor="pin-impl" numbered="false">
         <name>A.6 Pinning Implementation</name>
         
-        <t><bcp14>Local Pinning:</bcp14> Peers <bcp14>SHOULD</bcp14> store 
+        <t><strong>Local Pinning:</strong> Peers <bcp14>SHOULD</bcp14> store 
         pinned resources until the TTL expires. Resources with ttl=0 select 
         the default TTL (RECOMMENDED: 7 days / 604800 seconds); resources 
         with ttl=0xFFFFFFFF are stored indefinitely (subject to storage 
         capacity).</t>
         
-        <t><bcp14>Pin Propagation:</bcp14> Peers <bcp14>SHOULD</bcp14> 
+        <t><strong>Pin Propagation:</strong> Peers <bcp14>SHOULD</bcp14> 
         announce pins via T3 pin_announce messages. The witness signature 
         provides credibility to the pin request.</t>
         
-        <t><bcp14>Pin Refreshing:</bcp14> Peers <bcp14>SHOULD</bcp14> 
+        <t><strong>Pin Refreshing:</strong> Peers <bcp14>SHOULD</bcp14> 
         refresh pins before TTL expiry (at 80% of TTL) to maintain 
         persistence.</t>
         
-        <t><bcp14>Pin Eviction:</bcp14> When storage capacity is reached, 
+        <t><strong>Pin Eviction:</strong> When storage capacity is reached, 
         peers <bcp14>SHOULD</bcp14> evict pins with the lowest ref_count 
         or oldest pinned_at timestamp.</t>
         
-        <t><bcp14>Pin Verification:</bcp14> A pin is a signed promise, not 
+        <t><strong>Pin Verification:</strong> A pin is a signed promise, not 
         a verified delivery receipt. Deployments requiring stronger 
         guarantees <bcp14>MAY</bcp14> layer independent retrievability 
         challenges (e.g., periodic fetch-and-verify probes by third parties, 
@@ -5726,16 +5901,16 @@ DoS Mitigation (RECOMMENDED defaults):
       <section anchor="resource-discovery-impl" numbered="false">
         <name>A.7 Resource Discovery Implementation</name>
         
-        <t><bcp14>Announcement Frequency:</bcp14> Peers <bcp14>SHOULD</bcp14> 
+        <t><strong>Announcement Frequency:</strong> Peers <bcp14>SHOULD</bcp14> 
         re-announce resources every 24 hours (with ±1 hour jitter to avoid 
         announcement storms) or whenever the CID changes.</t>
         
-        <t><bcp14>Stale Locations:</bcp14> A peer that cannot fetch a 
+        <t><strong>Stale Locations:</strong> A peer that cannot fetch a 
         resource from a location hint <bcp14>MAY</bcp14> query the witness 
         ring for the resource's current location or fall back to DHT 
         re-resolution.</t>
         
-        <t><bcp14>Cross-Verification:</bcp14> Implementations <bcp14>SHOULD</bcp14> 
+        <t><strong>Cross-Verification:</strong> Implementations <bcp14>SHOULD</bcp14> 
         cross-verify resource announcements with the witness ring before 
         trusting location hints to prevent location spoofing attacks.</t>
       </section>
@@ -5743,23 +5918,23 @@ DoS Mitigation (RECOMMENDED defaults):
       <section anchor="governance-impl" numbered="false">
         <name>A.8 Governance Implementation</name>
         
-        <t><bcp14>Trusted CID Registration:</bcp14> Implementations 
+        <t><strong>Trusted CID Registration:</strong> Implementations 
         <bcp14>SHOULD</bcp14> verify that the CID in the registration 
         matches the content referenced. Implementations <bcp14>MAY</bcp14> 
         verify application-defined metadata (e.g., perceptual hashes).</t>
         
-        <t><bcp14>Quarantine Storage:</bcp14> Implementations 
+        <t><strong>Quarantine Storage:</strong> Implementations 
         <bcp14>SHOULD</bcp14> store quarantine state in persistent storage 
         to survive restarts. Quarantine notices <bcp14>SHOULD</bcp14> 
         be gossiped to ensure consistency across the network.</t>
         
-        <t><bcp14>Derivative Detection:</bcp14> Applications 
+        <t><strong>Derivative Detection:</strong> Applications 
         <bcp14>SHOULD</bcp14> use multiple perceptual hash algorithms 
         to reduce false positives. A RECOMMENDED approach is to require 
         agreement between two algorithms (e.g., pHash and dHash) before 
         marking content as a derivative.</t>
         
-        <t><bcp14>Governance Rate Limiting:</bcp14> Implementations 
+        <t><strong>Governance Rate Limiting:</strong> Implementations 
         <bcp14>SHOULD</bcp14> limit governance operations to 100 per 
         minute per NodeId to prevent DoS.</t>
       </section>
@@ -5815,7 +5990,7 @@ DoS Mitigation (RECOMMENDED defaults):
       explicit backpressure, and (optionally) BLAKE3 Merkle range fetching. 
       None of these primitives are new. Their composition is.</t>
       
-      <t><bcp14>Why this composition did not exist earlier:</bcp14></t>
+      <t><strong>Why this composition did not exist earlier:</strong></t>
       
       <ul>
         <li><em>Browser-centric standards froze the transport layer:</em> 
@@ -5836,7 +6011,7 @@ DoS Mitigation (RECOMMENDED defaults):
         a property of the content, not the transport.</li>
       </ul>
       
-      <t><bcp14>Why now:</bcp14></t>
+      <t><strong>Why now:</strong></t>
       
       <ul>
         <li><em>Regulatory pressure:</em> The EU Digital Markets Act requires 
@@ -5855,7 +6030,7 @@ DoS Mitigation (RECOMMENDED defaults):
         problem.</li>
       </ul>
       
-      <t><bcp14>Why unification matters:</bcp14> The current separation of 
+      <t><strong>Why unification matters:</strong> The current separation of 
       DNS (identity), HTTP (transport), and content storage is a historical 
       artifact of centralization, not a law of nature. In a decentralized 
       system, there is no domain owner to serve as the authority linking 
@@ -6039,7 +6214,7 @@ DoS Mitigation (RECOMMENDED defaults):
         </tbody>
       </table>
       
-      <t><bcp14>Implementation Status Summary:</bcp14></t>
+      <t><strong>Implementation Status Summary:</strong></t>
       
       <ul>
         <li><em>Core Protocol:</em> Rust reference implementation targeting 
@@ -6080,7 +6255,7 @@ DoS Mitigation (RECOMMENDED defaults):
       <t>Interested implementers should contact the author for coordination 
       and to ensure compatibility across implementations.</t>
       
-      <t><bcp14>Test Vectors:</bcp14> Formal test vectors for all message types, 
+      <t><strong>Test Vectors:</strong> Formal test vectors for all message types, 
       DVV merge scenarios, the signing convention (<xref target="signing-convention"/>), 
       CID generation (SHA-256 and BLAKE3), CIDv1 tagging, pinning operations, 
       resource discovery, NAT traversal, spillover, governance primitives, 
@@ -6089,7 +6264,7 @@ DoS Mitigation (RECOMMENDED defaults):
       &lt;https://github.com/jjmututi/quip-test-vectors&gt; prior to the 
       reference implementation release.</t>
       
-      <t><bcp14>Interoperability Testing:</bcp14> A plugfest is planned for 
+      <t><strong>Interoperability Testing:</strong> A plugfest is planned for 
       2027 Q2 to test interoperability between Rust, Go, and Python 
       implementations, including Merkle range fetching between 
       implementations that advertise <tt>merkle_range</tt>. Details 
@@ -6125,7 +6300,7 @@ DoS Mitigation (RECOMMENDED defaults):
         1 MiB range in a 1 GiB resource</li>
       </ul>
       
-      <t><bcp14>Coral DHT Performance Factors:</bcp14></t>
+      <t><strong>Coral DHT Performance Factors:</strong></t>
       
       <ul>
         <li><em>Path count:</em> LOOKUP_PATHS (3) increases lookup
@@ -6138,7 +6313,7 @@ DoS Mitigation (RECOMMENDED defaults):
         with network size (O(log n) lookups)</li>
       </ul>
       
-      <t><bcp14>Merkle Range Performance Factors:</bcp14></t>
+      <t><strong>Merkle Range Performance Factors:</strong></t>
       
       <ul>
         <li><em>Range length:</em> Proof size scales logarithmically 

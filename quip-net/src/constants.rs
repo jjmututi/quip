@@ -49,8 +49,10 @@ pub const T0_MAX_STREAMS: usize = 1;
 /// Concurrent SYNC (T1) streams per connection.
 pub const T1_MAX_STREAMS: usize = 32;
 
-/// Concurrent BULK (T2) streams per connection.
-pub const T2_MAX_STREAMS: usize = 16;
+/// Per-connection maximum number of concurrent BULK (T2) streams.
+///
+/// §19.4 "Operational Security Considerations" recommends 256.
+pub const T2_MAX_STREAMS: usize = 256;
 
 /// In-flight EVENT (T3) datagrams per connection.
 pub const T3_MAX_DATAGRAMS: usize = 64;
@@ -190,3 +192,13 @@ pub use quip_core::constants::RTT_GLOBAL_MS;
 // `crate::dht` as local discriminants — see the note there about the
 // mismatch with the spec's level numbering.
 // -------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn t2_max_streams_matches_section_19_4() {
+        assert_eq!(T2_MAX_STREAMS, 256);
+    }
+}

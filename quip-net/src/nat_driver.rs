@@ -23,6 +23,7 @@ use alloc::vec::Vec;
 use quip_core::address::Address;
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
+use quip_core::messages::Signer;
 
 /// A sink for outbound DHT requests and a source for inbound results.
 ///
@@ -42,6 +43,33 @@ pub trait DhtClient {
     fn discover_relays(&mut self, discovery: RelayDiscovery);
     /// Drain the next inbound result, if any.
     fn poll(&mut self) -> Option<DhtResult>;
+}
+
+/// Application-side actions the driver cannot perform itself.
+///
+/// The driver owns the NAT state machine but not a QUIC `Endpoint`
+/// and not a `Signer`. Two `NatEvent`s therefore require the
+/// application to act:
+///
+/// - [`NatEvent::ProbeRequested`]: dial the candidate with a fresh
+///   QUIC connection, apply the 5 s timeout from App. A.5, and call
+///   back into [`NatDriver::on_probe_result`].
+/// - [`NatEvent::RelayDiscoveryRequested`]: sign and send a
+///   `relay_discovery` (§12.2). The driver builds the message for
+///   you; see [`NatDriver::dispatch_event`].
+pub trait NatApplication {
+    /// Dial `addr` on a fresh QUIC connection. Must eventually call
+    /// `NatDriver::on_probe_result` with the outcome.
+    fn probe_candidate(&mut self, session_id: [u8; 16], peer: NodeId, addr: Address);
+
+    /// Deliver a signed `relay_discovery` message. The driver has
+    /// already signed it.
+    fn send_relay_discovery(&mut self, msg: RelayDiscovery);
+
+    /// Surface a session-level NAT event the application may want to
+    /// observe (path established, session failed, external address
+    /// changed, …). Default is a no-op.
+    fn on_nat_event(&mut self, _event: &NatEvent) {}
 }
 
 /// One result from the DHT.
@@ -187,6 +215,99 @@ impl<D: DhtClient> NatDriver<D> {
         Ok(events)
     }
 
+    /// Sign a `relay_discovery` for an emitted request.
+    ///
+    /// The message shape is fixed by §12.2; the only application input
+    /// is the `Signer`. Returns the signed message ready to be placed
+    /// on the wire by the caller.
+    pub fn build_relay_discovery<S: Signer>(
+        &self,
+        signer: &S,
+        target: NodeId,
+        max_hops: u8,
+        request_id: [u8; 16],
+        now: Timestamp,
+    ) -> Result<RelayDiscovery> {
+        let mut msg = RelayDiscovery {
+            request_id,
+            requester: *self.state.node_id(),
+            target,
+            max_hops: max_hops as u64,
+            timestamp: now,
+            signature: [0u8; 64],
+        };
+        let payload = msg.signing_payload()?;
+        msg.signature = signer.sign_ed25519(&payload);
+        Ok(msg)
+    }
+
+    /// Route an emitted [`NatEvent`] to the application.
+    ///
+    /// Call this for every event returned by [`Self::poll`]. Events
+    /// the application must act on are dispatched to `app`; events
+    /// the application may merely observe are forwarded via
+    /// [`NatApplication::on_nat_event`].
+    ///
+    /// Returns `Ok(())` for all currently-defined events. The
+    /// `Result` exists so that future event types that require
+    /// signing can surface a crypto error without changing the
+    /// signature.
+    pub fn dispatch_event<S: Signer, A: NatApplication>(
+        &self,
+        event: NatEvent,
+        signer: &S,
+        app: &mut A,
+        now: Timestamp,
+    ) -> Result<()> {
+        match &event {
+            NatEvent::ProbeRequested {
+                session_id,
+                peer,
+                addr,
+            } => {
+                app.probe_candidate(*session_id, *peer, *addr);
+            }
+            NatEvent::RelayDiscoveryRequested {
+                target,
+                max_hops,
+                request_id,
+            } => {
+                let msg = self.build_relay_discovery(
+                    signer,
+                    *target,
+                    *max_hops,
+                    *request_id,
+                    now,
+                )?;
+                app.send_relay_discovery(msg);
+            }
+            _ => {}
+        }
+        app.on_nat_event(&event);
+        Ok(())
+    }
+
+    /// Convenience: `poll` then `dispatch_event` for every event.
+    ///
+    /// Equivalent to calling [`Self::poll`] and looping over the
+    /// result with [`Self::dispatch_event`]. Use this when the
+    /// application does not need to inspect the events before
+    /// dispatching.
+    pub async fn poll_and_dispatch<S: Signer, A: NatApplication>(
+        &mut self,
+        conn: &mut ConnectionDriver,
+        signer: &S,
+        app: &mut A,
+        now: Timestamp,
+    ) -> Result<usize> {
+        let events = self.poll(conn, now).await?;
+        let n = events.len();
+        for e in events {
+            self.dispatch_event(e, signer, app, now)?;
+        }
+        Ok(n)
+    }
+
     /// Feed an inbound NAT message from a peer into the state machine.
     ///
     /// `relay_response` messages carry their own `target` field (§12.2),
@@ -245,8 +366,144 @@ mod tests {
     use super::*;
     use crate::nat::{AddressState, CandidateTable, NatConfig};
     use alloc::vec::Vec;
+    use alloc::string::ToString;
     use quip_core::address::Address;
     use quip_core::time::Timestamp;
+    use crate::nat_wire::RelayDiscovery;
+    use quip_core::messages::Signer;
+
+    /// Deterministic test signer: signature bytes are the first 64
+    /// bytes of SHA-256(payload), padded. Enough to prove the driver
+    /// signs the right payload, not to prove Ed25519 correctness.
+    struct TagSigner;
+
+    impl Signer for TagSigner {
+        fn sign_ed25519(&self, payload: &[u8]) -> [u8; 64] {
+            let mut sig = [0u8; 64];
+            for (i, b) in payload.iter().take(64).enumerate() {
+                sig[i] = *b;
+            }
+            sig
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingApp {
+        probes: Vec<([u8; 16], NodeId, Address)>,
+        relays: Vec<RelayDiscovery>,
+        observed: Vec<String>,
+    }
+
+    impl NatApplication for RecordingApp {
+        fn probe_candidate(&mut self, session_id: [u8; 16], peer: NodeId, addr: Address) {
+            self.probes.push((session_id, peer, addr));
+        }
+        fn send_relay_discovery(&mut self, msg: RelayDiscovery) {
+            self.relays.push(msg);
+        }
+        fn on_nat_event(&mut self, event: &NatEvent) {
+            let tag = match event {
+                NatEvent::ProbeRequested { .. } => "probe",
+                NatEvent::RelayDiscoveryRequested { .. } => "relay",
+                NatEvent::SessionFailed { .. } => "failed",
+                NatEvent::DirectPathEstablished { .. } => "direct",
+                _ => "other",
+            };
+            self.observed.push(tag.into());
+        }
+    }
+
+    #[test]
+    fn dispatch_probe_event_calls_application() {
+        let d = NatDriver::new(
+            nid(1),
+            addr(1),
+            NatConfig::default(),
+            RecordingDht::default(),
+        );
+        let signer = TagSigner;
+        let mut app = RecordingApp::default();
+
+        d.dispatch_event(
+            NatEvent::ProbeRequested {
+                session_id: [0x11; 16],
+                peer: nid(2),
+                addr: addr(5),
+            },
+            &signer,
+            &mut app,
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(app.probes.len(), 1);
+        assert_eq!(app.probes[0], ([0x11; 16], nid(2), addr(5)));
+        assert!(app.relays.is_empty());
+        assert_eq!(app.observed, alloc::vec!["probe".to_string()]);
+    }
+
+    #[test]
+    fn dispatch_relay_event_signs_and_forwards() {
+        let d = NatDriver::new(
+            nid(1),
+            addr(1),
+            NatConfig::default(),
+            RecordingDht::default(),
+        );
+        let signer = TagSigner;
+        let mut app = RecordingApp::default();
+
+        let request_id = [0xAA; 16];
+        d.dispatch_event(
+            NatEvent::RelayDiscoveryRequested {
+                target: nid(7),
+                max_hops: 2,
+                request_id,
+            },
+            &signer,
+            &mut app,
+            now(),
+        )
+        .unwrap();
+
+        assert_eq!(app.relays.len(), 1);
+        let msg = &app.relays[0];
+        assert_eq!(msg.requester, nid(1));
+        assert_eq!(msg.target, nid(7));
+        assert_eq!(msg.max_hops, 2);
+        assert_eq!(msg.request_id, request_id);
+        // Signature is non-zero, and matches the signing payload.
+        assert_ne!(msg.signature, [0u8; 64]);
+        let expected = signer.sign_ed25519(&msg.signing_payload().unwrap());
+        assert_eq!(msg.signature, expected);
+    }
+
+    #[test]
+    fn dispatch_ignores_observation_only_events() {
+        let d = NatDriver::new(
+            nid(1),
+            addr(1),
+            NatConfig::default(),
+            RecordingDht::default(),
+        );
+        let signer = TagSigner;
+        let mut app = RecordingApp::default();
+
+        d.dispatch_event(
+            NatEvent::SessionFailed {
+                peer: nid(2),
+                session_id: [0u8; 16],
+            },
+            &signer,
+            &mut app,
+            now(),
+        )
+        .unwrap();
+
+        assert!(app.probes.is_empty());
+        assert!(app.relays.is_empty());
+        assert_eq!(app.observed, alloc::vec!["failed".to_string()]);
+    }
 
     fn nid(b: u8) -> NodeId {
         [b; 32]

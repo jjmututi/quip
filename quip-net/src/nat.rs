@@ -384,6 +384,12 @@ pub struct NatConfig {
     pub max_candidates_per_session: usize,
     /// Maximum concurrent sessions.
     pub max_sessions: usize,
+    /// How long to wait for direct candidates before falling back to
+    /// relay discovery (M3.3).
+    pub candidate_phase_timeout_ms: u64,
+    /// How long a `relay_discovery` may remain unanswered before the
+    /// session is declared failed (M3.3).
+    pub relay_discovery_timeout_ms: u64,
 }
 
 impl Default for NatConfig {
@@ -395,6 +401,8 @@ impl Default for NatConfig {
             max_observations: 32,
             max_candidates_per_session: 32,
             max_sessions: 32,
+            candidate_phase_timeout_ms: 15_000,
+            relay_discovery_timeout_ms: 30_000,
         }
     }
 }
@@ -482,6 +490,21 @@ impl AddressState {
             .map(|(_, (_, addr))| addr);
 
         self.nat_type = infer_nat_type(&self.observations);
+    }
+
+    /// True when all observations agree on the external port.
+    ///
+    /// This is a coarse heuristic for the `port_preservation` field of
+    /// `connectivity_announce` (§12.1). It is not a proof: a full-cone NAT
+    /// that happens to see only one destination can also present a stable
+    /// port. Deployments that need a stronger signal should probe from
+    /// multiple independent destinations.
+    pub fn port_preservation(&self) -> bool {
+        let mut ports = BTreeMap::new();
+        for addr in self.observations.values() {
+            ports.insert(addr_port(addr), ());
+        }
+        ports.len() <= 1
     }
 }
 
@@ -668,6 +691,13 @@ pub struct SessionState {
     pub candidates: CandidateTable,
     /// When the session began.
     pub started_at: Timestamp,
+    /// Set once we have emitted `RequestRelays` for this session; the
+    /// value is the `request_id` we expect to see echoed back (M3.3).
+    pub relay_request_id: Option<[u8; 16]>,
+    /// When the relay discovery was emitted, for timeout accounting.
+    pub relay_requested_at: Option<Timestamp>,
+    /// Relay entries returned for this session's peer.
+    pub relays: Vec<RelayEntry>,
 }
 
 /// A request the driver should fulfil.
@@ -793,6 +823,19 @@ pub enum NatEvent {
         /// Request identifier to echo in the signed message.
         request_id: [u8; 16],
     },
+    /// A relay is available for a session whose direct candidates failed.
+    ///
+    /// The application is expected to call
+    /// [`NatTraversal::build_relay_chain`] with a [`RelayHopSealer`] and
+    /// then use the resulting chain to reach `peer` (M3.3).
+    RelayPathAvailable {
+        /// Session the relay belongs to.
+        session_id: [u8; 16],
+        /// The peer we were trying to reach.
+        peer: NodeId,
+        /// The relay chosen by the state machine.
+        relay: RelayEntry,
+    },
 }
 
 /// The NAT traversal state machine.
@@ -809,6 +852,8 @@ pub struct NatTraversal {
     last_announce: Option<Timestamp>,
     /// Host candidates we advertise on every session.
     local_candidates: Vec<Candidate>,
+    /// Monotonic counter backing `request_id` generation (M3.3).
+    next_request_id: u64,
 }
 
 impl NatTraversal {
@@ -825,6 +870,7 @@ impl NatTraversal {
             events: VecDeque::new(),
             last_announce: None,
             local_candidates: Vec::new(),
+            next_request_id: 0,
         }
     }
 
@@ -868,30 +914,81 @@ impl NatTraversal {
             self.emit_connectivity_announce(now);
         }
 
-        // Per-session maintenance: prune stale candidates, emit probes
-        // for pending ones, and retire sessions with no path.
+        // Per-session maintenance. The ordering is:
+        //   1. Try any unprobed direct candidate.
+        //   2. If candidates are exhausted, wait out the collection window
+        //      before falling back — the DHT may still be responding.
+        //   3. Request relays once.
+        //   4. Time out the session if relay discovery goes unanswered.
         let ttl = self.config.candidate_ttl_s;
+        let candidate_window_ms = self.config.candidate_phase_timeout_ms;
+        let relay_timeout_ms = self.config.relay_discovery_timeout_ms;
+
         let mut probes: Vec<Outbound> = Vec::new();
+        let mut relay_requests: Vec<([u8; 16], NodeId)> = Vec::new();
         let mut failed: Vec<[u8; 16]> = Vec::new();
+
         for (sid, session) in self.sessions.iter_mut() {
             session.candidates.prune(now, ttl);
 
-            if session.candidates.established().is_none() {
-                if let Some(c) = session.candidates.next_to_probe(now, ttl) {
-                    probes.push(Outbound::ProbeCandidate {
-                        session_id: *sid,
-                        peer: session.peer,
-                        candidate: c,
-                    });
-                } else if session.candidates.pending_probes() == 0 {
-                    // No established path and nothing left to try.
-                    failed.push(*sid);
-                }
+            if session.candidates.established().is_some() {
+                continue;
+            }
+
+            // 1. Direct candidates always take priority.
+            if let Some(c) = session.candidates.next_to_probe(now, ttl) {
+                probes.push(Outbound::ProbeCandidate {
+                    session_id: *sid,
+                    peer: session.peer,
+                    candidate: c,
+                });
+                continue;
+            }
+
+            // 2. Nothing to probe yet. Wait for the collection window if
+            //    we have not seen a single candidate.
+            let candidate_deadline = session
+                .started_at
+                .as_millis()
+                .saturating_add(candidate_window_ms);
+            if now.as_millis() < candidate_deadline && session.candidates.remote_len() == 0 {
+                continue;
+            }
+
+            // 3. Fall back to relay discovery, exactly once per session.
+            if session.relay_request_id.is_none() {
+                relay_requests.push((*sid, session.peer));
+                continue;
+            }
+
+            // 4. Relay discovery outstanding. Time it out.
+            let requested_at = session
+                .relay_requested_at
+                .map(|t| t.as_millis())
+                .unwrap_or(now.as_millis());
+            let deadline = requested_at.saturating_add(relay_timeout_ms);
+            if now.as_millis() >= deadline && session.relays.is_empty() {
+                failed.push(*sid);
             }
         }
+
         for p in probes {
             self.outbound.push_back(p);
         }
+
+        for (sid, peer) in relay_requests {
+            let request_id = self.generate_request_id();
+            if let Some(s) = self.sessions.get_mut(&sid) {
+                s.relay_request_id = Some(request_id);
+                s.relay_requested_at = Some(now);
+            }
+            self.outbound.push_back(Outbound::RequestRelays {
+                target: peer,
+                max_hops: RELAY_HOP_LIMIT,
+                request_id,
+            });
+        }
+
         for sid in failed {
             if let Some(s) = self.sessions.remove(&sid) {
                 self.events.push_back(NatEvent::SessionFailed {
@@ -952,17 +1049,39 @@ impl NatTraversal {
 
     /// Receive a `relay_response`.
     ///
-    /// The target is carried in the response itself (see §12.2), so the
-    /// state machine registers each relay against its declared target
-    /// without needing any external correlation.
-    pub fn on_relay_response(
-        &mut self,
-        response: RelayResponse,
-        _now: Timestamp,
-    ) {
+    /// If the response answers an outstanding session discovery — matched
+    /// by both `request_id` and `target` (§12.2) — the relays are recorded
+    /// against that session and a [`NatEvent::RelayPathAvailable`] is
+    /// surfaced so the application can build a chain with a
+    /// [`RelayHopSealer`]. Relays are always offered to the manager too,
+    /// regardless of whether a session matched.
+    pub fn on_relay_response(&mut self, response: RelayResponse, _now: Timestamp) {
         let target = response.target;
+        let request_id = response.request_id;
+
+        let mut matched: Option<([u8; 16], NodeId, RelayEntry)> = None;
+        for (sid, session) in self.sessions.iter_mut() {
+            if session.peer == target && session.relay_request_id == Some(request_id) {
+                for entry in &response.relays {
+                    session.relays.push(entry.clone());
+                }
+                if let Some(first) = session.relays.first().cloned() {
+                    matched = Some((*sid, session.peer, first));
+                }
+                break;
+            }
+        }
+
         for entry in response.relays {
             self.relay_manager.offer(entry, Some(target));
+        }
+
+        if let Some((session_id, peer, relay)) = matched {
+            self.events.push_back(NatEvent::RelayPathAvailable {
+                session_id,
+                peer,
+                relay,
+            });
         }
     }
 
@@ -1051,6 +1170,9 @@ impl NatTraversal {
                 session_id,
                 candidates: table,
                 started_at: now,
+                relay_request_id: None,
+                relay_requested_at: None,
+                relays: Vec::new(),
             },
         );
 
@@ -1122,6 +1244,20 @@ impl NatTraversal {
         &mut self.relay_manager
     }
 
+    /// Generate a fresh 16-byte `request_id`.
+    ///
+    /// The first 8 bytes derive from our NodeId so the value is unique
+    /// across nodes; the remaining 8 are a monotonic counter so it is
+    /// unique across outstanding discoveries on this node (§12.2).
+    fn generate_request_id(&mut self) -> [u8; 16] {
+        let n = self.next_request_id;
+        self.next_request_id = n.wrapping_add(1);
+        let mut id = [0u8; 16];
+        id[..8].copy_from_slice(&self.node_id[..8]);
+        id[8..].copy_from_slice(&n.to_be_bytes());
+        id
+    }
+
     fn emit_connectivity_announce(&mut self, now: Timestamp) {
         let external = match self.address.external() {
             Some(a) => a,
@@ -1132,7 +1268,7 @@ impl NatTraversal {
             external_addr: external,
             internal_addr: self.local_addr,
             nat_type: self.address.nat_type(),
-            port_preservation: true, // TODO(M3b.3): infer from observation consistency
+            port_preservation: self.address.port_preservation(),
             relay_capable: false,
             capacity: 0,
             timestamp: now,
@@ -1328,5 +1464,173 @@ impl RelayHopSealer for TagSealer {
         let n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
         let err = n.build_relay_chain(nid(99), 300, &[0u8; 32], &TagSealer);
         assert!(matches!(err, Err(Error::NatUnreachable)));
+    }
+
+    #[test]
+    fn poll_requests_relays_when_candidates_exhausted() {
+        use crate::nat_wire::{Candidate, CANDIDATE_HOST};
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        n.start_session(nid(2), [0u8; 16], now());
+        let _ = n.poll(now()); // drain initial outbound
+
+        let c = Candidate {
+            addr: addr(10),
+            kind: CANDIDATE_HOST,
+            priority: 100,
+            foundation: "f".into(),
+            component: 0,
+        };
+        n.on_candidate_announce(
+            CandidateAnnounce {
+                node_id: nid(2),
+                candidates: vec![c.clone()],
+                session_id: [0u8; 16],
+                timestamp: now(),
+                signature: [0u8; 64],
+            },
+            now(),
+        );
+
+        let out = n.poll(now());
+        assert!(out.iter().any(|o| matches!(o, Outbound::ProbeCandidate { .. })));
+        n.on_probe_result([0u8; 16], c.addr, false, now());
+
+        let out = n.poll(now());
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Outbound::RequestRelays { target, .. } if target == &nid(2)
+            )),
+            "expected RequestRelays, got {:?}",
+            out
+        );
+    }
+
+    #[test]
+    fn relay_response_completes_pending_session() {
+        use crate::nat_wire::{Candidate, RelayEntry, CANDIDATE_HOST};
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        n.start_session(nid(2), [0u8; 16], now());
+        let _ = n.poll(now());
+
+        let c = Candidate {
+            addr: addr(10),
+            kind: CANDIDATE_HOST,
+            priority: 100,
+            foundation: "f".into(),
+            component: 0,
+        };
+        n.on_candidate_announce(
+            CandidateAnnounce {
+                node_id: nid(2),
+                candidates: vec![c.clone()],
+                session_id: [0u8; 16],
+                timestamp: now(),
+                signature: [0u8; 64],
+            },
+            now(),
+        );
+        let _ = n.poll(now());
+        n.on_probe_result([0u8; 16], c.addr, false, now());
+
+        let out = n.poll(now());
+        let request_id = out
+            .iter()
+            .find_map(|o| match o {
+                Outbound::RequestRelays { request_id, .. } => Some(*request_id),
+                _ => None,
+            })
+            .expect("expected RequestRelays");
+
+        let relay = RelayEntry {
+            relay_id: nid(10),
+            external_addr: addr(10),
+            capacity: 100,
+            load: 0,
+            cost: 0,
+        };
+        n.on_relay_response(
+            RelayResponse {
+                request_id,
+                target: nid(2),
+                requester: nid(1),
+                relays: vec![relay.clone()],
+                timestamp: now(),
+                signature: [0u8; 64],
+            },
+            now(),
+        );
+
+        let events = n.drain_events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            NatEvent::RelayPathAvailable { peer, relay: r, .. }
+                if peer == &nid(2) && r.relay_id == nid(10)
+        )));
+
+        // The relay is also registered in the manager for future use.
+        assert!(n.relays().get(&nid(10)).is_some());
+    }
+
+    #[test]
+    fn relay_request_times_out_into_session_failure() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        n.start_session(nid(2), [0u8; 16], now());
+
+        // Jump past the candidate window so we fall straight to relays,
+        // then past the relay window without a response.
+        let cfg = n.config().clone();
+        let t1 = Timestamp::from_millis(
+            now().as_millis() + cfg.candidate_phase_timeout_ms + 1,
+        );
+        let out = n.poll(t1);
+        assert!(out
+            .iter()
+            .any(|o| matches!(o, Outbound::RequestRelays { .. })));
+
+        let t2 = Timestamp::from_millis(
+            t1.as_millis() + cfg.relay_discovery_timeout_ms + 1,
+        );
+        let _ = n.poll(t2);
+
+        let events = n.drain_events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            NatEvent::SessionFailed { peer, .. } if peer == &nid(2)
+        )));
+    }
+
+    #[test]
+    fn request_ids_are_unique_per_session() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        n.start_session(nid(2), [0u8; 16], now());
+        n.start_session(nid(3), [1u8; 16], now());
+
+        let cfg = n.config().clone();
+        let later = Timestamp::from_millis(
+            now().as_millis() + cfg.candidate_phase_timeout_ms + 1,
+        );
+        let out = n.poll(later);
+
+        let ids: Vec<[u8; 16]> = out
+            .iter()
+            .filter_map(|o| match o {
+                Outbound::RequestRelays { request_id, .. } => Some(*request_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids.len(), 2);
+        assert_ne!(ids[0], ids[1]);
+    }
+
+    #[test]
+    fn address_state_infers_port_preservation() {
+        let mut s = AddressState::new();
+        s.observe(nid(1), addr(10));
+        s.observe(nid(2), addr(10));
+        assert!(s.port_preservation());
+
+        s.observe(nid(3), Address::V4 { ip: [127, 0, 0, 20], port: 9999 });
+        assert!(!s.port_preservation());
     }
 }

@@ -70,6 +70,7 @@ pub mod coral;
 pub mod cluster;
 pub mod dht;
 pub mod discovery;
+pub mod establishment;
 pub mod error;
 pub mod event;
 pub mod flow;
@@ -138,6 +139,9 @@ pub use cluster::{
 pub use discovery::{
     DiscoveryFailure, DiscoveryPhaseKind, DiscoveryStatus, Outbound, SpilloverResponseCache,
     StartOutcome, WitnessDiscovery, DEFAULT_SPILLOVER_CACHE_CAPACITY,
+};
+pub use establishment::{
+    ConnectionFlow, FlowAction, FlowConfig, FlowFailure, FlowPhase, KtStatus,
 };
 pub use error::{Error, Result};
 pub use event::{EmitEvent, PinAnnounce};

@@ -61,6 +61,7 @@
 //!   the caller to report the outcome.
 
 use crate::message::Message;
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use quip_core::dvv::NodeId;

@@ -206,3 +206,6 @@ pub use transport::{
 
 #[cfg(feature = "quic")]
 pub use nat_driver::{DhtClient, DhtResult, NatDriver, NullDhtClient};
+
+#[cfg(test)]
+pub(crate) mod test_support;

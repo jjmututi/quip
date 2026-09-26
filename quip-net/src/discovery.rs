@@ -706,6 +706,7 @@ fn compute_ring_id(target: &NodeId, now: Timestamp) -> [u8; 32] {
 mod tests {
     use super::*;
     use crate::coral::PathProof;
+    use crate::test_support::FakeSigner;
     use alloc::vec;
 
     fn nid(b: u8) -> NodeId {
@@ -722,27 +723,6 @@ mod tests {
 
     fn t(secs: u64) -> Timestamp {
         Timestamp::from_secs(secs)
-    }
-
-    /// Deterministic fake signer. Signatures are fixed bytes; nothing in
-    /// `WitnessDiscovery` verifies them.
-    struct FakeSigner {
-        node_id: NodeId,
-    }
-
-    impl FakeSigner {
-        fn new(b: u8) -> Self {
-            Self { node_id: nid(b) }
-        }
-    }
-
-    impl Signer for FakeSigner {
-        fn public_key(&self) -> [u8; 32] {
-            self.node_id
-        }
-        fn sign_ed25519(&self, _msg: &[u8]) -> [u8; 64] {
-            [0xab; 64]
-        }
     }
 
     fn lookup_path(seed: u8) -> LookupPath {

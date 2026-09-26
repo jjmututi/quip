@@ -369,23 +369,8 @@ mod tests {
     use alloc::string::ToString;
     use quip_core::address::Address;
     use quip_core::time::Timestamp;
+    use crate::test_support::FakeSigner;
     use crate::nat_wire::RelayDiscovery;
-    use quip_core::messages::Signer;
-
-    /// Deterministic test signer: signature bytes are the first 64
-    /// bytes of SHA-256(payload), padded. Enough to prove the driver
-    /// signs the right payload, not to prove Ed25519 correctness.
-    struct TagSigner;
-
-    impl Signer for TagSigner {
-        fn sign_ed25519(&self, payload: &[u8]) -> [u8; 64] {
-            let mut sig = [0u8; 64];
-            for (i, b) in payload.iter().take(64).enumerate() {
-                sig[i] = *b;
-            }
-            sig
-        }
-    }
 
     #[derive(Default)]
     struct RecordingApp {
@@ -421,7 +406,7 @@ mod tests {
             NatConfig::default(),
             RecordingDht::default(),
         );
-        let signer = TagSigner;
+        let signer = FakeSigner::new(1);
         let mut app = RecordingApp::default();
 
         d.dispatch_event(
@@ -450,7 +435,7 @@ mod tests {
             NatConfig::default(),
             RecordingDht::default(),
         );
-        let signer = TagSigner;
+        let signer = FakeSigner::new(1);
         let mut app = RecordingApp::default();
 
         let request_id = [0xAA; 16];
@@ -486,7 +471,7 @@ mod tests {
             NatConfig::default(),
             RecordingDht::default(),
         );
-        let signer = TagSigner;
+        let signer = FakeSigner::new(1);
         let mut app = RecordingApp::default();
 
         d.dispatch_event(

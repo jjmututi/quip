@@ -26,16 +26,16 @@ row and the tag index in the same commit.
 |---|---|---|
 | M1 | Foundation: dispatch, codec, frame, error, constants | landed |
 | M2 | Coral DHT state: routing, cluster, witness discovery | landed |
-| M3 | NAT traversal: wire codecs, state machine, driver wiring | M3.1–M3.2 landed; M3.3 not started |
+| M3 | NAT traversal: codecs, state machine, driver, connection flow | landed; M3.6 residuals |
 | M4 | BFT consensus: wire codecs (M4a), driver (M4b) | M4a landed; M4b not started |
 | M5 | QUIC transport: endpoint, handshake, T0/T1/T2/T3 I/O | landed |
 | M6 | Integration: §16 flow, test vectors, CI | landed |
 | M7 | Hardening: rate limits, caches, quarantine, state machines | landed |
 | M8 | Range fetch: bao verified streaming | landed |
+| Spec pass | S1–S7 and D4 pinned in the draft | landed; S1 sealer impl is code work |
 
 **Demo-critical list is complete.** The §16 flow runs end-to-end through
-step 8. M3b's relay emission and M4b's consensus driver are the two known
-gaps; both are post-demo.
+step 8. M4b's consensus driver is the last known gap.
 
 ---
 
@@ -45,7 +45,7 @@ All crates compile, every test passes, clippy and rustdoc are silent under
 `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    545 unit + 3 doc, exit 0
+cargo test --workspace --all-features                    564 unit + 3 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -71,10 +71,10 @@ Baseline on `main`:
 
 ```
 quip-core      74 passed
-quip-net      401 passed
+quip-net      433 passed
 quip-storage   57 passed
 doc-tests       3 passed (one per crate)
-             ~535 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~564 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -116,7 +116,7 @@ in-memory state that a driver consults.
 
 ---
 
-## M3 — NAT traversal (§12)
+## M3 — NAT traversal (§12) — LANDED
 
 ### M3.1 — Wire codecs — LANDED
 `nat_wire.rs` defines `Address`, `Candidate`, `RelayEntry`, and the four
@@ -132,19 +132,57 @@ top-level messages: `connectivity_announce`, `candidate_announce`,
   `NatDriver<D>::poll()`. Outbound arms that need an `Endpoint` or a
   `Signer` forward to the application as `NatEvent`s.
 
-### M3.3 — Outstanding
-- **Relay emission.** `Outbound::RequestRelays` is handled but
-  `Outbound::DiscoverRelays` is defined yet emitted nowhere. The state
-  machine never asks for relays today, so `RelayManager` is only fed by
-  `connectivity_announce`.
-- **Re-announce scheduler (§12.1).** TTL 600 s, re-announce 480 s, adaptive
-  50–90 %. `last_announce` exists but nothing schedules.
-- **`port_preservation` inference.** Hardcoded `true` at `nat.rs:1108`;
-  should be inferred from observation consistency.
-- **Relay chaining beyond one hop.** `build_relay_chain` produces a single
-  hop and leaves `encrypted_key` empty (see **S1**).
-- **Relay rate limit and LRU eviction.** Capacity bound exists; the
-  100/min rate limit and eviction under `RELAY_CAPACITY` do not.
+### M3.3 — Relay emission — LANDED
+- `NatTraversal::poll` runs a four-phase per-session ladder: probe any
+  unprobed direct candidate; wait out the candidate collection window;
+  emit `RequestRelays` exactly once with a fresh `request_id`; time the
+  session out if relay discovery goes unanswered.
+- `on_relay_response` correlates by both `request_id` and `target`
+  (§12.2) and emits `NatEvent::RelayPathAvailable`.
+- `generate_request_id` derives a 16-byte value from the local NodeId
+  prefix plus a monotonic counter.
+- `AddressState::port_preservation` replaces the hardcoded `true` in
+  `emit_connectivity_announce`.
+- `RelayHopSealer` trait and `build_relay_chain(target, ttl, traffic_key,
+  sealer)` — single-hop chains seal the symmetric traffic key with the
+  HPKE scheme fixed by §12.2. The concrete sealer is a code follow-up
+  (see M3.6).
+
+### M3.4 — Driver-side handlers — LANDED
+- `NatApplication` trait: `probe_candidate`, `send_relay_discovery`,
+  `on_nat_event`.
+- `NatDriver::build_relay_discovery` signs the §12.2 message shape.
+- `NatDriver::dispatch_event` routes an emitted `NatEvent` to the
+  application; observation-only events reach `on_nat_event`.
+- `NatDriver::poll_and_dispatch` is the convenience wrapper.
+
+### M3.5 — Connection-establishment orchestration — LANDED
+- `establishment.rs` (distinct from `flow.rs`, which owns per-stream
+  flow-control frames). `ConnectionFlow` sequences §16 phases:
+  `AwaitHandshake → AwaitKeyClaim → NatTraversal → WitnessDiscovery →
+  Ready(KtStatus)`, with `Failed(FlowFailure)` reachable via timeout.
+- `FlowAction` tells the caller what to do next: `Send(Box<Message>)`,
+  `StartNatTraversal`, `StartWitnessDiscovery`, `Ready`, `Failed`.
+- KT status computed from accumulated `AnnounceWitness` messages: 4+
+  non-expired statements ⇒ `Verified`, otherwise `Pending`. A failed
+  witness discovery yields `Ready(Pending)` rather than a failed flow.
+- Timeouts: 10 s (Key Claim), 30 s (NAT), 30 s (discovery). All three
+  are implementation choices.
+
+### M3.6 — Outstanding
+1. **S1 concrete sealer.** `RelayHopSealer` has no production impl. HPKE
+   `mode_base`, `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` /
+   `ChaCha20Poly1305`, `info = "QUIP-relay-hop-v1"`, empty `aad`; the
+   recipient key is the Ed25519→X25519 birational map of `relay_id`.
+   Belongs in `quip-net/src/crypto.rs` behind the `crypto` feature, or a
+   new `hpke` feature.
+2. **Adaptive re-announce (§12.1).** Fixed at 80 % today; the 50–90 %
+   range and churn-based adjustment are not implemented.
+3. **Relay chaining beyond one hop.** `build_relay_chain` produces a
+   single hop; the recursive plaintext layout for multi-hop chains is
+   documented in §12.2 but not emitted.
+4. **Relay rate limit.** LRU eviction under `RELAY_CAPACITY` is in place;
+   the §12.2 100/min per-NodeId rate limit is not.
 
 ---
 
@@ -174,6 +212,8 @@ certificates, stable checkpoints. Ring *formation* is M2, not here.
 - `bft_driver.rs` — `BftDriver` with `poll()` and an outbound message queue.
 - `BftHandler` trait to apply operations to the DVV.
 - `RingMembership` view mapping position → NodeId for primary rotation.
+  Ordering is pinned by S3 to canonical NodeId order; primary for view
+  `v` is `members[v mod |R|]`.
 - Verify the contents of `bft_new_view`'s opaque
   `view_change_messages`, `prepared_messages`, and `checkpoint_messages`
   (the carry-forward from M4a).
@@ -188,19 +228,21 @@ registrations requiring witness validation.
 **DEGRADED mode** entered at 3–4 reachable witnesses
 (`DEGRADED_QUORUM` = 3). MUST log and alert if it persists > 5 minutes.
 
-**View changes:** new primary is the next node in the ring (ordering
-undefined — see **S3**). `bft_new_view` MUST contain at least
+**View changes:** new primary is `members[v mod |R|]` in canonical NodeId
+order (S3 pinned). `bft_new_view` MUST contain at least
 `VIEW_CHANGE_QUORUM` = 5 valid view-change messages plus full encoded
 preprepare messages.
 
 **Checkpointing:** every `CHECKPOINT_INTERVAL` = 100 rounds, collect to
 5-of-7 for the same `state_digest`. Lagging witness requests
 `bft_state_transfer` with its checkpoint sequence; peer responds with state
-plus a `RingSignature`; lagging witness verifies and resumes.
+plus a `RingSignature`; lagging witness verifies and resumes. The `state`
+field is opaque and application-defined; `checkpoint_digest` is SHA-256 of
+the transmitted bytes (S4 pinned).
 
-**Size:** ~2000–2500 lines.
-
-**Spec gaps:** S3 (ring order), S4 (`bft_state_transfer.state` contents).
+**Size:** ~2000–2500 lines. Realistic split: M4b.1 (round core — preprepare,
+prepare, precommit, commit, apply), M4b.2 (view change), M4b.3
+(checkpointing and state transfer).
 
 ---
 
@@ -265,10 +307,9 @@ Generated by `cargo xtask generate-vectors`. `xtask/` depends on
 
 ---
 
-## M7 — Hardening (§11, §19.4)
+## M7 — Hardening (§11, §19.4) — LANDED
 
-Ten items. All landed. The one remaining item is the D4
-reconciliation against the draft, tracked under the spec gaps.
+Ten items. All landed.
 
 ### Landed
 - **Rate limiting (§19.4).** `ConnectionDriver` enforces inbound limits per
@@ -314,17 +355,10 @@ reconciliation against the draft, tracked under the spec gaps.
   transport driver caps concurrent inbound T2 streams at
   `T2_MAX_STREAMS` per connection using a `Semaphore`, so a peer that
   opens more than the cap gets QUIC-level backpressure.
-- **Flow control frames (§11).** `flow.rs` codec and state machine;
-  already landed during M5.
+- **Flow control frames (§11).** `flow.rs` codec and state machine.
 - **Pin eviction.** `quip-storage/src/pins.rs` evicts by lowest
   `ref_count` then age.
 - **Range length cap — codec half.** `FetchRange::check_length` exists.
-
-### Outstanding
-1. **`T2_MAX_STREAMS` reconciliation (D4).** `constants.rs` says 16;
-   §19.4 says 256. One of the two is wrong; the constant is the current
-   behaviour, the spec text is the aspiration. Pick one and align the
-   other.
 
 ### Size
 ~1500–2000 lines.
@@ -353,27 +387,44 @@ surface: `extract_proof_cached` produces byte-identical proofs to
 
 ---
 
-## Spec gaps
+## Spec pass — LANDED
 
-Seven points where the draft leaves a choice the implementation had to make.
-Two affect the wire format.
+Seven points where the draft left a choice, plus one code/spec numeric
+mismatch. All eight are now resolved in `draft-mututi-quip-03.xml`.
 
-- **S1 — `RelayHop.encrypted_key`.** Encryption scheme unnamed. Presumably
-  ECDH + X25519 + AEAD. Until pinned, `build_relay_chain` is single-hop.
-- **S2 — QUIC path validation.** §12.3 says connectivity checks use QUIC
-  path validation but not how a driver with no `Endpoint` performs one.
-- **S3 — View-change ordering.** "The next node in the ring" — next in what
-  order? Presumably canonical NodeId order.
-- **S4 — `bft_state_transfer.state` contents.** Field is `bytes`; the draft
-  does not say what is in it.
-- **S5 — Handshake framing.** Whether the §4 handshake carries the varint
-  length prefix that every other reliable-stream message uses.
-- **S6 — Target echo in `relay_response`.** The current implementation
-  correlates out-of-band; the draft should either require the echo or
-  permit out-of-band correlation.
-- **S7 — `NAT_TYPE_*` numeric values.** Pinned in `nat_wire.rs`
-  (`NAT_TYPE_UNKNOWN`/`OPEN`/`CONE`/`RESTRICTED`/`SYMMETRIC`); §12.1 gives
-  the numbers in prose only.
+- **S1 — `RelayHop.encrypted_key`.** §12.2 now defines HPKE `mode_base`,
+  `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` / `ChaCha20Poly1305`,
+  `info = "QUIP-relay-hop-v1"`, empty `aad`. The recipient key is the
+  Ed25519→X25519 birational map of `relay_id`. **Code follow-up:** the
+  concrete sealer is M3.6 item 1; `build_relay_chain` is single-hop until
+  it lands.
+- **S2 — QUIC path validation.** §12.3 now documents the application-owned
+  `Endpoint` path: the driver signals a probe, the application dials a
+  fresh connection with the same ALPN, reports back. Probe connections are
+  not retained. `NatDriver` forwards `NatEvent::ProbeRequested`; M3.4
+  routes it.
+- **S3 — View-change ordering.** §5.3.4 pins ring order to canonical
+  NodeId order (bytewise lexicographic); primary for view `v` is
+  `members[v mod |R|]`. Reachable-subset handling for DEGRADED mode is
+  specified.
+- **S4 — `bft_state_transfer.state` contents.** §5.3.4.1 now requires the
+  state to be opaque, digest-bound (`checkpoint_digest = SHA-256(state)`),
+  deterministically decodable by the same application, and to encode the
+  DVV, current view and sequence, and post-checkpoint operations at
+  minimum.
+- **S5 — Handshake framing.** §4 now specifies the handshake as
+  self-delimiting CBOR without the varint prefix; every subsequent message
+  on the control stream carries the prefix. Buffer cap is
+  `MAX_HANDSHAKE_BYTES` (4096).
+- **S6 — Target echo in `relay_response`.** §12.2 now requires a
+  `request_id: bytes .size 16` on `RelayDiscovery`, echoed along with
+  `target` on `RelayResponse`. **Code follow-up:** landed in M3.3 and
+  M3.4.
+- **S7 — `NAT_TYPE_*` numeric values.** §12.1 now carries a normative
+  table matching `nat_wire.rs` (`UNKNOWN`=0, `OPEN`=1, `CONE`=2,
+  `RESTRICTED`=3, `SYMMETRIC`=4).
+- **D4 — `T2_MAX_STREAMS`.** §19.4 says 256; `constants.rs` was 16.
+  Aligned the constant to the spec.
 
 ---
 
@@ -390,8 +441,17 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat.rs:391` | M3b.1 | address discovery (§12.1) |
 | `quip-net/src/nat.rs:510` | M3b.1 | candidate table (§12.3) |
 | `quip-net/src/nat.rs:634` | M3b.1 | sessions + driver-facing types |
-| `quip-net/src/nat.rs:1090` | M3b.3 | `TODO`: infer `port_preservation` |
+| `quip-net/src/nat.rs` (`RelayHopSealer`) | M3.3 | relay-hop HPKE interface (§12.2) |
+| `quip-net/src/nat.rs` (`build_relay_chain`) | M3.3 | single-hop chain with sealed traffic key |
+| `quip-net/src/nat.rs` (`NatTraversal::poll`) | M3.3 | four-phase session ladder |
+| `quip-net/src/nat.rs` (`on_relay_response`) | M3.3 | request_id + target correlation |
+| `quip-net/src/nat.rs` (`generate_request_id`) | M3.3 | 16-byte request-id derivation |
+| `quip-net/src/nat.rs` (`AddressState::port_preservation`) | M3.3 | replaces hardcoded `true` |
 | `quip-net/src/nat_driver.rs:148` | M3b.2 | send on the one connection passed in |
+| `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
+| `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
+| `quip-net/src/establishment.rs:1` | M3.5 | §16 connection flow |
+| `quip-net/src/lib.rs` (establishment re-export) | M3.5 | module wiring |
 | `quip-net/src/transport.rs:3` | M5 | status header |
 | `quip-net/src/transport.rs` (M5.2–M5.4 test groups) | M5 | handshake/capability, T0/T1/T3, Key Claim |
 | `quip-net/src/transport.rs` (M6.1 section) | M6.1 | §16 integration tests |
@@ -411,12 +471,14 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/dht.rs` (WitnessLoad) | M7 | witness ring participation cap (§19.4) |
 | `quip-net/src/range.rs` (`split_range`) | M7 | client-side range splitting (§19.4) |
 | `quip-net/src/range.rs` (`RangeResponder`) | M7 | responder with cap + quarantine |
+| `quip-net/src/test_support.rs:1` | — | test-only `FakeSigner`; not milestone-owned |
 
 The code subdivides the NAT work as `M3a` / `M3b.1` / `M3b.2` / `M3b.3`, and
-the BFT work as `M4a` / `M4b`. The status table and the M3 section above
-collapse these to `M3.1`–`M3.3` (`M3a` = `M3.1`; `M3b.1`–`M3b.2` = `M3.2`;
-`M3b.3` = `M3.3`). This index cites the code's tags, since it is defined as
-the reverse mapping *from* the source.
+the BFT work as `M4a` / `M4b`. The M3 section above numbers the later work
+`M3.3` (relay emission), `M3.4` (driver handlers), `M3.5` (connection flow),
+and `M3.6` (residuals); these tags appear in commits but not (yet) in the
+source. `M3a` = `M3.1`; `M3b.1`–`M3b.2` = `M3.2`. The `M3b.3` tag is retired
+— its only `TODO` (`port_preservation`) landed with M3.3.
 
 **Not yet tagged but milestone-owned:** `flow.rs` (M7), `range.rs`
 (M8 — its M7 cached path is tagged above), `rate.rs` (M7), `discovery.rs`
@@ -428,23 +490,27 @@ touch is cheap.
 
 ## Suggested order
 
-M6 landed. The remaining work:
+M6, M7, M8, and the spec pass have landed. M3.3–M3.5 have landed since the
+last revision of this file. The remaining work, in dependency order:
 
-1. **`T2_MAX_STREAMS` reconciliation (D4).** One-line decision: align
-   the constant with the spec, or amend the spec to match the constant.
-   Best done alongside the S1–S7 spec updates.
-2. **Spec updates S1–S7.** Text-only. S5 and S6 affect the wire format;
-   the rest are clarifications.
-3. **M3.3 completion.** Relay emission, re-announce scheduler, candidate
-   probing. Unlocks §16 steps 9–14 for integration coverage.
-4. **M4b — BFT driver.** Largest remaining item. Landing after M7 means
-   the driver joins a codebase that already enforces its rate limits and
-   has a settled T1 state machine.
-5. **M7 items 3–5.** T1 state machine, throttling, DoS bounds.
+1. **Update this file** (this commit).
+2. **M4b.1 — BFT round core.** Preprepare / prepare / precommit / commit,
+   the `BftDriver` skeleton, the `BftHandler` trait, and `RingMembership`.
+   The largest remaining item; split the view-change and checkpointing
+   halves out as M4b.2 and M4b.3.
+3. **S1 concrete sealer (M3.6 item 1).** Small and bounded. Closes the
+   last wire-format gap on the relay path. Can be done in parallel with
+   M4b if you want a break from consensus logic.
+4. **M3.6 items 2–4.** Adaptive re-announce, multi-hop chaining, relay
+   rate limit. None block anything else.
+5. **M4b.2 — View change.** `bft_view_change` / `bft_new_view` handling,
+   primary rotation, `prepared_messages` verification.
+6. **M4b.3 — Checkpointing and state transfer.** Checkpoint collection
+   to 5-of-7, `bft_state_transfer` request/response, apply-and-resume.
 
-Do not start M4b before M7 items 1–2. A 2,500-line consensus state machine
-landing into a tree that has not exercised its own rate limiter is how the
-M3b build break happened.
+Do not start M4b before the tree is green. A 2,500-line consensus state
+machine landing into a tree that has not exercised its own rate limiter is
+how the M3b build break happened.
 
 ---
 
@@ -458,6 +524,9 @@ M3b build break happened.
 - `.gitignore` with `target/`.
 - CI workflow at `.github/workflows/ci.yml`.
 - Draft at repository root.
+- `fix_bcp14.py` at repository root — one-shot script that normalizes
+  non-keyword `<bcp14>` tags to `<strong>`. Keep or remove on the next
+  draft touch.
 
 ### Outstanding
 - **Decide `quip-core/quip-core.txt` and `quip-core/crate_dump.sh`.** The

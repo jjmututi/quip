@@ -102,6 +102,10 @@ pub mod transport;
 #[cfg(feature = "quic")]
 pub mod nat_driver;
 
+/// Concrete relay-hop HPKE sealer (§12.2).
+#[cfg(feature = "hpke")]
+pub mod relay_hpke;
+
 // -------------------------------------------------------------------------
 // Crate-level re-exports
 // -------------------------------------------------------------------------
@@ -210,6 +214,9 @@ pub use transport::{
 
 #[cfg(feature = "quic")]
 pub use nat_driver::{DhtClient, DhtResult, NatDriver, NullDhtClient};
+
+#[cfg(feature = "hpke")]
+pub use relay_hpke::{ed25519_to_x25519, HpkeRelayHopSealer, RELAY_HOP_INFO};
 
 #[cfg(test)]
 pub(crate) mod test_support;

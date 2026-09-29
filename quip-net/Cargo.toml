@@ -25,7 +25,17 @@ crypto = ["dep:sha2", "dep:blake3", "dep:ed25519-dalek", "dep:bao", "std"]
 # touches a socket; this feature adds the `transport` module that does.
 quic = ["dep:quinn", "dep:rustls", "dep:tokio", "std"]
 # Convenience: everything (transport + crypto) for applications.
-full = ["crypto", "quic"]
+full = ["crypto", "quic", "hpke"]
+# Relay-hop HPKE sealing (§12.2). Requires crypto for the birational
+# map and std for hpke-rs.
+hpke = [
+    "dep:hpke-rs",
+    "dep:hpke-rs-crypto",
+    "dep:hpke-rs-rust-crypto",
+    "dep:curve25519-dalek",
+    "crypto",
+    "std",
+]
 
 [dependencies]
 quip-core = { version = "0.1.0", path = "../quip-core", default-features = false }
@@ -43,6 +53,10 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 tokio = { version = "1", optional = true, default-features = false, features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync"] }
 # BLAKE3 verified streaming (spec §8.2). Requires std.
 bao = { version = "0.12", optional = true }
+hpke-rs = { version = "0.3", optional = true, default-features = false, features = ["rustcrypto"] }
+hpke-rs-crypto = { version = "0.3", optional = true, default-features = false }
+hpke-rs-rust-crypto = { version = "0.3", optional = true, default-features = false }
+curve25519-dalek = { version = "4", optional = true, default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

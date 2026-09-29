@@ -30,10 +30,11 @@
 //!
 //! # Signing
 //!
-//! The driver holds a [`Signer`] because it signs its own votes and,
-//! as primary, the preprepare it proposes. It holds a [`Verifier`]
-//! because the four-phase protocol is meaningless without verifying
-//! peers' votes. Both are value types.
+//! The driver holds a [`quip_core::messages::Signer`] because it
+//! signs its own votes and, as primary, the preprepare it proposes.
+//! It holds a [`quip_core::messages::Verifier`] because the
+//! four-phase protocol is meaningless without verifying peers'
+//! votes. Both are value types.
 
 use crate::bft::{
     BftCommit, BftPrecommit, BftPrepare, BftPreprepare, Digest, Operation, RingId,

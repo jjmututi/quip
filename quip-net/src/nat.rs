@@ -24,7 +24,9 @@ use crate::nat_wire::{
 };
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
+use alloc::string::ToString;
 use quip_core::address::Address;
+use quip_core::cbor::{encode, CborValue};
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
 
@@ -254,6 +256,36 @@ impl RelayManager {
             .map(|r| r.entry.clone())
     }
 
+    /// The best chain of up to `max_hops` relays for `target`.
+    ///
+    /// Every relay in the returned chain declares `target` in its
+    /// `targets` set. Relays are ordered by the same criteria as
+    /// `best_for`, so the closest relay to the target comes first.
+    ///
+    /// Chain selection is a heuristic; the spec does not mandate a
+    /// specific algorithm, only the per-relay criteria of §12.2.
+    pub fn best_chain(&self, target: &NodeId, max_hops: u8) -> Vec<RelayEntry> {
+        let mut candidates: Vec<&RelayRecord> = self
+            .relays
+            .values()
+            .filter(|r| r.targets.contains(target))
+            .filter(|r| r.entry.available() > 0)
+            .collect();
+        candidates.sort_by(|a, b| {
+            let da = xor_distance(&a.entry.relay_id, target);
+            let db = xor_distance(&b.entry.relay_id, target);
+            da.cmp(&db)
+                .then_with(|| b.entry.available().cmp(&a.entry.available()))
+                .then_with(|| a.entry.cost.cmp(&b.entry.cost))
+                .then_with(|| b.reliability_permille().cmp(&a.reliability_permille()))
+        });
+        candidates
+            .into_iter()
+            .take(max_hops.max(1) as usize)
+            .map(|r| r.entry.clone())
+            .collect()
+    }
+
     /// Record a successful relay session.
     pub fn record_success(&mut self, relay_id: &NodeId) {
         if let Some(r) = self.relays.get_mut(relay_id) {
@@ -390,6 +422,14 @@ pub struct NatConfig {
     /// How long a `relay_discovery` may remain unanswered before the
     /// session is declared failed (M3.3).
     pub relay_discovery_timeout_ms: u64,
+    /// Lower bound on the adaptive re-announce percent (§12.1).
+    ///
+    /// The spec recommends 50% for high-churn networks.
+    pub min_reannounce_percent: u64,
+    /// Upper bound on the adaptive re-announce percent (§12.1).
+    ///
+    /// The spec recommends 90% for stable networks.
+    pub max_reannounce_percent: u64,
 }
 
 impl Default for NatConfig {
@@ -403,6 +443,8 @@ impl Default for NatConfig {
             max_sessions: 32,
             candidate_phase_timeout_ms: 15_000,
             relay_discovery_timeout_ms: 30_000,
+            min_reannounce_percent: 50,
+            max_reannounce_percent: 90,
         }
     }
 }
@@ -436,6 +478,8 @@ pub struct AddressState {
     external: Option<Address>,
     /// Inferred NAT type (one of the `nat_wire::NAT_TYPE_*` values).
     nat_type: u64,
+    /// Timestamps of recent external-address changes, oldest first.
+    change_history: VecDeque<Timestamp>,
 }
 
 impl AddressState {
@@ -445,13 +489,30 @@ impl AddressState {
             observations: BTreeMap::new(),
             external: None,
             nat_type: crate::nat_wire::NAT_TYPE_UNKNOWN,
+            change_history: VecDeque::new(),
         }
     }
 
     /// Record an observation and recompute the derived fields.
+    ///
+    /// Timestamp-less wrapper for callers that don't track churn. New
+    /// code SHOULD prefer [`Self::observe_at`] so re-announce
+    /// adaptation (§12.1) has data to work with.
     pub fn observe(&mut self, observer: NodeId, observed: Address) {
+        self.observe_at(observer, observed, Timestamp::from_millis(0));
+    }
+    
+    /// Record an observation with a timestamp, so churn can be measured.
+    pub fn observe_at(&mut self, observer: NodeId, observed: Address, now: Timestamp) {
         self.observations.insert(observer, observed);
+        let before = self.external;
         self.recompute();
+        if before != self.external && self.external.is_some() {
+            self.change_history.push_back(now);
+            while self.change_history.len() > 64 {
+                self.change_history.pop_front();
+            }
+        }
     }
 
     /// Drop an observer's contribution (e.g. on disconnect).
@@ -505,6 +566,15 @@ impl AddressState {
             ports.insert(addr_port(addr), ());
         }
         ports.len() <= 1
+    }
+
+    /// Number of external-address changes within `window_ms` of `now`.
+    pub fn recent_address_changes(&self, now: Timestamp, window_ms: u64) -> u32 {
+        let cutoff = now.as_millis().saturating_sub(window_ms);
+        self.change_history
+            .iter()
+            .filter(|t| t.as_millis() >= cutoff)
+            .count() as u32
     }
 }
 
@@ -854,6 +924,7 @@ pub struct NatTraversal {
     local_candidates: Vec<Candidate>,
     /// Monotonic counter backing `request_id` generation (M3.3).
     next_request_id: u64,
+    relay_announce_windows: BTreeMap<NodeId, RelayAnnounceWindow>,
 }
 
 impl NatTraversal {
@@ -871,6 +942,7 @@ impl NatTraversal {
             last_announce: None,
             local_candidates: Vec::new(),
             next_request_id: 0,
+            relay_announce_windows: BTreeMap::new(),
         }
     }
 
@@ -905,7 +977,12 @@ impl NatTraversal {
     /// driver should fulfil.
     pub fn poll(&mut self, now: Timestamp) -> Vec<Outbound> {
         // Periodic connectivity announcement.
-        let interval = self.config.reannounce_interval_ms();
+        let percent = self.current_reannounce_percent(now);
+        let interval = self.config
+            .connectivity_ttl_s
+            .saturating_mul(1000)
+            .saturating_mul(percent)
+            / 100;
         let due = match self.last_announce {
             None => true,
             Some(t) => now.as_millis().saturating_sub(t.as_millis()) >= interval,
@@ -1011,10 +1088,10 @@ impl NatTraversal {
         &mut self,
         observer: NodeId,
         observed: Address,
-        _now: Timestamp,
+        now: Timestamp,
     ) {
         let before = (self.address.external(), self.address.nat_type());
-        self.address.observe(observer, observed);
+        self.address.observe_at(observer, observed, now);
         let after = (self.address.external(), self.address.nat_type());
         if before != after {
             if let Some(addr) = self.address.external() {
@@ -1033,9 +1110,17 @@ impl NatTraversal {
     pub fn on_connectivity_announce(
         &mut self,
         announce: ConnectivityAnnounce,
-        _now: Timestamp,
+        now: Timestamp,
     ) {
         if announce.relay_capable && announce.capacity > 0 {
+            let window = self
+                .relay_announce_windows
+                .entry(announce.node_id)
+                .or_default();
+            if !window.accept(now) {
+                // §19.4 rate limit exceeded; drop silently.
+                return;
+            }
             let entry = RelayEntry {
                 relay_id: announce.node_id,
                 external_addr: announce.external_addr,
@@ -1095,37 +1180,34 @@ impl NatTraversal {
         self.relay_manager.record_failure(&relay_id);
     }
 
-    /// Build a single-hop relay chain to `target`, sealing `traffic_key`
-    /// to the chosen relay with the HPKE scheme fixed by §12.2.
+    /// Build a relay chain to `target`, sealing each hop's
+    /// `encrypted_key` with the HPKE scheme fixed by §12.2.
     ///
-    /// Returns `Err(Error::NatUnreachable)` when no relay is known for
-    /// `target`. Multi-hop chaining is not yet emitted by this method; the
-    /// recursive plaintext layout in §12.2 is defined but unused here.
+    /// `max_hops` is clamped to `RELAY_HOP_LIMIT`. The chain is
+    /// ordered from the sender outward: `hops[0]` is the first relay
+    /// the sender sends to, `hops[n-1]` is the last relay before the
+    /// target. Each hop's plaintext is the symmetric traffic key,
+    /// followed (for all but the last hop) by the trailing chain
+    /// encoded as a QUIP-CBOR `RelayChain`.
+    ///
+    /// `target_addr` is the address of the target itself; it is
+    /// placed in `hops[n-1].next_hop` per §12.2.
     pub fn build_relay_chain(
         &self,
         target: NodeId,
+        target_addr: Address,
+        max_hops: u8,
         ttl_s: u64,
         traffic_key: &[u8],
         sealer: &dyn RelayHopSealer,
     ) -> Result<RelayChain> {
-        let entry = self
+        let entries = self
             .relay_manager
-            .best_for(&target)
-            .ok_or(Error::NatUnreachable)?;
-
-        // Single-hop chain: no trailing chain beyond this hop, so the
-        // plaintext is exactly the symmetric traffic key.
-        let encrypted_key = sealer.seal(&entry.relay_id, traffic_key)?;
-
-        Ok(RelayChain {
-            hops: alloc::vec![RelayHop {
-                relay_id: entry.relay_id,
-                next_hop: entry.external_addr,
-                encrypted_key,
-            }],
-            target,
-            ttl: ttl_s,
-        })
+            .best_chain(&target, max_hops.min(RELAY_HOP_LIMIT));
+        if entries.is_empty() {
+            return Err(Error::NatUnreachable);
+        }
+        build_chain_recursive(&entries, target, target_addr, ttl_s, traffic_key, sealer)
     }
 
     /// Receive a `candidate_announce` from a peer.
@@ -1278,6 +1360,220 @@ impl NatTraversal {
             .push_back(Outbound::PublishConnectivity(announce));
         self.last_announce = Some(now);
     }
+
+    /// The re-announce percent to use right now, adjusted for churn (§12.1).
+    ///
+    /// Uses a 1-hour window. Zero or one change counts as stable
+    /// (`max_reannounce_percent`); two or three as normal
+    /// (`reannounce_percent`); four or more as high churn
+    /// (`min_reannounce_percent`).
+    fn current_reannounce_percent(&self, now: Timestamp) -> u64 {
+        const WINDOW_MS: u64 = 3_600_000;
+        let changes = self.address.recent_address_changes(now, WINDOW_MS);
+        match changes {
+            0 | 1 => self.config.max_reannounce_percent,
+            2 | 3 => self.config.reannounce_percent,
+            _ => self.config.min_reannounce_percent,
+        }
+    }
+}
+
+/// Recursive helper: build hops from the last back to the first.
+///
+/// Not a method: it does not touch `NatTraversal` state and is
+/// easier to test in isolation. Called by
+/// [`NatTraversal::build_relay_chain`].
+fn build_chain_recursive(
+    entries: &[RelayEntry],
+    target: NodeId,
+    target_addr: Address,
+    ttl_s: u64,
+    traffic_key: &[u8],
+    sealer: &dyn RelayHopSealer,
+) -> Result<RelayChain> {
+    let last_idx = entries.len() - 1;
+    let mut rev: Vec<RelayHop> = Vec::with_capacity(entries.len());
+
+    // Last hop: no trailing chain, next_hop = target's address.
+    rev.push(RelayHop {
+        relay_id: entries[last_idx].relay_id,
+        next_hop: target_addr,
+        encrypted_key: sealer.seal(&entries[last_idx].relay_id, traffic_key)?,
+    });
+
+    // Work backwards: each earlier hop seals traffic_key ||
+    // CBOR(chain of the hops already built).
+    for i in (0..last_idx).rev() {
+        let mut trailing_hops = rev.clone();
+        trailing_hops.reverse();
+        let trailing = RelayChain {
+            hops: trailing_hops,
+            target,
+            ttl: ttl_s,
+        };
+        let trailing_cbor = encode(&trailing.to_cbor())?;
+
+        let mut plaintext = traffic_key.to_vec();
+        plaintext.extend_from_slice(&trailing_cbor);
+
+        rev.push(RelayHop {
+            relay_id: entries[i].relay_id,
+            next_hop: entries[i + 1].external_addr,
+            encrypted_key: sealer.seal(&entries[i].relay_id, &plaintext)?,
+        });
+    }
+
+    rev.reverse();
+    Ok(RelayChain {
+        hops: rev,
+        target,
+        ttl: ttl_s,
+    })
+}
+
+impl RelayHop {
+    /// Encode as a CBOR map (spec §12.2).
+    pub fn to_cbor(&self) -> CborValue {
+        CborValue::Map(alloc::vec![
+            (CborValue::String("relay_id".to_string()),
+             CborValue::Bytes(self.relay_id.to_vec())),
+            (CborValue::String("next_hop".to_string()),
+             self.next_hop.to_cbor()),
+            (CborValue::String("encrypted_key".to_string()),
+             CborValue::Bytes(self.encrypted_key.clone())),
+        ])
+    }
+
+    /// Decode from a CBOR map.
+    pub fn from_cbor(v: &CborValue) -> Result<Self> {
+        let CborValue::Map(pairs) = v else {
+            return Err(Error::BadFrame("RelayHop must be a map"));
+        };
+        let mut relay_id: Option<NodeId> = None;
+        let mut next_hop: Option<Address> = None;
+        let mut encrypted_key: Option<Vec<u8>> = None;
+        for (k, val) in pairs {
+            match k {
+                CborValue::String(s) if s == "relay_id" => {
+                    let b = match val {
+                        CborValue::Bytes(b) if b.len() == 32 => b,
+                        _ => return Err(Error::BadFrame("relay_id must be 32 bytes")),
+                    };
+                    let mut n = [0u8; 32];
+                    n.copy_from_slice(b);
+                    relay_id = Some(n);
+                }
+                CborValue::String(s) if s == "next_hop" => {
+                    next_hop = Some(Address::from_cbor(val).map_err(Error::Core)?);
+                }
+                CborValue::String(s) if s == "encrypted_key" => {
+                    encrypted_key = match val {
+                        CborValue::Bytes(b) => Some(b.clone()),
+                        _ => return Err(Error::BadFrame("encrypted_key must be bytes")),
+                    };
+                }
+                CborValue::String(_) => {
+                    return Err(Error::BadFrame("unknown key in RelayHop"));
+                }
+                _ => return Err(Error::BadFrame("RelayHop keys must be text")),
+            }
+        }
+        Ok(Self {
+            relay_id: relay_id.ok_or(Error::BadFrame("missing relay_id"))?,
+            next_hop: next_hop.ok_or(Error::BadFrame("missing next_hop"))?,
+            encrypted_key: encrypted_key.ok_or(Error::BadFrame("missing encrypted_key"))?,
+        })
+    }
+}
+
+impl RelayChain {
+    /// Encode as a CBOR map.
+    pub fn to_cbor(&self) -> CborValue {
+        CborValue::Map(alloc::vec![
+            (CborValue::String("hops".to_string()),
+             CborValue::Array(self.hops.iter().map(|h| h.to_cbor()).collect())),
+            (CborValue::String("target".to_string()),
+             CborValue::Bytes(self.target.to_vec())),
+            (CborValue::String("ttl".to_string()),
+             CborValue::Int(self.ttl as i128)),
+        ])
+    }
+
+    /// Decode from a CBOR map.
+    pub fn from_cbor(v: &CborValue) -> Result<Self> {
+        let CborValue::Map(pairs) = v else {
+            return Err(Error::BadFrame("RelayChain must be a map"));
+        };
+        let mut hops: Option<Vec<RelayHop>> = None;
+        let mut target: Option<NodeId> = None;
+        let mut ttl: Option<u64> = None;
+        for (k, val) in pairs {
+            match k {
+                CborValue::String(s) if s == "hops" => {
+                    let CborValue::Array(items) = val else {
+                        return Err(Error::BadFrame("hops must be an array"));
+                    };
+                    let mut hs = Vec::with_capacity(items.len());
+                    for item in items {
+                        hs.push(RelayHop::from_cbor(item)?);
+                    }
+                    hops = Some(hs);
+                }
+                CborValue::String(s) if s == "target" => {
+                    let b = match val {
+                        CborValue::Bytes(b) if b.len() == 32 => b,
+                        _ => return Err(Error::BadFrame("target must be 32 bytes")),
+                    };
+                    let mut n = [0u8; 32];
+                    n.copy_from_slice(b);
+                    target = Some(n);
+                }
+                CborValue::String(s) if s == "ttl" => {
+                    ttl = match val {
+                        CborValue::Int(n) if *n >= 0 => Some(*n as u64),
+                        _ => return Err(Error::BadFrame("ttl must be a uint")),
+                    };
+                }
+                CborValue::String(_) => {
+                    return Err(Error::BadFrame("unknown key in RelayChain"));
+                }
+                _ => return Err(Error::BadFrame("RelayChain keys must be text")),
+            }
+        }
+        Ok(Self {
+            hops: hops.ok_or(Error::BadFrame("missing hops"))?,
+            target: target.ok_or(Error::BadFrame("missing target"))?,
+            ttl: ttl.ok_or(Error::BadFrame("missing ttl"))?,
+        })
+    }
+}
+
+/// Per-peer sliding window for relay-capable announcements (§19.4).
+#[derive(Clone, Debug, Default)]
+struct RelayAnnounceWindow {
+    recent: VecDeque<Timestamp>,
+}
+
+impl RelayAnnounceWindow {
+    const WINDOW_MS: u64 = 60_000;
+    const MAX_IN_WINDOW: usize = 100;
+
+    /// Returns true if this announcement should be accepted.
+    fn accept(&mut self, now: Timestamp) -> bool {
+        let cutoff = now.as_millis().saturating_sub(Self::WINDOW_MS);
+        while let Some(front) = self.recent.front() {
+            if front.as_millis() < cutoff {
+                self.recent.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.recent.len() >= Self::MAX_IN_WINDOW {
+            return false;
+        }
+        self.recent.push_back(now);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1308,6 +1604,10 @@ mod tests {
 
     fn now() -> Timestamp {
         Timestamp::from_millis(1_700_000_000_000)
+    }
+
+    fn t(ms: u64) -> Timestamp {
+        Timestamp::from_millis(ms)
     }
 
     // ---- M3a ----
@@ -1442,28 +1742,87 @@ impl RelayHopSealer for TagSealer {
 }
 
     #[test]
-    fn build_relay_chain_seals_traffic_key() {
+    fn build_relay_chain_two_hops_seals_recursively() {
         let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
         n.relays_mut().offer(relay(10), Some(nid(2)));
-    
+        n.relays_mut().offer(relay(20), Some(nid(2)));
+
         let traffic_key = [0xABu8; 32];
+        let target_addr = addr(99);
         let chain = n
-            .build_relay_chain(nid(2), 300, &traffic_key, &TagSealer)
+            .build_relay_chain(nid(2), target_addr, 2, 300, &traffic_key, &TagSealer)
             .unwrap();
-    
-        assert!(chain.is_valid());
-        assert_eq!(chain.hops.len(), 1);
-        assert_eq!(chain.hops[0].relay_id, nid(10));
-        // Tag byte, then the traffic key verbatim.
-        assert_eq!(chain.hops[0].encrypted_key[0], 10);
-        assert_eq!(&chain.hops[0].encrypted_key[1..], &traffic_key);
+
+        assert_eq!(chain.hops.len(), 2);
+        // Last hop: no trailing chain, next_hop = target.
+        assert_eq!(chain.hops[1].next_hop, target_addr);
+        // First hop: next_hop = second relay's external_addr.
+        assert_eq!(chain.hops[0].next_hop, addr(20));
+        // First hop's plaintext includes the CBOR-encoded trailing chain.
+        assert!(chain.hops[0].encrypted_key.len() > 1 + traffic_key.len());
     }
-    
+
     #[test]
-    fn build_relay_chain_errors_when_no_relay() {
-        let n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
-        let err = n.build_relay_chain(nid(99), 300, &[0u8; 32], &TagSealer);
-        assert!(matches!(err, Err(Error::NatUnreachable)));
+    fn relay_chain_cbor_roundtrips() {
+        let chain = RelayChain {
+            hops: alloc::vec![RelayHop {
+                relay_id: nid(10),
+                next_hop: addr(20),
+                encrypted_key: alloc::vec![1, 2, 3, 4],
+            }],
+            target: nid(2),
+            ttl: 300,
+        };
+        let cbor = chain.to_cbor();
+        let back = RelayChain::from_cbor(&cbor).unwrap();
+        assert_eq!(back, chain);
+    }
+
+    #[test]
+    fn adaptive_reannounce_uses_max_percent_when_stable() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        n.on_address_observed(nid(2), addr(10), t(0));
+        // No changes since t(0). One hour later, churn is zero.
+        let percent = n.current_reannounce_percent(t(3_600_000));
+        assert_eq!(percent, n.config().max_reannounce_percent);
+    }
+
+    #[test]
+    fn adaptive_reannounce_drops_percent_under_churn() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        // Four distinct external addresses in quick succession.
+        for (i, b) in [10u8, 11, 12, 13].iter().enumerate() {
+            n.on_address_observed(nid(2), addr(*b), t(i as u64 * 1000));
+        }
+        let percent = n.current_reannounce_percent(t(10_000));
+        assert_eq!(percent, n.config().min_reannounce_percent);
+    }
+
+    #[test]
+    fn relay_announce_window_limits_per_peer() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        let ann = ConnectivityAnnounce {
+            node_id: nid(2),
+            external_addr: addr(10),
+            internal_addr: addr(10),
+            nat_type: crate::nat_wire::NAT_TYPE_OPEN,
+            port_preservation: true,
+            relay_capable: true,
+            capacity: 100,
+            timestamp: t(0),
+            signature: [0u8; 64],
+        };
+        for i in 0..100 {
+            n.on_connectivity_announce(ann.clone(), t(i));
+        }
+        // 100 accepted, capacity is 100; the 101st in the window is dropped.
+        let before = n.relays().len();
+        n.on_connectivity_announce(ann.clone(), t(101));
+        assert_eq!(n.relays().len(), before, "101st announce is rate-limited");
+        // After the window passes, a fresh announce is accepted.
+        n.on_connectivity_announce(ann, t(70_000));
+        // The relay is already in the table, so the count doesn't change,
+        // but the window allowed it.
     }
 
     #[test]

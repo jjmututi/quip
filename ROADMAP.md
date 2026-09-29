@@ -26,7 +26,7 @@ row and the tag index in the same commit.
 |---|---|---|
 | M1 | Foundation: dispatch, codec, frame, error, constants | landed |
 | M2 | Coral DHT state: routing, cluster, witness discovery | landed |
-| M3 | NAT traversal: codecs, state machine, driver, connection flow | landed; M3.6 residuals |
+| M3 | NAT traversal: codecs, state machine, driver, connection flow | landed; M3.6 sealer outstanding |
 | M4 | BFT consensus: wire codecs (M4a), driver (M4b) | M4a landed; M4b not started |
 | M5 | QUIC transport: endpoint, handshake, T0/T1/T2/T3 I/O | landed |
 | M6 | Integration: §16 flow, test vectors, CI | landed |
@@ -45,7 +45,7 @@ All crates compile, every test passes, clippy and rustdoc are silent under
 `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    564 unit + 3 doc, exit 0
+cargo test --workspace --all-features                    567 unit + 3 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -71,10 +71,10 @@ Baseline on `main`:
 
 ```
 quip-core      74 passed
-quip-net      433 passed
+quip-net      436 passed
 quip-storage   57 passed
 doc-tests       3 passed (one per crate)
-             ~564 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~567 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -143,10 +143,10 @@ top-level messages: `connectivity_announce`, `candidate_announce`,
   prefix plus a monotonic counter.
 - `AddressState::port_preservation` replaces the hardcoded `true` in
   `emit_connectivity_announce`.
-- `RelayHopSealer` trait and `build_relay_chain(target, ttl, traffic_key,
-  sealer)` — single-hop chains seal the symmetric traffic key with the
-  HPKE scheme fixed by §12.2. The concrete sealer is a code follow-up
-  (see M3.6).
+- `RelayHopSealer` trait and a first `build_relay_chain` that seals a
+  single hop with the HPKE scheme fixed by §12.2. The signature and
+  hop-construction were extended in M3.6 to support multi-hop chains;
+  the trait itself is unchanged.
 
 ### M3.4 — Driver-side handlers — LANDED
 - `NatApplication` trait: `probe_candidate`, `send_relay_discovery`,
@@ -169,20 +169,40 @@ top-level messages: `connectivity_announce`, `candidate_announce`,
 - Timeouts: 10 s (Key Claim), 30 s (NAT), 30 s (discovery). All three
   are implementation choices.
 
-### M3.6 — Outstanding
-1. **S1 concrete sealer.** `RelayHopSealer` has no production impl. HPKE
-   `mode_base`, `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` /
+### M3.6 — Residuals
+
+Three of four landed.
+
+**Landed:**
+- **Adaptive re-announce (§12.1).** `AddressState` gains
+  `observe_at(observer, addr, now)` alongside the original 2-arg
+  `observe`; the latter delegates with a zero timestamp so existing
+  callers compile. `observe_at` records a bounded history of
+  external-address changes. `NatTraversal::current_reannounce_percent`
+  maps a 1-hour churn window to 90 / 80 / 50 %; `poll` uses it in
+  place of the fixed `NatConfig::reannounce_interval_ms`.
+- **Multi-hop relay chains (§12.2).** `RelayManager::best_chain`
+  returns up to `max_hops` relays that declare the target, ordered by
+  the same criteria as `best_for`. `RelayHop` and `RelayChain` gain
+  CBOR codecs. `build_relay_chain(target, target_addr, max_hops,
+  ttl_s, traffic_key, sealer)` builds the chain from the last hop
+  backwards via the free function `build_chain_recursive`; each
+  earlier hop's HPKE plaintext is `traffic_key || CBOR(trailing
+  chain)`.
+- **Relay-announce rate limit (§19.4).** `NatTraversal` keeps a
+  per-peer `RelayAnnounceWindow` (100 relay-capable announces per
+  minute). `on_connectivity_announce` consults it before offering the
+  announce to the `RelayManager`; excess announces are dropped
+  silently.
+
+**Outstanding:**
+1. **S1 concrete sealer.** `RelayHopSealer` has no production impl.
+   HPKE `mode_base`, `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` /
    `ChaCha20Poly1305`, `info = "QUIP-relay-hop-v1"`, empty `aad`; the
    recipient key is the Ed25519→X25519 birational map of `relay_id`.
-   Belongs in `quip-net/src/crypto.rs` behind the `crypto` feature, or a
-   new `hpke` feature.
-2. **Adaptive re-announce (§12.1).** Fixed at 80 % today; the 50–90 %
-   range and churn-based adjustment are not implemented.
-3. **Relay chaining beyond one hop.** `build_relay_chain` produces a
-   single hop; the recursive plaintext layout for multi-hop chains is
-   documented in §12.2 but not emitted.
-4. **Relay rate limit.** LRU eviction under `RELAY_CAPACITY` is in place;
-   the §12.2 100/min per-NodeId rate limit is not.
+   Belongs in `quip-net/src/crypto.rs` behind the `crypto` feature, or
+   a new `hpke` feature. Multi-hop chains now construct correctly at
+   the state-machine level but cannot be sealed without this impl.
 
 ---
 
@@ -442,11 +462,14 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat.rs:510` | M3b.1 | candidate table (§12.3) |
 | `quip-net/src/nat.rs:634` | M3b.1 | sessions + driver-facing types |
 | `quip-net/src/nat.rs` (`RelayHopSealer`) | M3.3 | relay-hop HPKE interface (§12.2) |
-| `quip-net/src/nat.rs` (`build_relay_chain`) | M3.3 | single-hop chain with sealed traffic key |
+| `quip-net/src/nat.rs` (`build_chain_recursive`) | M3.6 | multi-hop chain builder |
 | `quip-net/src/nat.rs` (`NatTraversal::poll`) | M3.3 | four-phase session ladder |
 | `quip-net/src/nat.rs` (`on_relay_response`) | M3.3 | request_id + target correlation |
 | `quip-net/src/nat.rs` (`generate_request_id`) | M3.3 | 16-byte request-id derivation |
 | `quip-net/src/nat.rs` (`AddressState::port_preservation`) | M3.3 | replaces hardcoded `true` |
+| `quip-net/src/nat.rs` (`AddressState::observe_at`) | M3.6 | timestamped observation, churn history |
+| `quip-net/src/nat.rs` (`current_reannounce_percent`) | M3.6 | churn-adaptive §12.1 percent |
+| `quip-net/src/nat.rs` (`RelayAnnounceWindow`) | M3.6 | per-peer §19.4 window |
 | `quip-net/src/nat_driver.rs:148` | M3b.2 | send on the one connection passed in |
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
@@ -498,14 +521,12 @@ last revision of this file. The remaining work, in dependency order:
    the `BftDriver` skeleton, the `BftHandler` trait, and `RingMembership`.
    The largest remaining item; split the view-change and checkpointing
    halves out as M4b.2 and M4b.3.
-3. **S1 concrete sealer (M3.6 item 1).** Small and bounded. Closes the
-   last wire-format gap on the relay path. Can be done in parallel with
-   M4b if you want a break from consensus logic.
-4. **M3.6 items 2–4.** Adaptive re-announce, multi-hop chaining, relay
-   rate limit. None block anything else.
-5. **M4b.2 — View change.** `bft_view_change` / `bft_new_view` handling,
+3. **S1 concrete sealer.** Small and bounded. The last wire-format gap
+   on the relay path; multi-hop chains now build but cannot be sealed
+   without it. Can be done in parallel with M4b.
+4. **M4b.2 — View change.** `bft_view_change` / `bft_new_view` handling,
    primary rotation, `prepared_messages` verification.
-6. **M4b.3 — Checkpointing and state transfer.** Checkpoint collection
+5. **M4b.3 — Checkpointing and state transfer.** Checkpoint collection
    to 5-of-7, `bft_state_transfer` request/response, apply-and-resume.
 
 Do not start M4b before the tree is green. A 2,500-line consensus state

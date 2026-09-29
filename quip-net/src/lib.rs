@@ -106,6 +106,11 @@ pub mod nat_driver;
 #[cfg(feature = "hpke")]
 pub mod relay_hpke;
 
+/// BFT consensus round driver (§5.3.4). Requires `crypto` for the
+/// pre-prepare digest.
+#[cfg(feature = "crypto")]
+pub mod bft_driver;
+
 // -------------------------------------------------------------------------
 // Crate-level re-exports
 // -------------------------------------------------------------------------
@@ -220,3 +225,8 @@ pub use relay_hpke::{ed25519_to_x25519, HpkeRelayHopSealer, RELAY_HOP_INFO};
 
 #[cfg(test)]
 pub(crate) mod test_support;
+
+#[cfg(feature = "crypto")]
+pub use bft_driver::{
+    BftDriver, BftEvent, BftHandler, BftOutbound, RingMembership, RoundState,
+};

@@ -1,0 +1,17 @@
+[package]
+name = "quip-node"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["J. J. Mututi <jjmututicloud@gmail.com>"]
+description = "A running QUIP node: endpoint, peer table, event stream"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jjmututi/quip"
+publish = false
+
+[dependencies]
+quip-core = { path = "../quip-core" }
+quip-net = { path = "../quip-net", features = ["crypto", "quic"] }
+quip-storage = { path = "../quip-storage" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "sync"] }
+rcgen = "0.13"

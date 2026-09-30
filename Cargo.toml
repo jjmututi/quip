@@ -11,5 +11,6 @@ members = [
     "quip-core",
     "quip-storage",
     "quip-net",
+    "quip-node",
     "xtask",
 ]

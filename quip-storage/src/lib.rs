@@ -2,6 +2,13 @@
 //!
 //! Persistent state for the QUIC Identity Protocol (QUIP).
 //!
+//! ## Roadmap
+//!
+//! Milestone tags in the source (`M4b.1`, `M7`, …) cite entries in
+//! the [roadmap].
+//!
+//! [roadmap]: https://github.com/jjmututi/quip/blob/main/ROADMAP.md
+//!
 //! Transport-agnostic, like [`quip_core`]: every entry point takes an explicit
 //! [`Timestamp`](quip_core::time::Timestamp) so behaviour is deterministic and
 //! testable. `quip-net` supplies the clock and the framing; this crate owns the

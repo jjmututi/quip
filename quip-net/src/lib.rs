@@ -2,6 +2,13 @@
 //!
 //! QUIP transport plane (draft-mututi-quip-03, §4, §6, §11–§15).
 //!
+//! ## Roadmap
+//!
+//! Milestone tags in the source (`M4b.1`, `M7`, …) cite entries in
+//! the [roadmap].
+//!
+//! [roadmap]: https://github.com/jjmututi/quip/blob/main/ROADMAP.md
+//!
 //! `quip-core` owns the wire message types, `quip-storage` owns persistent
 //! state; this crate owns everything that moves bytes between peers.
 //!

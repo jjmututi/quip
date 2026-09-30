@@ -2,6 +2,13 @@
 //!
 //! Core data structures and algorithms for the QUIC Identity Protocol.
 //!
+//! ## Roadmap
+//!
+//! Milestone tags in the source (`M4b.1`, `M7`, …) cite entries in
+//! the [roadmap].
+//!
+//! [roadmap]: https://github.com/jjmututi/quip/blob/main/ROADMAP.md
+//!
 //! Transport-agnostic. Contains:
 //!
 //! - [`cbor`]     — deterministic CBOR (QUIP-CBOR).

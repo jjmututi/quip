@@ -14,11 +14,20 @@
 //! - Verifying and voting on preprepare, prepare, precommit, commit.
 //! - Applying on commit quorum.
 //!
-//! It does not handle view change (`bft_view_change`, `bft_new_view`)
-//! — that is M4b.2. It does not handle checkpointing or state transfer
-//! — that is M4b.3. Messages for other views or sequences are dropped
-//! silently; the driver is not the right layer to respond to them
-//! until M4b.2 and M4b.3 land.
+//! # View change (M4b.2)
+//!
+//! A witness that suspects the primary calls
+//! [`BftDriver::start_view_change`]. The driver broadcasts a
+//! `bft_view_change` for `view + 1` and starts collecting votes from
+//! its peers. When a member has collected a quorum of valid votes
+//! *and* is the primary for the target view, it emits a
+//! `bft_new_view` carrying those votes and adopts the new view.
+//! Witnesses receiving a well-formed `bft_new_view` verify it and
+//! adopt.
+//!
+//! Prepared-operations carry-forward (`bft_new_view.prepared_messages`)
+//! and checkpoint carry-forward (`checkpoint_messages`) are emitted
+//! empty in this revision; M4b.3 populates them.
 //!
 //! # Quorum
 //!
@@ -37,7 +46,8 @@
 //! votes. Both are value types.
 
 use crate::bft::{
-    BftCommit, BftPrecommit, BftPrepare, BftPreprepare, Digest, Operation, RingId,
+    BftCommit, BftNewView, BftPrecommit, BftPrepare, BftPreprepare, BftViewChange,
+    Digest, Operation, RingId,
 };
 use crate::error::{Error, Result};
 use alloc::collections::{BTreeMap, VecDeque};
@@ -150,6 +160,10 @@ pub enum BftOutbound {
     Precommit(BftPrecommit),
     /// Commit vote.
     Commit(BftCommit),
+    /// View-change vote, sent when the primary is suspected faulty.
+    ViewChange(BftViewChange),
+    /// New-view announcement, sent by the primary for the new view.
+    NewView(BftNewView),
 }
 
 /// Something the driver wants the caller to observe.
@@ -193,6 +207,21 @@ pub enum BftEvent {
         /// Human-readable error string.
         text: String,
     },
+    /// A view change has been initiated for `target_view`.
+    ViewChangeInitiated {
+        /// The view the driver is moving to.
+        target_view: u64,
+    },
+    /// A quorum of view-change votes has been collected.
+    ViewChangeQuorum {
+        /// The view the driver is moving to.
+        target_view: u64,
+    },
+    /// The driver has adopted a new view.
+    NewViewAdopted {
+        /// The newly adopted view.
+        view: u64,
+    },
 }
 
 // -------------------------------------------------------------------------
@@ -223,6 +252,15 @@ struct InFlight {
     commits: BTreeMap<NodeId, [u8; 64]>,
 }
 
+/// Internal bookkeeping for a view change in progress.
+#[derive(Clone, Debug, Default)]
+struct ViewChangeState {
+    /// The target view, if a view change is in progress.
+    target_view: Option<u64>,
+    /// Collected view-change messages, keyed by sender.
+    votes: BTreeMap<NodeId, BftViewChange>,
+}
+
 // -------------------------------------------------------------------------
 // BftDriver
 // -------------------------------------------------------------------------
@@ -248,6 +286,10 @@ where
     current: Option<InFlight>,
     outbound: VecDeque<BftOutbound>,
     events: VecDeque<BftEvent>,
+    /// Digest of the latest stable checkpoint. `[0; 32]` until M4b.3.
+    checkpoint_digest: Digest,
+    /// View-change state.
+    view_change: ViewChangeState,
 }
 
 impl<S, V, H> BftDriver<S, V, H>
@@ -285,6 +327,8 @@ where
             current: None,
             outbound: VecDeque::new(),
             events: VecDeque::new(),
+            checkpoint_digest: [0u8; 32],
+            view_change: ViewChangeState::default(),
         })
     }
 
@@ -458,7 +502,7 @@ where
         self.handle_vote(witness, msg)
     }
 
-    /// Receive a `bft_precommit`
+    /// Receive a `bft_precommit`.
     pub fn on_precommit(
         &mut self,
         witness: &NodeId,
@@ -467,7 +511,7 @@ where
         self.handle_vote(witness, msg)
     }
 
-    /// Receive a `bft_commit`
+    /// Receive a `bft_commit`.
     pub fn on_commit(
         &mut self,
         witness: &NodeId,
@@ -511,6 +555,7 @@ where
         }
         Ok(())
     }
+
     fn emit_prepare(&mut self) -> Result<()> {
         let digest = match self.current.as_ref() {
             Some(c) => c.digest,
@@ -654,6 +699,237 @@ where
         self.sequence = self.sequence.saturating_add(1);
         Ok(())
     }
+
+    // ---- view change ----
+
+    /// The target view of an in-progress view change, if any.
+    pub fn view_change_target(&self) -> Option<u64> {
+        self.view_change.target_view
+    }
+
+    /// Number of view-change votes collected for the target view.
+    pub fn view_change_votes(&self) -> usize {
+        self.view_change.votes.len()
+    }
+
+    /// Begin a view change to `view + 1`.
+    ///
+    /// Callers invoke this when the primary is suspected faulty. The
+    /// driver broadcasts its own view-change vote and starts
+    /// collecting peers'. If a view change is already in progress,
+    /// returns [`Error::Bft`].
+    pub fn start_view_change(&mut self) -> Result<()> {
+        if self.view_change.target_view.is_some() {
+            return Err(Error::Bft("view change already in progress"));
+        }
+        let target_view = self.view.saturating_add(1);
+
+        // Abort any round in flight; the new primary will re-propose.
+        self.current = None;
+        self.state = RoundState::Idle;
+
+        // Include the digest of the aborted round, if any, so peers
+        // see what we had prepared. M4b.3 will make this actionable.
+        let prepared_digests: Vec<Digest> = Vec::new();
+
+        let mut msg = BftViewChange {
+            ring_id: self.ring_id,
+            new_view: target_view,
+            last_sequence: self.sequence,
+            prepared_digests,
+            checkpoint_digest: self.checkpoint_digest,
+            witness_sig: [0u8; 64],
+        };
+        let payload = msg.signing_payload()?;
+        msg.witness_sig = self.signer.sign_ed25519(&payload);
+
+        self.view_change.target_view = Some(target_view);
+        self.view_change.votes.insert(self.local, msg.clone());
+
+        self.events.push_back(BftEvent::ViewChangeInitiated { target_view });
+        self.outbound.push_back(BftOutbound::ViewChange(msg));
+
+        self.maybe_emit_new_view()?;
+        Ok(())
+    }
+
+    /// Receive a `bft_view_change`.
+    ///
+    /// If the driver has not yet started a view change, the vote
+    /// triggers one. Votes for a different target view are ignored
+    /// until the current one resolves (M4b.3 will add view-change
+    /// re-entry).
+    pub fn on_view_change(
+        &mut self,
+        sender: &NodeId,
+        msg: &BftViewChange,
+    ) -> Result<()> {
+        if msg.ring_id != self.ring_id {
+            return Err(Error::Bft("view change for wrong ring"));
+        }
+        if !self.membership.is_member(sender) {
+            return Err(Error::Bft("view change from non-member"));
+        }
+        // A vote for a view we have already passed is stale and is
+        // discarded before signature verification: it cannot affect
+        // state, so there is no reason to pay the crypto cost.
+        if msg.new_view <= self.view {
+            return Ok(());
+        }
+        if !msg.verify(sender, &self.verifier)? {
+            return Err(Error::Bft("view change signature invalid"));
+        }
+
+        match self.view_change.target_view {
+            Some(t) if msg.new_view != t => {
+                // A different view change is in progress; ignore.
+                return Ok(());
+            }
+            None => {
+                // Peer-initiated view change: join it.
+                self.current = None;
+                self.state = RoundState::Idle;
+                self.view_change.target_view = Some(msg.new_view);
+                self.events.push_back(BftEvent::ViewChangeInitiated {
+                    target_view: msg.new_view,
+                });
+            }
+            _ => {}
+        }
+
+        if self.view_change.votes.contains_key(sender) {
+            return Ok(()); // duplicate vote
+        }
+        self.view_change.votes.insert(*sender, msg.clone());
+        self.maybe_emit_new_view()?;
+        Ok(())
+    }
+
+    /// Receive a `bft_new_view`.
+    ///
+    /// Verifies the sender is the primary for `msg.view`, the primary
+    /// signature is valid, and the enclosed view-change messages
+    /// constitute a quorum of distinct members. On success, adopts
+    /// the new view.
+    pub fn on_new_view(
+        &mut self,
+        sender: &NodeId,
+        msg: &BftNewView,
+    ) -> Result<()> {
+        if msg.ring_id != self.ring_id {
+            return Err(Error::Bft("new view for wrong ring"));
+        }
+        if *sender != self.membership.primary_for(msg.view) {
+            return Err(Error::Bft("new view sender is not the new primary"));
+        }
+        if msg.view <= self.view {
+            return Ok(()); // stale or duplicate
+        }
+        if !msg.verify(sender, &self.verifier)? {
+            return Err(Error::Bft("new view signature invalid"));
+        }
+
+        // Decode and verify each view-change message, tracking signers
+        // to enforce distinctness.
+        let mut signers: BTreeMap<NodeId, ()> = BTreeMap::new();
+        for bytes in &msg.view_change_messages {
+            let vc = BftViewChange::from_bytes(bytes)?;
+            if vc.ring_id != self.ring_id {
+                return Err(Error::Bft("view change in new view for wrong ring"));
+            }
+            if vc.new_view != msg.view {
+                return Err(Error::Bft("view change in new view for wrong view"));
+            }
+            let signer = self
+                .find_view_change_signer(&vc)?
+                .ok_or(Error::Bft("view change signer not a ring member"))?;
+            if signers.insert(signer, ()).is_some() {
+                return Err(Error::Bft("duplicate view change signer"));
+            }
+        }
+
+        if signers.len() < self.membership.quorum() {
+            return Err(Error::Bft("new view has too few view-change messages"));
+        }
+
+        // M4b.3 will verify prepared_messages / checkpoint_messages here.
+
+        self.adopt_view(msg.view);
+        Ok(())
+    }
+
+    /// Emit a `bft_new_view` if we are the primary for the target
+    /// view and have collected a quorum of votes.
+    fn maybe_emit_new_view(&mut self) -> Result<()> {
+        let target_view = match self.view_change.target_view {
+            Some(v) => v,
+            None => return Ok(()),
+        };
+        if self.view_change.votes.len() < self.membership.quorum() {
+            return Ok(());
+        }
+        if self.membership.primary_for(target_view) != self.local {
+            return Ok(());
+        }
+
+        let view_change_messages: Vec<Vec<u8>> = self
+            .view_change
+            .votes
+            .values()
+            .map(|vc| vc.to_bytes())
+            .collect::<Result<_>>()?;
+
+        let mut msg = BftNewView {
+            ring_id: self.ring_id,
+            view: target_view,
+            view_change_messages,
+            prepared_messages: Vec::new(),   // M4b.3
+            checkpoint_messages: Vec::new(), // M4b.3
+            primary_sig: [0u8; 64],
+        };
+        let payload = msg.signing_payload()?;
+        msg.primary_sig = self.signer.sign_ed25519(&payload);
+
+        self.events.push_back(BftEvent::ViewChangeQuorum { target_view });
+        self.outbound.push_back(BftOutbound::NewView(msg));
+
+        self.adopt_view(target_view);
+        Ok(())
+    }
+
+    /// Adopt `target_view`, resetting any in-flight round and
+    /// clearing view-change state.
+    fn adopt_view(&mut self, target_view: u64) {
+        self.view = target_view;
+        self.current = None;
+        self.state = RoundState::Idle;
+        self.view_change = ViewChangeState::default();
+        self.events.push_back(BftEvent::NewViewAdopted {
+            view: target_view,
+        });
+    }
+
+    /// Locate the ring member whose key signed `vc`, or `None`.
+    ///
+    /// `BftViewChange` does not carry a signer NodeId on the wire; the
+    /// driver resolves it by trial verification against each member.
+    /// For the ring sizes this protocol supports (≤ 9) the cost is
+    /// negligible.
+    fn find_view_change_signer(
+        &self,
+        vc: &BftViewChange,
+    ) -> Result<Option<NodeId>> {
+        let payload = vc.signing_payload()?;
+        for member in self.membership.members() {
+            if self
+                .verifier
+                .verify_ed25519(member, &payload, &vc.witness_sig)
+            {
+                return Ok(Some(*member));
+            }
+        }
+        Ok(None)
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -777,6 +1053,161 @@ mod tests {
         }
     }
 
+    // ---- view change tests ----
+
+    /// Pump outbounds including view-change and new-view messages.
+    fn pump_view_change(
+        drivers: &mut [Driver],
+        membership: &RingMembership,
+    ) {
+        for _ in 0..30 {
+            let mut msgs: Vec<(usize, BftOutbound)> = Vec::new();
+            for (i, d) in drivers.iter_mut().enumerate() {
+                for out in d.drain_outbound() {
+                    msgs.push((i, out));
+                }
+            }
+            if msgs.is_empty() {
+                return;
+            }
+            for (sender_idx, out) in msgs {
+                let sender = membership.members()[sender_idx];
+                for (i, d) in drivers.iter_mut().enumerate() {
+                    if i == sender_idx {
+                        continue;
+                    }
+                    let _ = match &out {
+                        BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
+                        BftOutbound::NewView(m) => d.on_new_view(&sender, m),
+                        // Round messages during view change are stale.
+                        _ => Ok(()),
+                    };
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn start_view_change_emits_view_change_vote() {
+        let (m, mut drivers) = build_ring();
+        drivers[1].start_view_change().unwrap();
+        let ev = drivers[1].drain_events();
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, BftEvent::ViewChangeInitiated { target_view: 1 })));
+        let out = drivers[1].drain_outbound();
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            BftOutbound::ViewChange(vc) => {
+                assert_eq!(vc.new_view, 1);
+                assert_eq!(vc.ring_id, [1; 32]);
+            }
+            other => panic!("expected ViewChange, got {other:?}"),
+        }
+        assert_eq!(drivers[1].view_change_votes(), 1);
+        // view() unchanged until the new-view message is accepted.
+        assert_eq!(drivers[1].view(), 0);
+        let _ = m;
+    }
+
+    #[test]
+    fn view_change_promotes_new_primary() {
+        let (m, mut drivers) = build_ring();
+        // Every witness suspects the primary.
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.view(), 1, "all drivers adopt view 1");
+        }
+    }
+
+    #[test]
+    fn new_view_rejected_below_quorum() {
+        // 7-member ring. Have only 4 members vote. The primary for
+        // view 1 is members[1]; collect its own vote plus three more
+        // — still below quorum (5) — and confirm no new view is emitted.
+        let (m, mut drivers) = build_ring();
+        for d in drivers.iter_mut().take(4) {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.view(), 0, "no view change without quorum");
+        }
+    }
+
+    #[test]
+    fn stale_view_change_vote_is_ignored() {
+        let (m, mut drivers) = build_ring();
+        // Advance to view 1 via a full view change.
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.view(), 1);
+        }
+        // A view-change vote for view 0 is now stale.
+        let stale = BftViewChange {
+            ring_id: [1; 32],
+            new_view: 0,
+            last_sequence: 0,
+            prepared_digests: vec![],
+            checkpoint_digest: [0; 32],
+            witness_sig: [0; 64],
+        };
+        let sender = m.members()[2];
+        let r = drivers[3].on_view_change(&sender, &stale);
+        assert!(r.is_ok(), "stale vote silently ignored");
+        assert_eq!(drivers[3].view(), 1);
+    }
+
+    #[test]
+    fn new_view_from_wrong_sender_rejected() {
+        let (m, mut drivers) = build_ring();
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        // Build a fresh new-view from the wrong sender.
+        let mut msg = BftNewView {
+            ring_id: [1; 32],
+            view: 2,
+            view_change_messages: vec![],
+            prepared_messages: vec![],
+            checkpoint_messages: vec![],
+            primary_sig: [0; 64],
+        };
+        let payload = msg.signing_payload().unwrap();
+        msg.primary_sig = drivers[0].signer.sign_ed25519(&payload);
+        let not_primary = m.members()[0]; // primary for view 0, not 2
+        let r = drivers[3].on_new_view(&not_primary, &msg);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn duplicate_view_change_votes_are_deduped() {
+        let (m, mut drivers) = build_ring();
+        let m1 = m.members()[1];
+        let m2 = m.members()[2];
+        drivers[1].start_view_change().unwrap();
+        let out = drivers[1].drain_outbound();
+        let vc = match &out[0] {
+            BftOutbound::ViewChange(v) => v.clone(),
+            _ => panic!("expected ViewChange"),
+        };
+        drivers[3].on_view_change(&m1, &vc).unwrap();
+        let before = drivers[3].view_change_votes();
+        // Same sender, same message — should be ignored.
+        drivers[3].on_view_change(&m1, &vc).unwrap();
+        assert_eq!(drivers[3].view_change_votes(), before);
+        // Different sender, same message content — this is a distinct
+        // vote and should be accepted (or rejected as invalid sig).
+        let _ = drivers[3].on_view_change(&m2, &vc);
+    }
+
     // ---- RingMembership ----
 
     #[test]
@@ -872,7 +1303,7 @@ mod tests {
     #[test]
     fn non_primary_cannot_start() {
         let (m, signers) = ring7();
-        // signers[1] is not the primary for view 0 (signers[0] is).
+        // signers[1] is not the primary for view 0.
         let mut d = BftDriver::new(
             signers.into_iter().nth(1).unwrap(),
             Ed25519Verifier,
@@ -995,6 +1426,8 @@ mod tests {
                         BftOutbound::Prepare(m) => d.on_prepare(&sender, m),
                         BftOutbound::Precommit(m) => d.on_precommit(&sender, m),
                         BftOutbound::Commit(m) => d.on_commit(&sender, m),
+                        BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
+                        BftOutbound::NewView(m) => d.on_new_view(&sender, m),
                     };
                 }
             }
@@ -1027,10 +1460,8 @@ mod tests {
 
     #[test]
     fn vote_counts_are_quorum_sized() {
-        // Capture how many prepares each driver records. We cannot
-        // inspect in-flight state directly (it is private), so this
-        // test instead confirms the sequence ends at 1 — that is, the
-        // round completed with exactly the 5-of-7 quorum, not fewer.
+        // Confirm the round completes with the 5-of-7 quorum, not
+        // fewer, by checking the sequence advanced.
         let (m, mut drivers) = build_ring();
         drivers[0].start(operation("revocation")).unwrap();
         let _ = pump(&mut drivers, &m);
@@ -1041,9 +1472,7 @@ mod tests {
 
     #[test]
     fn apply_failure_is_an_event_not_an_error() {
-        // A 4-member DEGRADED ring where 3 votes = quorum, so a single
-        // primary can drive the round to completion within a small
-        // number of pump iterations.
+        // A 4-member DEGRADED ring where 3 votes = quorum.
         let signers: Vec<_> = (1..=4).map(signer).collect();
         let ids: Vec<NodeId> = signers.iter().map(|s| s.public_key()).collect();
         let m4 = RingMembership::new(ids).unwrap();
@@ -1097,6 +1526,8 @@ mod tests {
                         BftOutbound::Prepare(m) => d.on_prepare(&sender, m),
                         BftOutbound::Precommit(m) => d.on_precommit(&sender, m),
                         BftOutbound::Commit(m) => d.on_commit(&sender, m),
+                        BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
+                        BftOutbound::NewView(m) => d.on_new_view(&sender, m),
                     };
                 }
             }

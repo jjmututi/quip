@@ -1170,6 +1170,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "quip-node"
+version = "0.1.0"
+dependencies = [
+ "quip-core",
+ "quip-net",
+ "quip-storage",
+ "rcgen",
+ "tokio",
+]
+
+[[package]]
 name = "quip-storage"
 version = "0.1.0"
 dependencies = [

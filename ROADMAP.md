@@ -5,10 +5,10 @@ Implementation milestones for the reference implementation of
 
 ## How to read this file
 
-Milestones are numbered `M1`–`M8` in dependency order, with dot
+Milestones are numbered `M1`–`M9` in dependency order, with dot
 sub-milestones where a milestone split during execution (`M6.1`,
-`M4b.1`). The code cites its own milestone in comments; the **Tag
-index** at the bottom is the reverse mapping.
+`M4b.1`, `M9.2`). The code cites its own milestone in comments; the
+**Tag index** at the bottom is the reverse mapping.
 
 **Statuses are evidence-based.** A milestone is *landed* only when the
 code exists, is wired into the crate root, and its tests pass under
@@ -34,10 +34,15 @@ update its row and the tag index in the same commit.
 | M8 | Range fetch: bao verified streaming | landed |
 | Spec pass | S1–S7 and D4 resolved in the draft | landed |
 | Spec pass | S8 (`bft_state_transfer` ring signature scope) | open, spec-only |
+| M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
+| M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
+| M9.3 | `quip-node`: `ConnectionFlow` integration | not started |
+| M9.4 | Live `DhtClient` | not started |
 
-Every code milestone is landed. §16 runs end-to-end through step 8.
-The only open items are S8 (text-only) and four small deferred items
-listed under **Open items**.
+Every protocol-level milestone (M1–M8) is landed. The application
+layer (M9.x) is in progress: M9.1 and M9.2 are landed, M9.3 and M9.4
+are not started. §16 runs end-to-end through step 8 across the
+protocol crates; the `Node` type composes them into a runnable peer.
 
 ---
 
@@ -47,7 +52,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    601 unit + 3 doc, exit 0
+cargo test --workspace --all-features                    610 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -58,6 +63,9 @@ cargo build -p quip-core -p quip-storage -p quip-net \
 All five commands run in `.github/workflows/ci.yml` on every push,
 plus a `vectors` job that regenerates `test-vectors/` and fails if the
 working tree changed.
+
+`quip-node` is not part of the `no_std` build: it depends on `tokio`,
+`std`, and the `quic` feature of `quip-net`.
 
 ### Verification baseline
 
@@ -75,8 +83,9 @@ Baseline on `main`:
 quip-core      74 passed
 quip-net      470 passed
 quip-storage   57 passed
-doc-tests       3 passed (one per crate)
-             ~601 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+quip-node       9 passed
+doc-tests       4 passed (one per crate)
+             ~610 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -294,6 +303,91 @@ handshake pair.
 
 ---
 
+## M9 — Application layer — IN PROGRESS
+
+The `quip-node` crate. `Node` binds a QUIC endpoint, accepts inbound
+connections, dials outbound ones, runs the establishment flow per
+peer, and owns a `QuipStore` that auto-serves the storage-plane verbs
+with a 1:1 wire mapping.
+
+### M9.1 — Transport integration — LANDED
+
+- `NodeConfig::new` derives a signed `KeyClaim` from a `Signer`.
+- `Node::bind` spawns an accept loop; each accepted
+  `ConnectionDriver` is driven through the §4/§16 handshake and
+  handed to a peer task.
+- `Node::connect` dials, drives the handshake inline, and returns the
+  peer's `NodeId`.
+- `Node::poll` drains the event channel with a short timeout.
+- `Node::send_to` routes a `Message` to a peer's outbound queue.
+- `Node::shutdown` closes the endpoint; `Drop` aborts the accept task
+  and every peer task. The peer-task map and its `Drop` handling came
+  out of the first CI round; without it, dropped nodes leaked tasks
+  and hung the test binary.
+
+**Evidence:** `quip-node::tests::two_nodes_connect`,
+`two_nodes_exchange_messages`, `send_to_unknown_peer_errors`,
+`local_addr_is_bound`, `peers_snapshot_grows_after_connect`,
+`drop_releases_peer_tasks`.
+
+### M9.2 — Store integration — LANDED
+
+- `Node<B>` owns an `Arc<Mutex<QuipStore<B>>>` shared across peer
+  tasks; `B` defaults to `MemoryBlobStore` and can be any
+  `BlobStore + Send + Sync`.
+- Direct store helpers: `put_content`, `get_content`, `pin`,
+  `unpin`, `query_pins`, `store()`.
+- With `auto_serve_pins` on (default), inbound `pin`, `unpin`, and
+  `query_pins` are applied to the store inside the peer task and do
+  not surface as `NodeEvent::Message`. `query_pins` replies with a
+  `pin_list` on the same tier.
+- `register_tcid`, `delegation`, and `derivative_link` are
+  deliberately not auto-served: they carry signatures the peer task
+  cannot verify, so the application handles them, verifies, then
+  calls `store()`.
+- **Clock injection.** `NodeConfig::clock` is a `SharedClock`
+  (`Arc<dyn Clock + Send + Sync + 'static>`) defaulting to
+  `SystemClock`; tests inject a
+  [`ManualClock`](quip-core/src/time.rs). Every peer task reads the
+  clock instead of `quip_net::unix_now()`, so timestamps the
+  application and the peer tasks compute agree by construction.
+  Fixes the auto-serve expiration mismatch the first cut of M9.2 hit.
+
+**Evidence:** `put_and_get_content_round_trip`,
+`peer_query_pins_is_auto_served`, `peer_pin_is_applied_to_store`, and
+the doctest.
+
+### M9.3 — ConnectionFlow integration — NOT STARTED
+
+Each peer task runs a `ConnectionFlow` after the transport handshake:
+
+- `ConnectionDriver` performs §4 and §16 inline, so the flow starts
+  at `NatTraversal` via a new
+  `ConnectionFlow::resume_from_key_claim` constructor.
+- For M9.3, the NAT and witness-discovery phases are stubs: NAT is
+  declared successful on the strength of the live transport
+  connection, and discovery is declared failed because no DHT is
+  available. §16 step 18 permits PENDING for a live connection, so
+  the flow completes with `KtStatus::Pending`.
+- New `NodeEvent` variants: `Ready { peer, kt_status }` on flow
+  success, `EstablishmentFailed { peer, failure }` on failure.
+- `Node::connect` returns the peer's `NodeId` as soon as the
+  transport handshake completes; `NodeEvent::Ready` fires later.
+
+M9.4 replaces both stubs.
+
+### M9.4 — Live DhtClient — NOT STARTED
+
+A `DhtClient` implementation for `quip-net::nat_driver`. Routes
+`publish_connectivity`, `lookup_connectivity`, `discover_relays`, and
+`coral_lookup` to actual peers over QUIC, maintains a routing table,
+and runs cluster merge/split against `cluster.rs`'s state.
+
+M9.4 is what makes the M9.3 NAT and witness-discovery stubs real. It
+is the last piece before anything beyond a two-node demo.
+
+---
+
 ## Spec pass
 
 Seven points where the draft left a choice, plus one numeric mismatch
@@ -381,6 +475,12 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/range.rs` (`split_range`) | M7 | client-side range splitting |
 | `quip-net/src/range.rs` (`RangeResponder`) | M7 | responder with cap + quarantine |
 | `quip-net/src/test_support.rs:1` | — | test-only `FakeSigner` |
+| `quip-node/src/lib.rs:1` | M9.1, M9.2 | `Node` type, store integration, clock injection |
+| `quip-node/src/lib.rs` (`NodeConfig`) | M9.1, M9.2 | node configuration and clock |
+| `quip-node/src/lib.rs` (`Node::bind`) | M9.1 | server bind + accept loop |
+| `quip-node/src/lib.rs` (`Node::connect`) | M9.1 | dial + inline handshake |
+| `quip-node/src/lib.rs` (`Node::store` and direct helpers) | M9.2 | store access and pin API |
+| `quip-node/src/lib.rs` (`try_auto_serve_pins`) | M9.2 | pin/unpin/query_pins auto-serve |
 
 The code subdivides NAT work as `M3a` / `M3b.1` / `M3b.2` / `M3b.3`
 and BFT work as `M4a` / `M4b`. The M3 section above numbers the later
@@ -397,32 +497,48 @@ the source. `M3b.3` is retired — its only `TODO`
 
 ## Open items
 
-Every code milestone is landed. What remains:
+### Application layer (M9)
 
-1. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
+1. **M9.3 — `ConnectionFlow` integration.** Wire the §16 flow into
+   each peer task. Add `ConnectionFlow::resume_from_key_claim` to
+   `establishment.rs` so the flow can start at `NatTraversal` after
+   the transport's inline handshake. Stub NAT (success) and witness
+   discovery (failed → `Ready(Pending)`) for this milestone; M9.4
+   replaces them. New events: `Ready`, `EstablishmentFailed`.
+2. **M9.4 — live `DhtClient`.** Needed for M9.3's stubs to become
+   real, and for anything beyond a two-node demo.
+
+### Protocol crates
+
+3. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
    describes the extra round trip a fresh quorum ring signature
    would require, or whether it adopts the checkpoint-signatures
-   interpretation the implementation uses. Until this lands, the
-   code and the draft disagree on what
-   `bft_state_transfer.ring_signature` covers.
-2. **Prepared-operation carry-forward on view change.** The new
+   interpretation the implementation uses.
+4. **Prepared-operation carry-forward on view change.** The new
    primary does not yet re-propose operations prepared in an earlier
-   view; `bft_new_view.prepared_messages` is emitted empty. Needs a
-   `prepared: BTreeMap<sequence, (Operation, Digest, view, sig)>` on
-   the driver and a re-propose path in `adopt_view`.
-3. **Checkpoint carry-forward on view change.**
+   view; `bft_new_view.prepared_messages` is emitted empty.
+5. **Checkpoint carry-forward on view change.**
    `bft_new_view.checkpoint_messages` is emitted empty. Same shape as
-   (2): the driver already retains `stable_checkpoint`, but
+   (4): the driver already retains `stable_checkpoint`, but
    `maybe_emit_new_view` does not encode it.
-4. **FROST ring signature verification** in
+6. **FROST ring signature verification** in
    `verify_checkpoint_ring_sig`. Requires a group public key on the
    ring; the driver does not hold one today. The individual-signature
    path is complete.
-5. **Release tag.** `git tag v0.1.0-m6 && git push origin
-   v0.1.0-m6`, then update to `v0.1.0` once S8 lands.
-6. **GitHub metadata.** Repository description and topics.
 
-None of items 1–4 block the demo path. §16 runs end-to-end.
+### Housekeeping
+
+7. **Release tag.** `git tag v0.1.0-m9.1 && git push origin
+   v0.1.0-m9.1` after M9.3 lands, then `v0.1.0` once S8 lands.
+8. **GitHub metadata.** Repository description and topics.
+9. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+   The bound currently sits on `quip-node`'s `SharedClock` alias
+   because widening the trait is a breaking change. Every reasonable
+   clock satisfies the stronger bound; the alias should eventually
+   become unnecessary.
+
+Items 1 and 2 block the application layer. Items 3–6 do not block
+anything and can land in any order.
 
 ---
 
@@ -440,3 +556,8 @@ None of items 1–4 block the demo path. §16 runs end-to-end.
   module docs).
 - `quip-core/quip-core.txt` and `quip-core/crate_dump.sh` deleted.
 - `README.md` at repository root.
+
+### Outstanding
+- **Repo description and topics** on GitHub.
+- **A `<link>` from `quip-node/src/lib.rs` to this file.** The other
+  three crates have it; `quip-node` was created after that pass.

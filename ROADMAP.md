@@ -27,7 +27,7 @@ row and the tag index in the same commit.
 | M1 | Foundation: dispatch, codec, frame, error, constants | landed |
 | M2 | Coral DHT state: routing, cluster, witness discovery | landed |
 | M3 | NAT traversal: codecs, state machine, driver, connection flow | landed; M3.6 sealer outstanding |
-| M4 | BFT consensus: wire codecs (M4a), driver (M4b) | M4a landed; M4b not started |
+| M4 | BFT consensus: wire codecs (M4a), driver (M4b) | landed |
 | M5 | QUIC transport: endpoint, handshake, T0/T1/T2/T3 I/O | landed |
 | M6 | Integration: §16 flow, test vectors, CI | landed |
 | M7 | Hardening: rate limits, caches, quarantine, state machines | landed |
@@ -45,7 +45,7 @@ All crates compile, every test passes, clippy and rustdoc are silent under
 `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    567 unit + 3 doc, exit 0
+cargo test --workspace --all-features                    601 unit + 3 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -71,10 +71,10 @@ Baseline on `main`:
 
 ```
 quip-core      74 passed
-quip-net      436 passed
+quip-net      470 passed
 quip-storage   57 passed
 doc-tests       3 passed (one per crate)
-             ~567 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~601 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -206,7 +206,7 @@ Three of four landed.
 
 ---
 
-## M4 — BFT consensus (§5.3.4, §5.3.4.1)
+## M4 — BFT consensus (§5.3.4, §5.3.4.1) — LANDED
 
 ### M4a — Wire codecs — LANDED
 `bft.rs` defines all eight messages (`BftPreprepare`, `BftPrepare`,
@@ -224,45 +224,74 @@ Two corrections from drafting are in the code:
 
 Wired into `message.rs` with verb, tier, capability, and dispatch arms.
 
-### M4b — Driver — not started
-The consensus state machine a witness ring runs: view, sequence, prepared
-certificates, stable checkpoints. Ring *formation* is M2, not here.
+### M4b.1 — Round core — LANDED
+`bft_driver.rs` runs the four-phase protocol in a single view:
+preprepare → prepare (quorum) → precommit (quorum) → commit (quorum)
+→ apply.
 
-**Deliverables:**
-- `bft_driver.rs` — `BftDriver` with `poll()` and an outbound message queue.
-- `BftHandler` trait to apply operations to the DVV.
-- `RingMembership` view mapping position → NodeId for primary rotation.
-  Ordering is pinned by S3 to canonical NodeId order; primary for view
-  `v` is `members[v mod |R|]`.
-- Verify the contents of `bft_new_view`'s opaque
-  `view_change_messages`, `prepared_messages`, and `checkpoint_messages`
-  (the carry-forward from M4a).
+- `RingMembership` holds members in canonical NodeId order (S3 pinned
+  this); `primary_for(v)` is `members[v mod |R|]`; `quorum()` is
+  `n - f` where `f = (n - 1) / 3`.
+- `BftHandler` is the application-side apply hook, called exactly once
+  per sequence on commit quorum.
+- `BftDriver` holds a `Signer` and a `Verifier`; both are value types.
+- The four-phase ladder (`RoundState`) is driven by `try_advance`,
+  which fires each quorum transition exactly once and emits the
+  corresponding event.
 
-**Message flow:** preprepare → prepare (5/7) → precommit (5/7) → commit
-(5/7) → apply to DVV.
+### M4b.2 — View change — LANDED
+A witness that suspects the primary calls
+`BftDriver::start_view_change()`. The driver broadcasts a
+`bft_view_change` for `view + 1` and starts collecting. When a member
+has quorum votes *and* is the primary for the target view, it emits a
+`bft_new_view` carrying the collected votes and adopts.
 
-**Critical operations** MUST NOT proceed in DEGRADED mode: rotation,
-revocation, witness membership, ownership transfer, and Trusted CID
-registrations requiring witness validation.
+- `on_view_change` discards superseded votes (target view ≤ current
+  view) before signature verification; joins a peer-initiated view
+  change if none is in progress; ignores votes for a different target.
+- `on_new_view` verifies the sender is the primary for `msg.view`, the
+  primary signature, and each enclosed view-change message; resolves
+  each signer by trial verification against the ring (the wire type
+  carries no signer NodeId); enforces distinct signers; adopts on
+  quorum.
+- `find_view_change_signer` is the trial-verification helper; O(|R|)
+  per message, acceptable for the ring sizes this protocol supports.
 
-**DEGRADED mode** entered at 3–4 reachable witnesses
-(`DEGRADED_QUORUM` = 3). MUST log and alert if it persists > 5 minutes.
+### M4b.3 — Checkpointing and state transfer — LANDED
+- `BftHandler` gains `state_digest()`, `state_bytes()`, and
+  `apply_state()`, all with conservative defaults so existing handlers
+  compile unchanged.
+- `BftDriver::apply_current` triggers a checkpoint every
+  `CHECKPOINT_INTERVAL` sequences. `start_checkpoint()` is public so
+  callers can force one (e.g. before shutdown).
+- `on_checkpoint` collects witness signatures over
+  `(sequence, state_digest)`. A quorum promotes the checkpoint to
+  stable and retains the signatures. Stability is checked against
+  `stable_checkpoint`, not `checkpoint_sequence`, so a checkpoint at
+  sequence 0 is not mistaken for one already held.
+- `request_state_transfer()` emits a `bft_state_transfer` with the
+  driver's known sequence, empty state, and an empty ring signature.
+  `on_state_transfer` dispatches on whether the ring signature is
+  empty: a request gets a response if the responder has a newer
+  stable checkpoint; a response is verified, has its digest checked
+  against the transmitted state, is installed via the handler, and
+  advances the driver's sequence.
+- `verify_checkpoint_ring_sig` verifies each signature against the
+  `bft_checkpoint` payload for
+  `(ring_id, checkpoint_sequence, checkpoint_digest)`, not the state
+  transfer's own signing payload. See S8.
 
-**View changes:** new primary is `members[v mod |R|]` in canonical NodeId
-order (S3 pinned). `bft_new_view` MUST contain at least
-`VIEW_CHANGE_QUORUM` = 5 valid view-change messages plus full encoded
-preprepare messages.
+### M4b — Out of scope (deferred)
 
-**Checkpointing:** every `CHECKPOINT_INTERVAL` = 100 rounds, collect to
-5-of-7 for the same `state_digest`. Lagging witness requests
-`bft_state_transfer` with its checkpoint sequence; peer responds with state
-plus a `RingSignature`; lagging witness verifies and resumes. The `state`
-field is opaque and application-defined; `checkpoint_digest` is SHA-256 of
-the transmitted bytes (S4 pinned).
-
-**Size:** ~2000–2500 lines. Realistic split: M4b.1 (round core — preprepare,
-prepare, precommit, commit, apply), M4b.2 (view change), M4b.3
-(checkpointing and state transfer).
+- **Prepared-operation carry-forward on view change.** The new
+  primary does not yet re-propose operations that were prepared in an
+  earlier view. `bft_new_view.prepared_messages` is emitted empty.
+- **Checkpoint carry-forward on view change.**
+  `bft_new_view.checkpoint_messages` is emitted empty.
+- **FROST ring signature verification** in
+  `verify_checkpoint_ring_sig`. The individual-signature path is
+  complete; the FROST path returns `false` and the caller rejects the
+  transfer.
 
 ---
 
@@ -445,6 +474,16 @@ mismatch. All eight are now resolved in `draft-mututi-quip-03.xml`.
   `RESTRICTED`=3, `SYMMETRIC`=4).
 - **D4 — `T2_MAX_STREAMS`.** §19.4 says 256; `constants.rs` was 16.
   Aligned the constant to the spec.
+- **S8 — `bft_state_transfer` ring signature scope.** §5.3.4.1 says the
+  `ring_signature` covers the state transfer's own signing payload. A
+  responder cannot produce a fresh quorum ring signature without an
+  extra round trip the spec does not describe. The implementation
+  treats the ring signature as the collection of `bft_checkpoint`
+  signatures that made the checkpoint stable, and verifies it against
+  the `bft_checkpoint` payload for
+  `(ring_id, checkpoint_sequence, checkpoint_digest)`. **Spec
+  revision required**, text-only: §5.3.4.1 should either describe the
+  extra round or adopt the checkpoint-signatures interpretation.
 
 ---
 
@@ -474,6 +513,14 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
 | `quip-net/src/establishment.rs:1` | M3.5 | §16 connection flow |
+| `quip-net/src/bft_driver.rs:1` | M4b.1–M4b.3 | BFT round core, view change, checkpointing |
+| `quip-net/src/bft_driver.rs` (`RingMembership`) | M4b.1 | canonical-order membership, quorum, primary rotation |
+| `quip-net/src/bft_driver.rs` (`BftHandler`) | M4b.1, M4b.3 | apply hook + state hooks |
+| `quip-net/src/bft_driver.rs` (`BftDriver::start_view_change`) | M4b.2 | view-change initiation |
+| `quip-net/src/bft_driver.rs` (`BftDriver::on_new_view`) | M4b.2 | new-view acceptance and adoption |
+| `quip-net/src/bft_driver.rs` (`BftDriver::start_checkpoint`) | M4b.3 | checkpoint emission |
+| `quip-net/src/bft_driver.rs` (`BftDriver::on_state_transfer`) | M4b.3 | state transfer request/response |
+| `quip-net/src/bft_driver.rs` (`verify_checkpoint_ring_sig`) | M4b.3 | S8 interpretation of the ring signature |
 | `quip-net/src/lib.rs` (establishment re-export) | M3.5 | module wiring |
 | `quip-net/src/transport.rs:3` | M5 | status header |
 | `quip-net/src/transport.rs` (M5.2–M5.4 test groups) | M5 | handshake/capability, T0/T1/T3, Key Claim |

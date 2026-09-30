@@ -36,13 +36,16 @@ update its row and the tag index in the same commit.
 | Spec pass | S8 (`bft_state_transfer` ring signature scope) | open, spec-only |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
-| M9.3 | `quip-node`: `ConnectionFlow` integration | not started |
-| M9.4 | Live `DhtClient` | not started |
+| M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4 |
+| M9.4 | `quip-node`: `ConnectionFlow` integration + live `DhtClient` | not started |
 
 Every protocol-level milestone (M1–M8) is landed. The application
-layer (M9.x) is in progress: M9.1 and M9.2 are landed, M9.3 and M9.4
-are not started. §16 runs end-to-end through step 8 across the
-protocol crates; the `Node` type composes them into a runnable peer.
+layer (M9.x) is in progress: M9.1 and M9.2 are landed. M9.3 was
+folded into M9.4 rather than shipped as a stub-only integration —
+running the §16 flow without a real DHT client would only produce
+placeholder trust statuses. §16 runs end-to-end through step 8
+across the protocol crates; the `Node` type composes them into a
+runnable peer.
 
 ---
 
@@ -81,11 +84,11 @@ Baseline on `main`:
 
 ```
 quip-core      74 passed
-quip-net      470 passed
+quip-net      471 passed
 quip-storage   57 passed
 quip-node       9 passed
 doc-tests       4 passed (one per crate)
-             ~610 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~611 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -156,7 +159,9 @@ the in-memory state a driver consults.
   `StartNatTraversal`, `StartWitnessDiscovery`, `Ready`, `Failed`.
   KT status computed from accumulated `AnnounceWitness`: 4+
   non-expired ⇒ `Verified`, else `Pending`. A failed discovery
-  yields `Ready(Pending)`.
+  yields `Ready(Pending)`. `resume_from_key_claim` (added in the
+  M9 series) starts the flow at `NatTraversal` for callers whose
+  transport performs the §4/§16 exchanges inline.
 - **Residuals (`M3.6`).** Adaptive re-announce (§12.1) via
   `AddressState::observe_at` + `NatTraversal::current_reannounce_percent`.
   Multi-hop relay chains via `RelayManager::best_chain` and
@@ -306,9 +311,8 @@ handshake pair.
 ## M9 — Application layer — IN PROGRESS
 
 The `quip-node` crate. `Node` binds a QUIC endpoint, accepts inbound
-connections, dials outbound ones, runs the establishment flow per
-peer, and owns a `QuipStore` that auto-serves the storage-plane verbs
-with a 1:1 wire mapping.
+connections, dials outbound ones, and owns a `QuipStore` that
+auto-serves the storage-plane verbs with a 1:1 wire mapping.
 
 ### M9.1 — Transport integration — LANDED
 
@@ -357,34 +361,42 @@ with a 1:1 wire mapping.
 `peer_query_pins_is_auto_served`, `peer_pin_is_applied_to_store`, and
 the doctest.
 
-### M9.3 — ConnectionFlow integration — NOT STARTED
+### M9.3 — ConnectionFlow integration — FOLDED INTO M9.4
 
-Each peer task runs a `ConnectionFlow` after the transport handshake:
+Deferred. Running the §16 `ConnectionFlow` at the node layer without
+a real `NatDriver` and `DhtClient` can only drive the NAT phase to a
+hardcoded success and the witness-discovery phase to a hardcoded
+failure, yielding `Ready(Pending)` for every connection regardless of
+what is actually true. That is spec-legal (§16 step 18 permits
+PENDING for a live connection) but it is a lie to the application,
+and a reference implementation should not ship it. The
+`ConnectionFlow::resume_from_key_claim` constructor was added to
+`quip-net` in preparation, with a unit test; the node consumes it
+in M9.4.
 
-- `ConnectionDriver` performs §4 and §16 inline, so the flow starts
-  at `NatTraversal` via a new
-  `ConnectionFlow::resume_from_key_claim` constructor.
-- For M9.3, the NAT and witness-discovery phases are stubs: NAT is
-  declared successful on the strength of the live transport
-  connection, and discovery is declared failed because no DHT is
-  available. §16 step 18 permits PENDING for a live connection, so
-  the flow completes with `KtStatus::Pending`.
-- New `NodeEvent` variants: `Ready { peer, kt_status }` on flow
-  success, `EstablishmentFailed { peer, failure }` on failure.
-- `Node::connect` returns the peer's `NodeId` as soon as the
-  transport handshake completes; `NodeEvent::Ready` fires later.
+### M9.4 — ConnectionFlow integration + live DhtClient — NOT STARTED
 
-M9.4 replaces both stubs.
+Two pieces that land together:
 
-### M9.4 — Live DhtClient — NOT STARTED
+- **Live `DhtClient`.** A `DhtClient` implementation for
+  `quip-net::nat_driver` (today only `NullDhtClient` and a test
+  `RecordingDht` exist). Routes `publish_connectivity`,
+  `lookup_connectivity`, `discover_relays`, and `coral_lookup` to
+  actual peers over QUIC, maintains a routing table, and runs
+  cluster merge/split against `cluster.rs`'s state.
+- **`ConnectionFlow` integration.** After `ConnectionDriver`
+  performs the §4/§16 exchanges inline, each peer task resumes the
+  flow at `NatTraversal` via
+  `ConnectionFlow::resume_from_key_claim`, runs NAT traversal
+  through the new `DhtClient`, runs witness discovery against the
+  new DHT, and reaches `Ready(kt_status)` with a trust status that
+  reflects reality. New `NodeEvent` variants: `Ready { peer,
+  kt_status }` on success, `EstablishmentFailed { peer, failure }`
+  on failure. `Node::connect` continues to return the peer's
+  `NodeId` as soon as the transport handshake completes;
+  `NodeEvent::Ready` fires later.
 
-A `DhtClient` implementation for `quip-net::nat_driver`. Routes
-`publish_connectivity`, `lookup_connectivity`, `discover_relays`, and
-`coral_lookup` to actual peers over QUIC, maintains a routing table,
-and runs cluster merge/split against `cluster.rs`'s state.
-
-M9.4 is what makes the M9.3 NAT and witness-discovery stubs real. It
-is the last piece before anything beyond a two-node demo.
+M9.4 is the last piece before anything beyond a two-node demo.
 
 ---
 
@@ -447,6 +459,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
 | `quip-net/src/establishment.rs:1` | M3.5 | §16 connection flow |
+| `quip-net/src/establishment.rs` (`resume_from_key_claim`) | M9.4 (prep) | flow started at `NatTraversal` |
 | `quip-net/src/relay_hpke.rs:1` | M3.6 | concrete relay-hop HPKE sealer |
 | `quip-net/src/bft_driver.rs:1` | M4b.1–M4b.3 | BFT round core, view change, checkpointing |
 | `quip-net/src/bft_driver.rs` (`RingMembership`) | M4b.1 | canonical-order membership, quorum, primary rotation |
@@ -499,14 +512,14 @@ the source. `M3b.3` is retired — its only `TODO`
 
 ### Application layer (M9)
 
-1. **M9.3 — `ConnectionFlow` integration.** Wire the §16 flow into
-   each peer task. Add `ConnectionFlow::resume_from_key_claim` to
-   `establishment.rs` so the flow can start at `NatTraversal` after
-   the transport's inline handshake. Stub NAT (success) and witness
-   discovery (failed → `Ready(Pending)`) for this milestone; M9.4
-   replaces them. New events: `Ready`, `EstablishmentFailed`.
-2. **M9.4 — live `DhtClient`.** Needed for M9.3's stubs to become
-   real, and for anything beyond a two-node demo.
+1. **M9.4 — `ConnectionFlow` integration + live `DhtClient`.** The
+   two land together. The `ConnectionFlow` type and its
+   `resume_from_key_claim` constructor are ready in `quip-net`;
+   the node does not consume them until the `DhtClient` exists,
+   because otherwise every connection reports
+   `Ready(Pending)` regardless of truth. New events: `Ready`,
+   `EstablishmentFailed`.
+2. **M9.4 — live `DhtClient`** (details in the M9.4 section above).
 
 ### Protocol crates
 
@@ -528,8 +541,8 @@ the source. `M3b.3` is retired — its only `TODO`
 
 ### Housekeeping
 
-7. **Release tag.** `git tag v0.1.0-m9.1 && git push origin
-   v0.1.0-m9.1` after M9.3 lands, then `v0.1.0` once S8 lands.
+7. **Release tag.** `git tag v0.1.0-m9.2 && git push origin
+   v0.1.0-m9.2` after M9.4 lands, then `v0.1.0` once S8 lands.
 8. **GitHub metadata.** Repository description and topics.
 9. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
    The bound currently sits on `quip-node`'s `SharedClock` alias

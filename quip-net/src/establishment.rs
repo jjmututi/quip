@@ -231,6 +231,43 @@ impl ConnectionFlow {
         }
     }
 
+    /// Begin a flow that starts in [`FlowPhase::NatTraversal`].
+    ///
+    /// Use this when the transport has already completed the §4
+    /// handshake and §16 Key Claim exchange — as
+    /// [`ConnectionDriver`](crate::transport::ConnectionDriver) does
+    /// inline. The flow skips `AwaitHandshake` and `AwaitKeyClaim`
+    /// and begins collecting NAT and witness signals.
+    ///
+    /// `local_claim` and `remote_claim` are retained for introspection
+    /// and future re-verification. `remote_claim.node_id` becomes the
+    /// flow's target for witness accumulation.
+    ///
+    /// Added in the M9 series for the node-layer integration; first
+    /// consumed in M9.4, when the node gains a real `DhtClient` and
+    /// can run the NAT and witness phases rather than stub them.
+    pub fn resume_from_key_claim(
+        local_claim: KeyClaim,
+        remote_claim: KeyClaim,
+        session_id: [u8; 16],
+        config: FlowConfig,
+        now: Timestamp,
+    ) -> Self {
+        Self {
+            local_claim,
+            session_id,
+            config,
+            phase: FlowPhase::NatTraversal,
+            phase_entered_at: now,
+            remote: Some(RemoteState {
+                node_id: remote_claim.node_id,
+                key_claim: remote_claim,
+                first_seen: now,
+                witnesses: BTreeMap::new(),
+            }),
+        }
+    }
+
     /// Current phase.
     pub fn phase(&self) -> &FlowPhase {
         &self.phase
@@ -743,5 +780,37 @@ mod tests {
     fn local_node_id_matches_signer() {
         let f = new_flow();
         assert_eq!(f.local_node_id(), nid(1));
+    }
+
+    /// `resume_from_key_claim` starts in `NatTraversal` with the remote
+    /// already populated, so a caller that has performed the §4/§16
+    /// exchanges inline (as `ConnectionDriver` does) can drop straight
+    /// into the post-Key-Claim half of §16.
+    #[test]
+    fn resume_from_key_claim_starts_in_nat_traversal() {
+        let mut f = ConnectionFlow::resume_from_key_claim(
+            claim_for(1, t(0)),
+            claim_for(2, t(0)),
+            [0x42; 16],
+            FlowConfig::default(),
+            t(5),
+        );
+        assert_eq!(*f.phase(), FlowPhase::NatTraversal);
+        assert_eq!(f.remote_node_id(), Some(nid(2)));
+        assert_eq!(f.local_node_id(), nid(1));
+        assert_eq!(f.session_id(), [0x42; 16]);
+        assert_eq!(f.remote_first_seen(), Some(t(5)));
+
+        // The normal NAT → discovery transitions work from here.
+        let actions = f.on_nat_complete(true, t(6));
+        assert_eq!(*f.phase(), FlowPhase::WitnessDiscovery);
+        assert!(matches!(
+            &actions[0],
+            FlowAction::StartWitnessDiscovery { peer } if *peer == nid(2)
+        ));
+
+        let actions = f.on_discovery_failed();
+        assert_eq!(*f.phase(), FlowPhase::Ready(KtStatus::Pending));
+        assert_eq!(actions, vec![FlowAction::Ready(KtStatus::Pending)]);
     }
 }

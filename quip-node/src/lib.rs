@@ -7,7 +7,7 @@
 //!
 //! # Scope
 //!
-//! This is the second cut. It does:
+//! This is the third cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
@@ -26,17 +26,29 @@
 //!
 //! It does not (yet):
 //!
+//! - Run a
+//!   [`ConnectionFlow`](quip_net::establishment::ConnectionFlow)
+//!   per peer, and therefore emits no `Ready` event. Running the §16
+//!   flow without a real NAT driver or DHT client would only produce
+//!   placeholder trust statuses — `Ready(Pending)` for every
+//!   connection regardless of what is actually true. M9.4 lands the
+//!   flow and the DHT client together so that `Ready` means
+//!   something the first time it fires.
 //! - Auto-serve `register_tcid`, `delegation`, `derivative_link`,
 //!   `resource_announce`, or `query_resource`. Those carry signatures
 //!   the peer task cannot verify, or require a wire-to-storage type
 //!   conversion that has not been written.
 //! - Auto-serve `get`, `set`, `sync`, or `rbsr_sync`: they are
 //!   DVV-shaped and need DVV state that `Node` does not own yet.
-//! - Run a `ConnectionFlow` (the NAT/witness-discovery orchestrator).
 //! - Run a `BftDriver`.
-//! - Implement a real `DhtClient`.
 //!
-//! Those are the next layer.
+//! # Establishment
+//!
+//! A peer goes straight from the §4 handshake and §16 Key Claim
+//! exchange — both performed inline by `ConnectionDriver` — into
+//! steady-state operation. There is no `ConnectionFlow` at the node
+//! layer yet; M9.4 introduces it alongside the DHT client it depends
+//! on.
 //!
 //! # Auto-served verbs
 //!
@@ -105,10 +117,13 @@
 //!     .await?;
 //! node.pin(b"greeting", &cid, 0, now).await;
 //!
-//! // Peers can now query the pin, and the node auto-answers.
+//! // React to peers.
 //! for event in node.poll().await? {
-//!     if let NodeEvent::Message { peer, msg, .. } = event {
-//!         println!("{} from {:?}", msg.verb(), peer);
+//!     match event {
+//!         NodeEvent::Message { peer, msg, .. } => {
+//!             println!("{} from {:?}", msg.verb(), peer);
+//!         }
+//!         _ => {}
 //!     }
 //! }
 //! # Ok(())
@@ -255,6 +270,9 @@ pub fn make_key_claim(signer: &impl Signer, now: Timestamp) -> Result<KeyClaim> 
 #[derive(Debug)]
 pub enum NodeEvent {
     /// A peer completed the §4 handshake and §16 Key Claim exchange.
+    ///
+    /// The peer is reachable from `send_to` at this point. M9.4 will
+    /// add a `Ready` event that marks the end of §16 establishment.
     Connected {
         /// The peer's NodeId, as claimed. The application is
         /// responsible for verifying the claim's signature and
@@ -412,6 +430,10 @@ where
     /// signature is not verified by the driver; the caller is
     /// responsible for applying its own TOFU / rotation policy, same
     /// as for [`NodeEvent::Connected`].
+    ///
+    /// The returned `NodeId` is available as soon as the transport
+    /// handshake completes. M9.4 will add a `Ready` event that fires
+    /// later, after the §16 connection flow completes.
     pub async fn connect(
         &mut self,
         addr: SocketAddr,

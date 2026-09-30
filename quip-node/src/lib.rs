@@ -21,6 +21,8 @@
 //!   when [`NodeConfig::auto_serve_pins`] is set.
 //! - Expose direct store helpers: `put_content`, `get_content`,
 //!   `pin`, `unpin`, `query_pins`, and a raw `store()` accessor.
+//! - Read the wall clock through a [`Clock`], so tests can inject a
+//!   deterministic time source.
 //!
 //! It does not (yet):
 //!
@@ -47,6 +49,28 @@
 //! handle pins itself sets `auto_serve_pins = false` and takes over
 //! the dispatch in its event loop.
 //!
+//! # Pin auto-serve
+//!
+//! The auto-serve path calls [`QuipStore::query_pins`] with whatever
+//! filters arrived on the wire. `PinTable::query` requires at least
+//! one filter — a `QueryPins` with both `resource_id` and `cid`
+//! absent is well-formed on the wire but yields an empty `pin_list`,
+//! not a full listing. Applications that want a full listing must
+//! page through resource_ids or add a store-level enumeration helper.
+//!
+//! The wire message is still accepted; the reply is simply empty.
+//!
+//! # Clock
+//!
+//! Peer tasks read the current time through [`NodeConfig::clock`] —
+//! a shared `Arc<dyn Clock + Send + Sync>`, defaulting to
+//! [`SystemClock`]. Tests inject a
+//! [`ManualClock`](quip_core::time::ManualClock) so that pin and
+//! query timestamps match by construction. The clock is also what an
+//! application should read via [`Node::clock`] when it wants a
+//! timestamp consistent with what the node's own peer tasks are
+//! using.
+//!
 //! # Store locking
 //!
 //! The store is behind a single `tokio::sync::Mutex`, shared by the
@@ -61,7 +85,7 @@
 //!
 //! ```no_run
 //! use quip_core::cid::HashAlgo;
-//! use quip_core::time::Timestamp;
+//! use quip_core::time::{Clock, SystemClock};
 //! use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
 //! use quip_node::{Node, NodeConfig, NodeEvent};
 //! use quip_storage::{CidTagging, QuipStore};
@@ -70,7 +94,7 @@
 //! # async fn example() -> quip_net::Result<()> {
 //! let signer = Ed25519Signer::from_seed(&[0x42; 32]);
 //! let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
-//! let now = Timestamp::from_millis(1_700_000_000_000);
+//! let now = SystemClock.now();
 //! let config = NodeConfig::new(bind, &signer, now)?;
 //! let mut node = Node::bind_with_store(config, QuipStore::new()).await?;
 //!
@@ -94,7 +118,7 @@
 use quip_core::cid::{CidOrV1, HashAlgo};
 use quip_core::dvv::NodeId;
 use quip_core::messages::{KeyClaim, PinEntry, Signer};
-use quip_core::time::Timestamp;
+use quip_core::time::{Clock, SystemClock, Timestamp};
 use quip_net::frame::Tier;
 use quip_net::handshake::Capabilities;
 use quip_net::message::{self, Message};
@@ -121,12 +145,21 @@ const OUTBOUND_CAPACITY: usize = 64;
 /// How long [`Node::poll`] waits for a first event before returning.
 const POLL_TIMEOUT_MS: u64 = 50;
 
+/// A time source that can be moved across threads and shared.
+///
+/// `quip_core::time::Clock` does not itself require `Send + Sync`,
+/// because the trait is also used in single-threaded contexts. The
+/// node moves clocks into `tokio::spawn`ed tasks, so it needs the
+/// stronger bound. Every implementation in the workspace
+/// (`SystemClock`, `ManualClock`) satisfies it already.
+type SharedClock = Arc<dyn Clock + Send + Sync + 'static>;
+
 // -------------------------------------------------------------------------
 // Config
 // -------------------------------------------------------------------------
 
 /// Configuration for a [`Node`].
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NodeConfig {
     /// UDP address to bind for inbound connections.
     pub bind: SocketAddr,
@@ -139,11 +172,26 @@ pub struct NodeConfig {
     /// messages surface as [`NodeEvent::Message`] and the application
     /// is responsible for handling them.
     pub auto_serve_pins: bool,
+    /// Time source used by peer tasks. Defaults to [`SystemClock`];
+    /// tests inject a [`ManualClock`](quip_core::time::ManualClock).
+    pub clock: SharedClock,
+}
+
+impl core::fmt::Debug for NodeConfig {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("NodeConfig")
+            .field("bind", &self.bind)
+            .field("capabilities", &self.capabilities)
+            .field("key_claim", &self.key_claim)
+            .field("auto_serve_pins", &self.auto_serve_pins)
+            .field("clock", &"<dyn Clock>")
+            .finish()
+    }
 }
 
 impl NodeConfig {
     /// Build a config with baseline capabilities, a claim derived from
-    /// `signer`, and auto-serving enabled.
+    /// `signer`, auto-serving enabled, and the system clock.
     pub fn new(
         bind: SocketAddr,
         signer: &impl Signer,
@@ -154,6 +202,7 @@ impl NodeConfig {
             capabilities: Capabilities::baseline(),
             key_claim: make_key_claim(signer, now)?,
             auto_serve_pins: true,
+            clock: Arc::new(SystemClock),
         })
     }
 
@@ -166,6 +215,17 @@ impl NodeConfig {
     /// Enable or disable pin auto-serving.
     pub fn with_auto_serve_pins(mut self, on: bool) -> Self {
         self.auto_serve_pins = on;
+        self
+    }
+
+    /// Replace the time source.
+    ///
+    /// The clock is read once per peer task iteration, so a frozen or
+    /// slowly-advancing
+    /// [`ManualClock`](quip_core::time::ManualClock) makes the node
+    /// deterministic.
+    pub fn with_clock(mut self, clock: SharedClock) -> Self {
+        self.clock = clock;
         self
     }
 }
@@ -266,6 +326,8 @@ pub struct Node<B = MemoryBlobStore> {
     store: Arc<Mutex<QuipStore<B>>>,
     /// Whether peer tasks auto-serve pin/unpin/query_pins.
     auto_serve_pins: bool,
+    /// Time source handed to peer tasks.
+    clock: SharedClock,
     events_rx: mpsc::Receiver<NodeEvent>,
     events_tx: mpsc::Sender<NodeEvent>,
     accept_task: Option<JoinHandle<()>>,
@@ -307,11 +369,13 @@ where
         let peers: PeerMap = Arc::new(Mutex::new(BTreeMap::new()));
         let peer_tasks: TaskMap = Arc::new(Mutex::new(BTreeMap::new()));
         let store = Arc::new(Mutex::new(store));
+        let clock = Arc::clone(&config.clock);
 
         let accept_endpoint = Arc::clone(&endpoint);
         let accept_peers = Arc::clone(&peers);
         let accept_tasks = Arc::clone(&peer_tasks);
         let accept_store = Arc::clone(&store);
+        let accept_clock = Arc::clone(&clock);
         let accept_tx = events_tx.clone();
         let auto_serve = config.auto_serve_pins;
         let accept_task = tokio::spawn(async move {
@@ -320,6 +384,7 @@ where
                 accept_peers,
                 accept_tasks,
                 accept_store,
+                accept_clock,
                 auto_serve,
                 accept_tx,
             )
@@ -333,6 +398,7 @@ where
             peer_tasks,
             store,
             auto_serve_pins: config.auto_serve_pins,
+            clock,
             events_rx,
             events_tx,
             accept_task: Some(accept_task),
@@ -359,7 +425,8 @@ where
         let client_endpoint = Endpoint::client(client_config)?;
         let mut driver = client_endpoint.connect(addr, server_name).await?;
 
-        let peer = drive_handshake(&mut driver).await?;
+        let clock = Arc::clone(&self.clock);
+        let peer = drive_handshake(&mut driver, &clock).await?;
 
         let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAPACITY);
         self.peers
@@ -378,8 +445,10 @@ where
             // is moved into the peer task and dropped when the loop
             // exits.
             let _keep_endpoint = client_endpoint;
-            peer_steady_loop(driver, peer, store, auto_serve, events_tx, out_rx)
-                .await;
+            peer_steady_loop(
+                driver, peer, store, clock, auto_serve, events_tx, out_rx,
+            )
+            .await;
             peers.lock().await.remove(&peer);
             peer_tasks.lock().await.remove(&peer);
         });
@@ -458,6 +527,20 @@ where
         self.endpoint.close();
     }
 
+    /// Read the clock peer tasks use.
+    ///
+    /// Prefer this over reading `SystemClock` directly in an
+    /// application so that the timestamps it computes match what the
+    /// node's own peer tasks see.
+    pub fn clock(&self) -> &SharedClock {
+        &self.clock
+    }
+
+    /// Convenience: the clock's current time.
+    pub fn now(&self) -> Timestamp {
+        self.clock.now()
+    }
+
     /// Lock and access the node's store.
     ///
     /// The guard holds the store's mutex for its lifetime. Anything
@@ -487,7 +570,11 @@ where
     }
 
     /// Drop a pin.
-    pub async fn unpin(&self, resource_id: &[u8], cid: Option<&CidOrV1>) -> usize {
+    pub async fn unpin(
+        &self,
+        resource_id: &[u8],
+        cid: Option<&CidOrV1>,
+    ) -> usize {
         let mut s = self.store.lock().await;
         s.unpin(resource_id, cid)
     }
@@ -568,6 +655,7 @@ async fn accept_loop<B>(
     peers: PeerMap,
     peer_tasks: TaskMap,
     store: Arc<Mutex<QuipStore<B>>>,
+    clock: SharedClock,
     auto_serve_pins: bool,
     events_tx: mpsc::Sender<NodeEvent>,
 ) where
@@ -587,6 +675,7 @@ async fn accept_loop<B>(
         let peers = Arc::clone(&peers);
         let peer_tasks = Arc::clone(&peer_tasks);
         let store = Arc::clone(&store);
+        let clock = Arc::clone(&clock);
         let events_tx = events_tx.clone();
 
         // The accept loop cannot know the peer's NodeId until the
@@ -596,7 +685,7 @@ async fn accept_loop<B>(
         // registration — a narrow window, but real. The endpoint close
         // in Drop still causes it to exit.
         tokio::spawn(async move {
-            let peer = match drive_handshake(&mut driver).await {
+            let peer = match drive_handshake(&mut driver, &clock).await {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = events_tx
@@ -616,6 +705,7 @@ async fn accept_loop<B>(
                 driver,
                 peer,
                 store,
+                clock,
                 auto_serve_pins,
                 events_tx,
                 out_rx,
@@ -631,9 +721,12 @@ async fn accept_loop<B>(
 ///
 /// Returns the peer's NodeId. The driver is left in
 /// `DriverPhase::Established`.
-async fn drive_handshake(driver: &mut ConnectionDriver) -> Result<NodeId> {
+async fn drive_handshake(
+    driver: &mut ConnectionDriver,
+    clock: &SharedClock,
+) -> Result<NodeId> {
     loop {
-        let now = quip_net::unix_now();
+        let now = clock.now();
         let events = driver.poll(now).await?;
         for e in events {
             if matches!(e, Event::ControlConnected { .. }) {
@@ -650,6 +743,7 @@ async fn peer_steady_loop<B>(
     mut driver: ConnectionDriver,
     peer: NodeId,
     store: Arc<Mutex<QuipStore<B>>>,
+    clock: SharedClock,
     auto_serve_pins: bool,
     events_tx: mpsc::Sender<NodeEvent>,
     mut outbound_rx: mpsc::Receiver<Message>,
@@ -660,6 +754,7 @@ async fn peer_steady_loop<B>(
         &mut driver,
         peer,
         &store,
+        &clock,
         auto_serve_pins,
         &events_tx,
         &mut outbound_rx,
@@ -672,6 +767,7 @@ async fn run_peer_loop<B>(
     driver: &mut ConnectionDriver,
     peer: NodeId,
     store: &Mutex<QuipStore<B>>,
+    clock: &SharedClock,
     auto_serve_pins: bool,
     events_tx: &mpsc::Sender<NodeEvent>,
     outbound_rx: &mut mpsc::Receiver<Message>,
@@ -683,7 +779,7 @@ async fn run_peer_loop<B>(
         loop {
             match outbound_rx.try_recv() {
                 Ok(msg) => {
-                    let now = quip_net::unix_now();
+                    let now = clock.now();
                     if let Err(e) = driver.send(&msg, now).await {
                         let _ = events_tx
                             .send(NodeEvent::Error {
@@ -701,7 +797,7 @@ async fn run_peer_loop<B>(
         // Poll inbound; `driver.poll` blocks up to POLL_TIMEOUT_MS
         // internally, which yields this task to the runtime on every
         // iteration.
-        let now = quip_net::unix_now();
+        let now = clock.now();
         let events = match driver.poll(now).await {
             Ok(events) => events,
             Err(e) => {
@@ -809,7 +905,8 @@ where
         }
         Message::QueryPins(q) => {
             let s = store.lock().await;
-            let pins = s.query_pins(q.resource_id.as_deref(), q.cid.as_ref(), now);
+            let pins =
+                s.query_pins(q.resource_id.as_deref(), q.cid.as_ref(), now);
             Some(Message::PinList(quip_net::sync::PinList { pins }))
         }
         _ => return None,
@@ -842,6 +939,7 @@ mod tests {
     use super::*;
     use quip_core::cid::Cid;
     use quip_core::dvv::Dvv;
+    use quip_core::time::ManualClock;
     use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
     use quip_net::sync::{GetRequest, QueryPins};
     use quip_storage::CidTagging;
@@ -852,18 +950,35 @@ mod tests {
         s
     }
 
-    fn now() -> Timestamp {
-        Timestamp::from_millis(1_700_000_000_000)
+    /// Start time for the frozen test clock. Any value works; the
+    /// tests never compare against wall-clock time.
+    const T0_MS: u64 = 1_700_000_000_000;
+
+    fn frozen_clock() -> Arc<ManualClock> {
+        Arc::new(ManualClock::new(Timestamp::from_millis(T0_MS)))
     }
 
     fn addr_zero() -> SocketAddr {
         "127.0.0.1:0".parse().unwrap()
     }
 
-    async fn make_node(seed_byte: u8) -> Node {
+    /// Build a node with a frozen clock.
+    ///
+    /// Returns `(node, clock)` so tests can read the same time the
+    /// peer tasks use.
+    async fn make_node_with_clock(seed_byte: u8) -> (Node, Arc<ManualClock>) {
         let signer = Ed25519Signer::from_seed(&seed(seed_byte));
-        let config = NodeConfig::new(addr_zero(), &signer, now()).unwrap();
-        Node::bind(config).await.unwrap()
+        let clock = frozen_clock();
+        let config = NodeConfig::new(addr_zero(), &signer, clock.now())
+            .unwrap()
+            .with_clock(Arc::clone(&clock) as SharedClock);
+        let node = Node::bind(config).await.unwrap();
+        (node, clock)
+    }
+
+    /// Build a node with a frozen clock, discarding the clock handle.
+    async fn make_node(seed_byte: u8) -> Node {
+        make_node_with_clock(seed_byte).await.0
     }
 
     /// Wait for `node` to emit a `Connected` event for `expected`, up
@@ -922,8 +1037,8 @@ mod tests {
 
     #[tokio::test]
     async fn two_nodes_connect() {
-        let mut a = make_node(1).await;
-        let mut b = make_node(2).await;
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, _) = make_node_with_clock(2).await;
 
         let b_addr = b.local_addr().unwrap();
         let a_node_id = a.local_node_id();
@@ -940,8 +1055,8 @@ mod tests {
 
     #[tokio::test]
     async fn two_nodes_exchange_messages() {
-        let mut a = make_node(1).await;
-        let mut b = make_node(2).await;
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, _) = make_node_with_clock(2).await;
 
         let b_addr = b.local_addr().unwrap();
         let a_node_id = a.local_node_id();
@@ -1011,7 +1126,7 @@ mod tests {
 
     #[tokio::test]
     async fn peers_snapshot_grows_after_connect() {
-        let mut a = make_node(1).await;
+        let (mut a, _) = make_node_with_clock(1).await;
         let b = make_node(2).await;
         let b_addr = b.local_addr().unwrap();
         let b_node_id = b.local_node_id();
@@ -1027,7 +1142,7 @@ mod tests {
     async fn drop_releases_peer_tasks() {
         // Two nodes, connect, then drop both. The test's runtime will
         // hang if either node leaks a task that outlives it.
-        let mut a = make_node(1).await;
+        let (mut a, _) = make_node_with_clock(1).await;
         let b = make_node(2).await;
         let b_addr = b.local_addr().unwrap();
 
@@ -1041,7 +1156,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_and_get_content_round_trip() {
-        let node = make_node(1).await;
+        let (node, clock) = make_node_with_clock(1).await;
         let hasher = Sha256Hasher;
 
         let payload = b"hello quip".to_vec();
@@ -1051,13 +1166,13 @@ mod tests {
                 HashAlgo::Sha256,
                 CidTagging::V1,
                 &hasher,
-                now(),
+                clock.now(),
             )
             .await
             .unwrap();
 
         let fetched = node
-            .get_content(&cid, HashAlgo::Sha256, &hasher, now())
+            .get_content(&cid, HashAlgo::Sha256, &hasher, clock.now())
             .await
             .unwrap();
         assert_eq!(fetched, payload);
@@ -1065,8 +1180,8 @@ mod tests {
 
     #[tokio::test]
     async fn peer_query_pins_is_auto_served() {
-        let mut a = make_node(1).await;
-        let mut b = make_node(2).await;
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, b_clock) = make_node_with_clock(2).await;
 
         let b_addr = b.local_addr().unwrap();
         let a_node_id = a.local_node_id();
@@ -1076,18 +1191,15 @@ mod tests {
         assert_eq!(peer_b, b_node_id);
         assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
 
-        // The peer task auto-serves inbound queries at
-        // `quip_net::unix_now()`. Pinning at the test's frozen time
-        // (2023-11-14) would mark the pin expired relative to the
-        // wall clock the peer task uses. Pin and query at the wall
-        // clock so the TTL window is real.
-        let clock = quip_net::unix_now();
-
+        // B's peer tasks read `b_clock.now()`, so pinning at the same
+        // time means the pin is fresh when the query arrives.
         let cid = CidOrV1::Raw(Cid([0xAA; 32]));
-        b.pin(b"some-resource", &cid, 0, clock).await;
+        b.pin(b"some-resource", &cid, 0, b_clock.now()).await;
 
         assert_eq!(
-            b.query_pins(Some(b"some-resource"), None, clock).await.len(),
+            b.query_pins(Some(b"some-resource"), None, b_clock.now())
+                .await
+                .len(),
             1,
         );
 
@@ -1109,8 +1221,8 @@ mod tests {
 
     #[tokio::test]
     async fn peer_pin_is_applied_to_store() {
-        let mut a = make_node(1).await;
-        let mut b = make_node(2).await;
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, b_clock) = make_node_with_clock(2).await;
 
         let b_addr = b.local_addr().unwrap();
         let a_node_id = a.local_node_id();
@@ -1140,7 +1252,9 @@ mod tests {
         let mut found = false;
         while std::time::Instant::now() < deadline && !found {
             let _ = b.poll().await;
-            let pins = b.query_pins(Some(b"remote-pinned"), None, now()).await;
+            let pins = b
+                .query_pins(Some(b"remote-pinned"), None, b_clock.now())
+                .await;
             if pins.len() == 1 {
                 found = true;
             }

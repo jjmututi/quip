@@ -2,17 +2,13 @@
 //!
 //! [`BftDriver`] is the state machine a witness ring runs. It takes
 //! operations to order, participates in the four-phase protocol
-//! (preprepare → prepare → precommit → commit), and applies the
-//! operation to the caller's state on commit quorum.
+//! (preprepare → prepare → precommit → commit), applies the operation
+//! to the caller's state on commit quorum, and periodically
+//! checkpoints that state for recovery.
 //!
 //! # Scope (M4b.1)
 //!
-//! This is the round core. It handles a single successful round in a
-//! single view:
-//!
-//! - Proposing an operation (primary only).
-//! - Verifying and voting on preprepare, prepare, precommit, commit.
-//! - Applying on commit quorum.
+//! The round core. Propose, verify, vote, apply on commit quorum.
 //!
 //! # View change (M4b.2)
 //!
@@ -25,9 +21,29 @@
 //! Witnesses receiving a well-formed `bft_new_view` verify it and
 //! adopt.
 //!
-//! Prepared-operations carry-forward (`bft_new_view.prepared_messages`)
-//! and checkpoint carry-forward (`checkpoint_messages`) are emitted
-//! empty in this revision; M4b.3 populates them.
+//! # Checkpointing and state transfer (M4b.3)
+//!
+//! After every `CHECKPOINT_INTERVAL` sequences, the driver emits a
+//! `bft_checkpoint` for the current state digest. When a quorum of
+//! witnesses have signed the same `(sequence, state_digest)`, the
+//! checkpoint is marked stable and its signatures retained. A driver
+//! whose sequence has fallen behind can call
+//! [`BftDriver::request_state_transfer`] to obtain the state at a
+//! known checkpoint: a peer with a newer stable checkpoint responds
+//! with the state bytes and a ring signature. The lagging driver
+//! verifies the ring signature and the digest, installs the state,
+//! and resumes.
+//!
+//! ## S8 — ring signature scope
+//!
+//! §5.3.4.1 says the `ring_signature` of a `bft_state_transfer`
+//! covers that message's own signing payload. A responder cannot
+//! produce a fresh quorum ring signature without an extra round trip
+//! that the spec does not describe. This implementation treats the
+//! ring signature as the collection of `bft_checkpoint` signatures
+//! that made the checkpoint stable, and verifies it against the
+//! `bft_checkpoint` payload for
+//! `(ring_id, checkpoint_sequence, checkpoint_digest)`.
 //!
 //! # Quorum
 //!
@@ -40,23 +56,27 @@
 //! # Signing
 //!
 //! The driver holds a [`quip_core::messages::Signer`] because it
-//! signs its own votes and, as primary, the preprepare it proposes.
-//! It holds a [`quip_core::messages::Verifier`] because the
-//! four-phase protocol is meaningless without verifying peers'
-//! votes. Both are value types.
+//! signs its own votes, the preprepare it proposes as primary, and
+//! its own checkpoints. It holds a
+//! [`quip_core::messages::Verifier`] because the four-phase protocol
+//! and every state-transfer verification path would be meaningless
+//! without verifying peers' signatures. Both are value types.
 
 use crate::bft::{
-    BftCommit, BftNewView, BftPrecommit, BftPrepare, BftPreprepare, BftViewChange,
-    Digest, Operation, RingId,
+    BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPrepare, BftPreprepare,
+    BftStateTransfer, BftViewChange, Digest, Operation, RingId,
 };
 use crate::error::{Error, Result};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use quip_core::constants::MIN_WITNESSES;
+use quip_core::cbor::encode;
+use quip_core::constants::{CHECKPOINT_INTERVAL, MIN_WITNESSES};
 use quip_core::dvv::NodeId;
-use quip_core::messages::{Signer, Verifier};
+use quip_core::messages::{
+    IndividualRingSig, RingSignature, Signer, Verifier,
+};
 
 // -------------------------------------------------------------------------
 // RingMembership
@@ -135,6 +155,13 @@ impl RingMembership {
 /// [`BftEvent::ApplyFailed`] and does not halt the driver — the
 /// sequence has already committed; the caller decides whether to
 /// abort, retry, or ignore.
+///
+/// The state-related methods are used by checkpointing and state
+/// transfer (M4b.3). Their defaults are conservative: a handler that
+/// does not implement state serialization still compiles and its
+/// driver still operates, but its checkpoints carry an all-zeros
+/// digest and its state transfers are empty. Implementations that
+/// want real checkpointing override all three.
 pub trait BftHandler {
     /// Apply `operation` at `sequence` in `ring_id`.
     fn apply(
@@ -143,6 +170,35 @@ pub trait BftHandler {
         sequence: u64,
         operation: &Operation,
     ) -> Result<()>;
+
+    /// SHA-256 digest of the current application state.
+    ///
+    /// Used to identify a stable checkpoint. The default returns
+    /// all-zeros, which marks the driver as not meaningfully
+    /// checkpointing: state transfers are still accepted (the state
+    /// is passed to [`Self::apply_state`]), but the driver's own
+    /// emitted checkpoints carry a sentinel digest.
+    fn state_digest(&self) -> Digest {
+        [0u8; 32]
+    }
+
+    /// Encoded state at the latest checkpoint.
+    ///
+    /// Opaque to the protocol; §5.3.4.1 leaves the serialization to
+    /// the application. The default is empty.
+    fn state_bytes(&self) -> Vec<u8> {
+        Vec::new()
+    }
+
+    /// Install a state received via `bft_state_transfer`.
+    ///
+    /// The driver validates the ring signature and the
+    /// `checkpoint_digest` against the transmitted bytes before
+    /// calling this; the handler installs the state. The default is
+    /// a no-op.
+    fn apply_state(&mut self, _state: &[u8]) -> Result<()> {
+        Ok(())
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -164,6 +220,14 @@ pub enum BftOutbound {
     ViewChange(BftViewChange),
     /// New-view announcement, sent by the primary for the new view.
     NewView(BftNewView),
+    /// Checkpoint, sent every `CHECKPOINT_INTERVAL` sequences.
+    Checkpoint(BftCheckpoint),
+    /// State-transfer request: sent by a lagging driver to a peer.
+    /// Empty state and signature.
+    StateTransferRequest(BftStateTransfer),
+    /// State-transfer response: sent by a peer with a stable
+    /// checkpoint. Carries the state bytes and a ring signature.
+    StateTransferResponse(BftStateTransfer),
 }
 
 /// Something the driver wants the caller to observe.
@@ -222,6 +286,34 @@ pub enum BftEvent {
         /// The newly adopted view.
         view: u64,
     },
+    /// This driver emitted a checkpoint for `(sequence, digest)`.
+    CheckpointStarted {
+        /// Sequence number.
+        sequence: u64,
+        /// State digest.
+        digest: Digest,
+    },
+    /// A checkpoint reached quorum and is now stable.
+    CheckpointStable {
+        /// Sequence number.
+        sequence: u64,
+        /// State digest.
+        digest: Digest,
+    },
+    /// A peer requested state transfer from us.
+    StateTransferRequested {
+        /// Peer making the request.
+        peer: NodeId,
+        /// The sequence the peer is at.
+        from_sequence: u64,
+    },
+    /// A state transfer was received, verified, and installed.
+    StateTransferApplied {
+        /// Sequence number of the transferred checkpoint.
+        sequence: u64,
+        /// State digest.
+        digest: Digest,
+    },
 }
 
 // -------------------------------------------------------------------------
@@ -261,6 +353,16 @@ struct ViewChangeState {
     votes: BTreeMap<NodeId, BftViewChange>,
 }
 
+/// A checkpoint round: the `(sequence, digest)` being collected plus
+/// the signatures seen so far.
+#[derive(Clone, Debug)]
+struct CheckpointRound {
+    sequence: u64,
+    digest: Digest,
+    /// Witness signatures over the `bft_checkpoint` signing payload.
+    signatures: BTreeMap<NodeId, [u8; 64]>,
+}
+
 // -------------------------------------------------------------------------
 // BftDriver
 // -------------------------------------------------------------------------
@@ -286,8 +388,16 @@ where
     current: Option<InFlight>,
     outbound: VecDeque<BftOutbound>,
     events: VecDeque<BftEvent>,
-    /// Digest of the latest stable checkpoint. `[0; 32]` until M4b.3.
+    /// Digest of the latest stable checkpoint. `[0; 32]` until a
+    /// checkpoint reaches quorum.
     checkpoint_digest: Digest,
+    /// Sequence of the latest stable checkpoint. 0 until a checkpoint
+    /// reaches quorum.
+    checkpoint_sequence: u64,
+    /// Stable checkpoint round, retained for state-transfer responses.
+    stable_checkpoint: Option<CheckpointRound>,
+    /// In-flight checkpoint round, if any.
+    pending_checkpoint: Option<CheckpointRound>,
     /// View-change state.
     view_change: ViewChangeState,
 }
@@ -328,6 +438,9 @@ where
             outbound: VecDeque::new(),
             events: VecDeque::new(),
             checkpoint_digest: [0u8; 32],
+            checkpoint_sequence: 0,
+            stable_checkpoint: None,
+            pending_checkpoint: None,
             view_change: ViewChangeState::default(),
         })
     }
@@ -372,6 +485,34 @@ where
     /// The operation in flight, if any.
     pub fn current_operation(&self) -> Option<&Operation> {
         self.current.as_ref().map(|c| &c.operation)
+    }
+
+    /// The sequence number of the latest stable checkpoint, or 0 if
+    /// none has been reached.
+    pub fn checkpoint_sequence(&self) -> u64 {
+        self.checkpoint_sequence
+    }
+
+    /// The digest of the latest stable checkpoint, or `[0; 32]` if
+    /// none has been reached.
+    pub fn checkpoint_digest(&self) -> &Digest {
+        &self.checkpoint_digest
+    }
+
+    /// The number of signatures collected for the stable checkpoint,
+    /// if one has been reached.
+    pub fn stable_checkpoint_signatures(&self) -> Option<usize> {
+        self.stable_checkpoint.as_ref().map(|c| c.signatures.len())
+    }
+
+    /// The target view of an in-progress view change, if any.
+    pub fn view_change_target(&self) -> Option<u64> {
+        self.view_change.target_view
+    }
+
+    /// Number of view-change votes collected for the target view.
+    pub fn view_change_votes(&self) -> usize {
+        self.view_change.votes.len()
     }
 
     /// Read-only access to the handler.
@@ -448,7 +589,7 @@ where
         Ok(())
     }
 
-    // ---- inbound messages ----
+    // ---- inbound round messages ----
 
     /// Receive a `bft_preprepare`.
     ///
@@ -463,8 +604,8 @@ where
             return Err(Error::Bft("preprepare for wrong ring"));
         }
         if msg.view != self.view || msg.sequence != self.sequence {
-            // Stale or future view/sequence. M4b.2 handles view change;
-            // M4b.3 handles resync.
+            // Stale or future view/sequence. M4b.2 handles view
+            // change; M4b.3 handles resync via state transfer.
             return Ok(());
         }
         if *primary != self.membership.primary_for(self.view) {
@@ -697,20 +838,18 @@ where
         }
         self.state = RoundState::Idle;
         self.sequence = self.sequence.saturating_add(1);
+
+        // Checkpoint every CHECKPOINT_INTERVAL sequences. The
+        // condition is strict `> 0` so a driver that constructs at
+        // sequence 0 and applies its first operation does not
+        // immediately checkpoint.
+        if self.sequence > 0 && self.sequence % CHECKPOINT_INTERVAL == 0 {
+            self.start_checkpoint()?;
+        }
         Ok(())
     }
 
     // ---- view change ----
-
-    /// The target view of an in-progress view change, if any.
-    pub fn view_change_target(&self) -> Option<u64> {
-        self.view_change.target_view
-    }
-
-    /// Number of view-change votes collected for the target view.
-    pub fn view_change_votes(&self) -> usize {
-        self.view_change.votes.len()
-    }
 
     /// Begin a view change to `view + 1`.
     ///
@@ -729,7 +868,8 @@ where
         self.state = RoundState::Idle;
 
         // Include the digest of the aborted round, if any, so peers
-        // see what we had prepared. M4b.3 will make this actionable.
+        // see what we had prepared. M4b.3 does not yet re-propose
+        // prepared operations on the new view.
         let prepared_digests: Vec<Digest> = Vec::new();
 
         let mut msg = BftViewChange {
@@ -757,8 +897,7 @@ where
     ///
     /// If the driver has not yet started a view change, the vote
     /// triggers one. Votes for a different target view are ignored
-    /// until the current one resolves (M4b.3 will add view-change
-    /// re-entry).
+    /// until the current one resolves.
     pub fn on_view_change(
         &mut self,
         sender: &NodeId,
@@ -829,8 +968,8 @@ where
             return Err(Error::Bft("new view signature invalid"));
         }
 
-        // Decode and verify each view-change message, tracking signers
-        // to enforce distinctness.
+        // Decode and verify each view-change message, tracking
+        // signers to enforce distinctness.
         let mut signers: BTreeMap<NodeId, ()> = BTreeMap::new();
         for bytes in &msg.view_change_messages {
             let vc = BftViewChange::from_bytes(bytes)?;
@@ -851,8 +990,6 @@ where
         if signers.len() < self.membership.quorum() {
             return Err(Error::Bft("new view has too few view-change messages"));
         }
-
-        // M4b.3 will verify prepared_messages / checkpoint_messages here.
 
         self.adopt_view(msg.view);
         Ok(())
@@ -883,8 +1020,8 @@ where
             ring_id: self.ring_id,
             view: target_view,
             view_change_messages,
-            prepared_messages: Vec::new(),   // M4b.3
-            checkpoint_messages: Vec::new(), // M4b.3
+            prepared_messages: Vec::new(),
+            checkpoint_messages: Vec::new(),
             primary_sig: [0u8; 64],
         };
         let payload = msg.signing_payload()?;
@@ -898,7 +1035,8 @@ where
     }
 
     /// Adopt `target_view`, resetting any in-flight round and
-    /// clearing view-change state.
+    /// clearing view-change state. Stable and pending checkpoints
+    /// are unaffected: they are keyed by sequence, not by view.
     fn adopt_view(&mut self, target_view: u64) {
         self.view = target_view;
         self.current = None;
@@ -929,6 +1067,275 @@ where
             }
         }
         Ok(None)
+    }
+
+    // ---- checkpointing ----
+
+    /// Begin a checkpoint round for the current sequence.
+    ///
+    /// Called automatically every `CHECKPOINT_INTERVAL` sequences.
+    /// Public so callers can force a checkpoint outside the interval
+    /// (e.g. before an orderly shutdown).
+    ///
+    /// If a checkpoint round for this sequence is already in flight,
+    /// this is a no-op.
+    pub fn start_checkpoint(&mut self) -> Result<()> {
+        if let Some(p) = self.pending_checkpoint.as_ref() {
+            if p.sequence == self.sequence {
+                return Ok(());
+            }
+        }
+        let digest = self.handler.state_digest();
+
+        let mut msg = BftCheckpoint {
+            ring_id: self.ring_id,
+            sequence: self.sequence,
+            state_digest: digest,
+            witness_sig: [0u8; 64],
+        };
+        let payload = msg.signing_payload()?;
+        msg.witness_sig = self.signer.sign_ed25519(&payload);
+
+        let mut signatures = BTreeMap::new();
+        signatures.insert(self.local, msg.witness_sig);
+
+        self.pending_checkpoint = Some(CheckpointRound {
+            sequence: self.sequence,
+            digest,
+            signatures,
+        });
+        self.events.push_back(BftEvent::CheckpointStarted {
+            sequence: self.sequence,
+            digest,
+        });
+        self.outbound.push_back(BftOutbound::Checkpoint(msg));
+        self.maybe_promote_checkpoint();
+        Ok(())
+    }
+
+    /// Receive a `bft_checkpoint`.
+    pub fn on_checkpoint(
+        &mut self,
+        sender: &NodeId,
+        msg: &BftCheckpoint,
+    ) -> Result<()> {
+        if msg.ring_id != self.ring_id {
+            return Err(Error::Bft("checkpoint for wrong ring"));
+        }
+        if !self.membership.is_member(sender) {
+            return Err(Error::Bft("checkpoint from non-member"));
+        }
+        if !msg.verify(sender, &self.verifier)? {
+            return Err(Error::Bft("checkpoint signature invalid"));
+        }
+        // We can only participate in a checkpoint for a sequence we
+        // have reached; a checkpoint for a future sequence means the
+        // sender is ahead of us and we should request a state
+        // transfer rather than accumulate.
+        if msg.sequence > self.sequence {
+            return Ok(());
+        }
+        // A checkpoint for a sequence at or before our stable
+        // checkpoint is stale. Until a checkpoint is stable,
+        // `checkpoint_sequence` is 0 and does not imply "already at
+        // sequence 0".
+        if let Some(stable) = self.stable_checkpoint.as_ref() {
+            if msg.sequence <= stable.sequence {
+                return Ok(());
+            }
+        }
+
+        match self.pending_checkpoint.as_mut() {
+            Some(p) if p.sequence == msg.sequence && p.digest == msg.state_digest => {
+                p.signatures.insert(*sender, msg.witness_sig);
+            }
+            Some(_) => {
+                // A different (sequence, digest) is in flight; ignore
+                // this one. The next checkpoint round will pick it
+                // up.
+                return Ok(());
+            }
+            None => {
+                let mut signatures = BTreeMap::new();
+                signatures.insert(*sender, msg.witness_sig);
+                self.pending_checkpoint = Some(CheckpointRound {
+                    sequence: msg.sequence,
+                    digest: msg.state_digest,
+                    signatures,
+                });
+            }
+        }
+        self.maybe_promote_checkpoint();
+        Ok(())
+    }
+
+    fn maybe_promote_checkpoint(&mut self) {
+        let quorum = self.membership.quorum();
+        let promote = matches!(
+            self.pending_checkpoint.as_ref(),
+            Some(p) if p.signatures.len() >= quorum
+        );
+        if !promote {
+            return;
+        }
+        let round = self.pending_checkpoint.take().unwrap();
+        self.checkpoint_sequence = round.sequence;
+        self.checkpoint_digest = round.digest;
+        self.events.push_back(BftEvent::CheckpointStable {
+            sequence: round.sequence,
+            digest: round.digest,
+        });
+        self.stable_checkpoint = Some(round);
+    }
+
+    // ---- state transfer ----
+
+    /// Request a state transfer from a peer with a newer checkpoint.
+    ///
+    /// Emits a `bft_state_transfer` with the driver's current
+    /// `checkpoint_sequence` (or 0 if none), empty state, and an
+    /// empty ring signature. Peers with a newer stable checkpoint
+    /// will respond with a fully-populated `bft_state_transfer`.
+    pub fn request_state_transfer(&mut self) -> Result<()> {
+        let msg = BftStateTransfer {
+            ring_id: self.ring_id,
+            checkpoint_sequence: self.checkpoint_sequence,
+            state: Vec::new(),
+            checkpoint_digest: self.checkpoint_digest,
+            ring_signature: RingSignature::Individual(IndividualRingSig {
+                signatures: Vec::new(),
+                signers: Vec::new(),
+            }),
+        };
+        self.outbound
+            .push_back(BftOutbound::StateTransferRequest(msg));
+        Ok(())
+    }
+
+    /// Receive a `bft_state_transfer`.
+    ///
+    /// Distinguishes requests from responses by inspecting the ring
+    /// signature: an empty `IndividualRingSig` is a request, a
+    /// populated one is a response.
+    ///
+    /// On a request, if the driver has a stable checkpoint newer than
+    /// the requester's `checkpoint_sequence`, it emits a response.
+    ///
+    /// On a response, the driver verifies the ring signature against
+    /// the `bft_checkpoint` payload for
+    /// `(ring_id, checkpoint_sequence, checkpoint_digest)`, checks
+    /// that `checkpoint_digest` is the SHA-256 of `state`, installs
+    /// the state via the handler, and resumes from the checkpoint
+    /// sequence.
+    pub fn on_state_transfer(
+        &mut self,
+        sender: &NodeId,
+        msg: &BftStateTransfer,
+    ) -> Result<()> {
+        if msg.ring_id != self.ring_id {
+            return Err(Error::Bft("state transfer for wrong ring"));
+        }
+        if !self.membership.is_member(sender) {
+            return Err(Error::Bft("state transfer from non-member"));
+        }
+
+        let is_request = match &msg.ring_signature {
+            RingSignature::Individual(irs) => irs.signatures.is_empty(),
+            RingSignature::Frost(_) => false,
+        };
+
+        if is_request {
+            self.handle_state_transfer_request(sender, msg)
+        } else {
+            self.handle_state_transfer_response(sender, msg)
+        }
+    }
+
+    fn handle_state_transfer_request(
+        &mut self,
+        sender: &NodeId,
+        msg: &BftStateTransfer,
+    ) -> Result<()> {
+        self.events.push_back(BftEvent::StateTransferRequested {
+            peer: *sender,
+            from_sequence: msg.checkpoint_sequence,
+        });
+
+        let stable = match self.stable_checkpoint.as_ref() {
+            Some(s) => s.clone(),
+            None => return Ok(()), // nothing to send
+        };
+        if stable.sequence <= msg.checkpoint_sequence {
+            return Ok(()); // requester is caught up or ahead
+        }
+
+        // Build the ring signature from the checkpoint signatures.
+        // BTreeMap iteration yields signers in canonical NodeId order,
+        // which matches the IndividualRingSig contract.
+        let mut signers = Vec::with_capacity(stable.signatures.len());
+        let mut signatures = Vec::with_capacity(stable.signatures.len());
+        for (signer, sig) in &stable.signatures {
+            signers.push(*signer);
+            signatures.push(*sig);
+        }
+
+        let state = self.handler.state_bytes();
+        let response = BftStateTransfer {
+            ring_id: self.ring_id,
+            checkpoint_sequence: stable.sequence,
+            state,
+            checkpoint_digest: stable.digest,
+            ring_signature: RingSignature::Individual(IndividualRingSig {
+                signatures,
+                signers,
+            }),
+        };
+        self.outbound
+            .push_back(BftOutbound::StateTransferResponse(response));
+        Ok(())
+    }
+
+    fn handle_state_transfer_response(
+        &mut self,
+        _sender: &NodeId,
+        msg: &BftStateTransfer,
+    ) -> Result<()> {
+        // Reject a state transfer for a sequence we have already
+        // passed. It would roll our state backwards.
+        if msg.checkpoint_sequence <= self.checkpoint_sequence {
+            return Ok(());
+        }
+
+        // Verify the ring signature against the checkpoint payload.
+        if !verify_checkpoint_ring_sig(
+            &self.ring_id,
+            msg.checkpoint_sequence,
+            &msg.checkpoint_digest,
+            &msg.ring_signature,
+            &self.membership,
+            &self.verifier,
+        ) {
+            return Err(Error::Bft("state transfer ring signature invalid"));
+        }
+
+        // Verify the digest matches the transmitted state.
+        let computed = sha256(&msg.state);
+        if computed != msg.checkpoint_digest {
+            return Err(Error::Bft("state transfer digest mismatch"));
+        }
+
+        // Install.
+        self.handler.apply_state(&msg.state)?;
+        self.checkpoint_sequence = msg.checkpoint_sequence;
+        self.checkpoint_digest = msg.checkpoint_digest;
+        self.sequence = msg.checkpoint_sequence;
+        self.current = None;
+        self.state = RoundState::Idle;
+        self.events.push_back(BftEvent::StateTransferApplied {
+            sequence: msg.checkpoint_sequence,
+            digest: msg.checkpoint_digest,
+        });
+        Ok(())
     }
 }
 
@@ -1000,21 +1407,81 @@ fn compute_digest_parts(
     sequence: u64,
     operation: &Operation,
 ) -> Result<Digest> {
-    use sha2::{Digest as _, Sha256};
-
-    let op_cbor = quip_core::cbor::encode(&operation.to_cbor())?;
+    let op_cbor = encode(&operation.to_cbor())?;
     let mut preimage = Vec::with_capacity(32 + 8 + 8 + op_cbor.len());
     preimage.extend_from_slice(ring_id);
     preimage.extend_from_slice(&view.to_be_bytes());
     preimage.extend_from_slice(&sequence.to_be_bytes());
     preimage.extend_from_slice(&op_cbor);
+    Ok(sha256(&preimage))
+}
 
+/// SHA-256 of `data`, as a 32-byte array.
+fn sha256(data: &[u8]) -> Digest {
+    use sha2::{Digest as _, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(&preimage);
+    hasher.update(data);
     let out = hasher.finalize();
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(&out);
-    Ok(digest)
+    let mut d = [0u8; 32];
+    d.copy_from_slice(&out);
+    d
+}
+
+/// Verify a ring signature over a checkpoint.
+///
+/// Each signature is checked against the `bft_checkpoint` signing
+/// payload for `(ring_id, checkpoint_sequence, checkpoint_digest)`,
+/// not against the state transfer's own payload. See the module-level
+/// "S8" note for why.
+///
+/// FROST ring signatures are not verified in this revision: the
+/// function returns `false` and the caller rejects the transfer.
+fn verify_checkpoint_ring_sig(
+    ring_id: &RingId,
+    checkpoint_sequence: u64,
+    checkpoint_digest: &Digest,
+    ring_sig: &RingSignature,
+    membership: &RingMembership,
+    verifier: &impl Verifier,
+) -> bool {
+    // Reconstruct the checkpoint signing payload for the transferred
+    // sequence and digest.
+    let payload = match (BftCheckpoint {
+        ring_id: *ring_id,
+        sequence: checkpoint_sequence,
+        state_digest: *checkpoint_digest,
+        witness_sig: [0u8; 64],
+    })
+    .signing_payload()
+    {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+
+    let irs = match ring_sig {
+        RingSignature::Individual(irs) => irs,
+        RingSignature::Frost(_) => return false,
+    };
+    if irs.signatures.len() != irs.signers.len() {
+        return false;
+    }
+    if irs.signatures.len() < membership.quorum() {
+        return false;
+    }
+
+    let mut seen: BTreeMap<NodeId, ()> = BTreeMap::new();
+    for (signer, sig) in irs.signers.iter().zip(irs.signatures.iter()) {
+        if !membership.is_member(signer) {
+            return false;
+        }
+        if seen.insert(*signer, ()).is_some() {
+            return false; // duplicate signer
+        }
+        if !verifier.verify_ed25519(signer, &payload, sig) {
+            return false;
+        }
+    }
+    true
 }
 
 // -------------------------------------------------------------------------
@@ -1025,7 +1492,6 @@ fn compute_digest_parts(
 mod tests {
     use super::*;
     use crate::crypto::{Ed25519Signer, Ed25519Verifier};
-    use alloc::vec;
     use quip_core::cbor::CborValue;
 
     fn seed(i: u8) -> [u8; 32] {
@@ -1053,9 +1519,251 @@ mod tests {
         }
     }
 
-    // ---- view change tests ----
+    /// A handler that tracks a single u64 counter. Each `apply`
+    /// increments it; state_bytes is the big-endian counter;
+    /// apply_state installs a transmitted counter.
+    #[derive(Default)]
+    struct CountingHandler {
+        counter: u64,
+        applied: Vec<(RingId, u64, Operation)>,
+    }
 
-    /// Pump outbounds including view-change and new-view messages.
+    impl BftHandler for CountingHandler {
+        fn apply(
+            &mut self,
+            ring_id: &RingId,
+            sequence: u64,
+            operation: &Operation,
+        ) -> Result<()> {
+            self.counter = self.counter.saturating_add(1);
+            self.applied.push((*ring_id, sequence, operation.clone()));
+            Ok(())
+        }
+
+        fn state_digest(&self) -> Digest {
+            sha256(&self.counter.to_be_bytes())
+        }
+
+        fn state_bytes(&self) -> Vec<u8> {
+            self.counter.to_be_bytes().to_vec()
+        }
+
+        fn apply_state(&mut self, state: &[u8]) -> Result<()> {
+            if state.len() != 8 {
+                return Err(Error::Bft("counting state must be 8 bytes"));
+            }
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(state);
+            self.counter = u64::from_be_bytes(arr);
+            Ok(())
+        }
+    }
+
+    /// A handler that records operations but has no meaningful state
+    /// (the trait's default state methods apply).
+    #[derive(Default)]
+    struct RecordingHandler {
+        applied: Vec<(RingId, u64, Operation)>,
+    }
+
+    impl BftHandler for RecordingHandler {
+        fn apply(
+            &mut self,
+            ring_id: &RingId,
+            sequence: u64,
+            operation: &Operation,
+        ) -> Result<()> {
+            self.applied.push((*ring_id, sequence, operation.clone()));
+            Ok(())
+        }
+    }
+
+    struct FailingHandler;
+    impl BftHandler for FailingHandler {
+        fn apply(&mut self, _: &RingId, _: u64, _: &Operation) -> Result<()> {
+            Err(Error::Bft("handler refused"))
+        }
+    }
+
+    type Driver = BftDriver<Ed25519Signer, Ed25519Verifier, RecordingHandler>;
+    type CountingDriver = BftDriver<Ed25519Signer, Ed25519Verifier, CountingHandler>;
+
+    /// Build drivers in canonical membership order, so `drivers[i]`
+    /// has NodeId `m.members()[i]`.
+    fn drivers_in_order<H: BftHandler>(
+        m: &RingMembership,
+        signers: Vec<Ed25519Signer>,
+        handlers: impl Fn() -> H,
+        ring_id: RingId,
+        view: u64,
+    ) -> Vec<BftDriver<Ed25519Signer, Ed25519Verifier, H>> {
+        let by_id: BTreeMap<NodeId, Ed25519Signer> = signers
+            .into_iter()
+            .map(|s| (s.public_key(), s))
+            .collect();
+        m.members()
+            .iter()
+            .map(|id| {
+                BftDriver::new(
+                    by_id[id].clone(),
+                    Ed25519Verifier,
+                    handlers(),
+                    ring_id,
+                    m.clone(),
+                    view,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn build_ring() -> (RingMembership, Vec<Driver>) {
+        let (m, signers) = ring7();
+        let drivers = drivers_in_order(
+            &m,
+            signers,
+            RecordingHandler::default,
+            [1; 32],
+            0,
+        );
+        (m, drivers)
+    }
+
+    fn build_counting_ring() -> (RingMembership, Vec<CountingDriver>) {
+        let (m, signers) = ring7();
+        let drivers = drivers_in_order(
+            &m,
+            signers,
+            CountingHandler::default,
+            [1; 32],
+            0,
+        );
+        (m, drivers)
+    }
+
+    /// Propagate messages until quiescent. Returns collected events
+    /// per driver.
+    fn pump(
+        drivers: &mut [Driver],
+        membership: &RingMembership,
+    ) -> Vec<Vec<BftEvent>> {
+        let n = drivers.len();
+        let mut all: Vec<Vec<BftEvent>> = (0..n).map(|_| Vec::new()).collect();
+        for _ in 0..20 {
+            for (i, d) in drivers.iter_mut().enumerate() {
+                all[i].extend(d.drain_events());
+            }
+            let mut msgs: Vec<(usize, BftOutbound)> = Vec::new();
+            for (i, d) in drivers.iter_mut().enumerate() {
+                for out in d.drain_outbound() {
+                    msgs.push((i, out));
+                }
+            }
+            if msgs.is_empty() {
+                break;
+            }
+            for (sender_idx, out) in msgs {
+                let sender = membership.members()[sender_idx];
+                for (i, d) in drivers.iter_mut().enumerate() {
+                    if i == sender_idx {
+                        continue;
+                    }
+                    let _ = match &out {
+                        BftOutbound::Preprepare(m) => d.on_preprepare(&sender, m),
+                        BftOutbound::Prepare(m) => d.on_prepare(&sender, m),
+                        BftOutbound::Precommit(m) => d.on_precommit(&sender, m),
+                        BftOutbound::Commit(m) => d.on_commit(&sender, m),
+                        BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
+                        BftOutbound::NewView(m) => d.on_new_view(&sender, m),
+                        BftOutbound::Checkpoint(m) => d.on_checkpoint(&sender, m),
+                        BftOutbound::StateTransferRequest(m)
+                        | BftOutbound::StateTransferResponse(m) => {
+                            d.on_state_transfer(&sender, m)
+                        }
+                    };
+                }
+            }
+        }
+        all
+    }
+
+    /// Deliver only checkpoint messages, so checkpoint stability can
+    /// be tested in isolation from state transfers.
+    fn pump_checkpoints(
+        drivers: &mut [CountingDriver],
+        membership: &RingMembership,
+    ) {
+        for _ in 0..20 {
+            let mut msgs: Vec<(usize, BftOutbound)> = Vec::new();
+            for (i, d) in drivers.iter_mut().enumerate() {
+                for out in d.drain_outbound() {
+                    msgs.push((i, out));
+                }
+            }
+            if msgs.is_empty() {
+                return;
+            }
+            for (sender_idx, out) in msgs {
+                let sender = membership.members()[sender_idx];
+                for (i, d) in drivers.iter_mut().enumerate() {
+                    if i == sender_idx {
+                        continue;
+                    }
+                    if let BftOutbound::Checkpoint(m) = &out {
+                        let _ = d.on_checkpoint(&sender, m);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pump messages including checkpoints and state transfers, used
+    /// by the counting-handler tests.
+    fn pump_counting(
+        drivers: &mut [CountingDriver],
+        membership: &RingMembership,
+    ) -> Vec<Vec<BftEvent>> {
+        let n = drivers.len();
+        let mut all: Vec<Vec<BftEvent>> = (0..n).map(|_| Vec::new()).collect();
+        for _ in 0..20 {
+            for (i, d) in drivers.iter_mut().enumerate() {
+                all[i].extend(d.drain_events());
+            }
+            let mut msgs: Vec<(usize, BftOutbound)> = Vec::new();
+            for (i, d) in drivers.iter_mut().enumerate() {
+                for out in d.drain_outbound() {
+                    msgs.push((i, out));
+                }
+            }
+            if msgs.is_empty() {
+                break;
+            }
+            for (sender_idx, out) in msgs {
+                let sender = membership.members()[sender_idx];
+                for (i, d) in drivers.iter_mut().enumerate() {
+                    if i == sender_idx {
+                        continue;
+                    }
+                    let _ = match &out {
+                        BftOutbound::Preprepare(m) => d.on_preprepare(&sender, m),
+                        BftOutbound::Prepare(m) => d.on_prepare(&sender, m),
+                        BftOutbound::Precommit(m) => d.on_precommit(&sender, m),
+                        BftOutbound::Commit(m) => d.on_commit(&sender, m),
+                        BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
+                        BftOutbound::NewView(m) => d.on_new_view(&sender, m),
+                        BftOutbound::Checkpoint(m) => d.on_checkpoint(&sender, m),
+                        BftOutbound::StateTransferRequest(m)
+                        | BftOutbound::StateTransferResponse(m) => {
+                            d.on_state_transfer(&sender, m)
+                        }
+                    };
+                }
+            }
+        }
+        all
+    }
+
+    /// Pump view-change messages only.
     fn pump_view_change(
         drivers: &mut [Driver],
         membership: &RingMembership,
@@ -1079,133 +1787,11 @@ mod tests {
                     let _ = match &out {
                         BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
                         BftOutbound::NewView(m) => d.on_new_view(&sender, m),
-                        // Round messages during view change are stale.
                         _ => Ok(()),
                     };
                 }
             }
         }
-    }
-
-    #[test]
-    fn start_view_change_emits_view_change_vote() {
-        let (m, mut drivers) = build_ring();
-        drivers[1].start_view_change().unwrap();
-        let ev = drivers[1].drain_events();
-        assert!(ev
-            .iter()
-            .any(|e| matches!(e, BftEvent::ViewChangeInitiated { target_view: 1 })));
-        let out = drivers[1].drain_outbound();
-        assert_eq!(out.len(), 1);
-        match &out[0] {
-            BftOutbound::ViewChange(vc) => {
-                assert_eq!(vc.new_view, 1);
-                assert_eq!(vc.ring_id, [1; 32]);
-            }
-            other => panic!("expected ViewChange, got {other:?}"),
-        }
-        assert_eq!(drivers[1].view_change_votes(), 1);
-        // view() unchanged until the new-view message is accepted.
-        assert_eq!(drivers[1].view(), 0);
-        let _ = m;
-    }
-
-    #[test]
-    fn view_change_promotes_new_primary() {
-        let (m, mut drivers) = build_ring();
-        // Every witness suspects the primary.
-        for d in &mut drivers {
-            d.start_view_change().unwrap();
-        }
-        pump_view_change(&mut drivers, &m);
-        for d in &drivers {
-            assert_eq!(d.view(), 1, "all drivers adopt view 1");
-        }
-    }
-
-    #[test]
-    fn new_view_rejected_below_quorum() {
-        // 7-member ring. Have only 4 members vote. The primary for
-        // view 1 is members[1]; collect its own vote plus three more
-        // — still below quorum (5) — and confirm no new view is emitted.
-        let (m, mut drivers) = build_ring();
-        for d in drivers.iter_mut().take(4) {
-            d.start_view_change().unwrap();
-        }
-        pump_view_change(&mut drivers, &m);
-        for d in &drivers {
-            assert_eq!(d.view(), 0, "no view change without quorum");
-        }
-    }
-
-    #[test]
-    fn stale_view_change_vote_is_ignored() {
-        let (m, mut drivers) = build_ring();
-        // Advance to view 1 via a full view change.
-        for d in &mut drivers {
-            d.start_view_change().unwrap();
-        }
-        pump_view_change(&mut drivers, &m);
-        for d in &drivers {
-            assert_eq!(d.view(), 1);
-        }
-        // A view-change vote for view 0 is now stale.
-        let stale = BftViewChange {
-            ring_id: [1; 32],
-            new_view: 0,
-            last_sequence: 0,
-            prepared_digests: vec![],
-            checkpoint_digest: [0; 32],
-            witness_sig: [0; 64],
-        };
-        let sender = m.members()[2];
-        let r = drivers[3].on_view_change(&sender, &stale);
-        assert!(r.is_ok(), "stale vote silently ignored");
-        assert_eq!(drivers[3].view(), 1);
-    }
-
-    #[test]
-    fn new_view_from_wrong_sender_rejected() {
-        let (m, mut drivers) = build_ring();
-        for d in &mut drivers {
-            d.start_view_change().unwrap();
-        }
-        pump_view_change(&mut drivers, &m);
-        // Build a fresh new-view from the wrong sender.
-        let mut msg = BftNewView {
-            ring_id: [1; 32],
-            view: 2,
-            view_change_messages: vec![],
-            prepared_messages: vec![],
-            checkpoint_messages: vec![],
-            primary_sig: [0; 64],
-        };
-        let payload = msg.signing_payload().unwrap();
-        msg.primary_sig = drivers[0].signer.sign_ed25519(&payload);
-        let not_primary = m.members()[0]; // primary for view 0, not 2
-        let r = drivers[3].on_new_view(&not_primary, &msg);
-        assert!(r.is_err());
-    }
-
-    #[test]
-    fn duplicate_view_change_votes_are_deduped() {
-        let (m, mut drivers) = build_ring();
-        let m1 = m.members()[1];
-        let m2 = m.members()[2];
-        drivers[1].start_view_change().unwrap();
-        let out = drivers[1].drain_outbound();
-        let vc = match &out[0] {
-            BftOutbound::ViewChange(v) => v.clone(),
-            _ => panic!("expected ViewChange"),
-        };
-        drivers[3].on_view_change(&m1, &vc).unwrap();
-        let before = drivers[3].view_change_votes();
-        // Same sender, same message — should be ignored.
-        drivers[3].on_view_change(&m1, &vc).unwrap();
-        assert_eq!(drivers[3].view_change_votes(), before);
-        // Different sender, same message content — this is a distinct
-        // vote and should be accepted (or rejected as invalid sig).
-        let _ = drivers[3].on_view_change(&m2, &vc);
     }
 
     // ---- RingMembership ----
@@ -1222,7 +1808,7 @@ mod tests {
     #[test]
     fn ring_dedups() {
         let mut ids: Vec<NodeId> = (1..=7).map(|i| [i; 32]).collect();
-        ids.push([1; 32]); // duplicate
+        ids.push([1; 32]);
         let m = RingMembership::new(ids).unwrap();
         assert_eq!(m.len(), 7);
     }
@@ -1255,32 +1841,6 @@ mod tests {
         assert_eq!(m.primary_for(8), m.members()[1]);
     }
 
-    // ---- BftHandler ----
-
-    #[derive(Default)]
-    struct RecordingHandler {
-        applied: Vec<(RingId, u64, Operation)>,
-    }
-
-    impl BftHandler for RecordingHandler {
-        fn apply(
-            &mut self,
-            ring_id: &RingId,
-            sequence: u64,
-            operation: &Operation,
-        ) -> Result<()> {
-            self.applied.push((*ring_id, sequence, operation.clone()));
-            Ok(())
-        }
-    }
-
-    struct FailingHandler;
-    impl BftHandler for FailingHandler {
-        fn apply(&mut self, _: &RingId, _: u64, _: &Operation) -> Result<()> {
-            Err(Error::Bft("handler refused"))
-        }
-    }
-
     // ---- driver construction ----
 
     #[test]
@@ -1303,7 +1863,6 @@ mod tests {
     #[test]
     fn non_primary_cannot_start() {
         let (m, signers) = ring7();
-        // signers[1] is not the primary for view 0.
         let mut d = BftDriver::new(
             signers.into_iter().nth(1).unwrap(),
             Ed25519Verifier,
@@ -1341,7 +1900,6 @@ mod tests {
         assert!(matches!(out[1], BftOutbound::Prepare(_)));
         assert_eq!(*d.state(), RoundState::PrePrepared);
 
-        // Events: one Proposed.
         let ev = d.drain_events();
         assert_eq!(ev.len(), 1);
         assert!(matches!(ev[0], BftEvent::Proposed { .. }));
@@ -1349,99 +1907,10 @@ mod tests {
 
     // ---- full round ----
 
-    type Driver = BftDriver<Ed25519Signer, Ed25519Verifier, RecordingHandler>;
-
-    fn build_ring() -> (RingMembership, Vec<Driver>) {
-        let (m, signers) = ring7();
-        let drivers = drivers_in_order(
-            &m,
-            signers,
-            RecordingHandler::default,
-            [1; 32],
-            0,
-        );
-        (m, drivers)
-    }
-
-    /// Build drivers in canonical membership order, so `drivers[i]` has
-    /// NodeId `m.members()[i]`.
-    fn drivers_in_order<H: BftHandler>(
-        m: &RingMembership,
-        signers: Vec<Ed25519Signer>,
-        handlers: impl Fn() -> H,
-        ring_id: RingId,
-        view: u64,
-    ) -> Vec<BftDriver<Ed25519Signer, Ed25519Verifier, H>> {
-        let by_id: BTreeMap<NodeId, Ed25519Signer> = signers
-            .into_iter()
-            .map(|s| (s.public_key(), s))
-            .collect();
-        m.members()
-            .iter()
-            .map(|id| {
-                BftDriver::new(
-                    by_id[id].clone(),
-                    Ed25519Verifier,
-                    handlers(),
-                    ring_id,
-                    m.clone(),
-                    view,
-                )
-                .unwrap()
-            })
-            .collect()
-    }
-
-    /// Propagate messages until quiescent. Returns collected events
-    /// per driver.
-    fn pump(
-        drivers: &mut [Driver],
-        membership: &RingMembership,
-    ) -> Vec<Vec<BftEvent>> {
-        let n = drivers.len();
-        let mut all: Vec<Vec<BftEvent>> = (0..n).map(|_| Vec::new()).collect();
-        for _ in 0..20 {
-            for (i, d) in drivers.iter_mut().enumerate() {
-                all[i].extend(d.drain_events());
-            }
-            let mut msgs: Vec<(usize, BftOutbound)> = Vec::new();
-            for (i, d) in drivers.iter_mut().enumerate() {
-                for out in d.drain_outbound() {
-                    msgs.push((i, out));
-                }
-            }
-            if msgs.is_empty() {
-                break;
-            }
-            for (sender_idx, out) in msgs {
-                let sender = membership.members()[sender_idx];
-                for (i, d) in drivers.iter_mut().enumerate() {
-                    if i == sender_idx {
-                        continue;
-                    }
-                    // We ignore errors: a rogue message from one driver
-                    // should not abort the whole pump.
-                    let _ = match &out {
-                        BftOutbound::Preprepare(m) => d.on_preprepare(&sender, m),
-                        BftOutbound::Prepare(m) => d.on_prepare(&sender, m),
-                        BftOutbound::Precommit(m) => d.on_precommit(&sender, m),
-                        BftOutbound::Commit(m) => d.on_commit(&sender, m),
-                        BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
-                        BftOutbound::NewView(m) => d.on_new_view(&sender, m),
-                    };
-                }
-            }
-        }
-        all
-    }
-
     #[test]
     fn full_round_applies_on_all_nodes() {
         let (m, mut drivers) = build_ring();
-        // The primary for view 0 is drivers[0] because canonical order
-        // matches the sort order of the seeds.
         drivers[0].start(operation("key_rotation")).unwrap();
-
         let events = pump(&mut drivers, &m);
 
         for (i, evs) in events.iter().enumerate() {
@@ -1459,20 +1928,7 @@ mod tests {
     }
 
     #[test]
-    fn vote_counts_are_quorum_sized() {
-        // Confirm the round completes with the 5-of-7 quorum, not
-        // fewer, by checking the sequence advanced.
-        let (m, mut drivers) = build_ring();
-        drivers[0].start(operation("revocation")).unwrap();
-        let _ = pump(&mut drivers, &m);
-        for d in &drivers {
-            assert_eq!(d.sequence(), 1);
-        }
-    }
-
-    #[test]
     fn apply_failure_is_an_event_not_an_error() {
-        // A 4-member DEGRADED ring where 3 votes = quorum.
         let signers: Vec<_> = (1..=4).map(signer).collect();
         let ids: Vec<NodeId> = signers.iter().map(|s| s.public_key()).collect();
         let m4 = RingMembership::new(ids).unwrap();
@@ -1528,11 +1984,341 @@ mod tests {
                         BftOutbound::Commit(m) => d.on_commit(&sender, m),
                         BftOutbound::ViewChange(m) => d.on_view_change(&sender, m),
                         BftOutbound::NewView(m) => d.on_new_view(&sender, m),
+                        BftOutbound::Checkpoint(m) => d.on_checkpoint(&sender, m),
+                        BftOutbound::StateTransferRequest(m)
+                        | BftOutbound::StateTransferResponse(m) => {
+                            d.on_state_transfer(&sender, m)
+                        }
                     };
                 }
             }
         }
         all
+    }
+
+    // ---- view change ----
+
+    #[test]
+    fn start_view_change_emits_view_change_vote() {
+        let (m, mut drivers) = build_ring();
+        drivers[1].start_view_change().unwrap();
+        let ev = drivers[1].drain_events();
+        assert!(ev
+            .iter()
+            .any(|e| matches!(e, BftEvent::ViewChangeInitiated { target_view: 1 })));
+        let out = drivers[1].drain_outbound();
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            BftOutbound::ViewChange(vc) => {
+                assert_eq!(vc.new_view, 1);
+                assert_eq!(vc.ring_id, [1; 32]);
+            }
+            other => panic!("expected ViewChange, got {other:?}"),
+        }
+        assert_eq!(drivers[1].view_change_votes(), 1);
+        assert_eq!(drivers[1].view(), 0);
+        let _ = m;
+    }
+
+    #[test]
+    fn view_change_promotes_new_primary() {
+        let (m, mut drivers) = build_ring();
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.view(), 1, "all drivers adopt view 1");
+        }
+    }
+
+    #[test]
+    fn new_view_rejected_below_quorum() {
+        let (m, mut drivers) = build_ring();
+        for d in drivers.iter_mut().take(4) {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.view(), 0, "no view change without quorum");
+        }
+    }
+
+    #[test]
+    fn stale_view_change_vote_is_ignored() {
+        let (m, mut drivers) = build_ring();
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.view(), 1);
+        }
+        let stale = BftViewChange {
+            ring_id: [1; 32],
+            new_view: 0,
+            last_sequence: 0,
+            prepared_digests: vec![],
+            checkpoint_digest: [0; 32],
+            witness_sig: [0; 64],
+        };
+        let sender = m.members()[2];
+        let r = drivers[3].on_view_change(&sender, &stale);
+        assert!(r.is_ok(), "stale vote silently ignored");
+        assert_eq!(drivers[3].view(), 1);
+    }
+
+    #[test]
+    fn new_view_from_wrong_sender_rejected() {
+        let (m, mut drivers) = build_ring();
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        let mut msg = BftNewView {
+            ring_id: [1; 32],
+            view: 2,
+            view_change_messages: vec![],
+            prepared_messages: vec![],
+            checkpoint_messages: vec![],
+            primary_sig: [0; 64],
+        };
+        let payload = msg.signing_payload().unwrap();
+        msg.primary_sig = drivers[0].signer.sign_ed25519(&payload);
+        let not_primary = m.members()[0];
+        let r = drivers[3].on_new_view(&not_primary, &msg);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn duplicate_view_change_votes_are_deduped() {
+        let (m, mut drivers) = build_ring();
+        let m1 = m.members()[1];
+        let m2 = m.members()[2];
+        drivers[1].start_view_change().unwrap();
+        let out = drivers[1].drain_outbound();
+        let vc = match &out[0] {
+            BftOutbound::ViewChange(v) => v.clone(),
+            _ => panic!("expected ViewChange"),
+        };
+        drivers[3].on_view_change(&m1, &vc).unwrap();
+        let before = drivers[3].view_change_votes();
+        drivers[3].on_view_change(&m1, &vc).unwrap();
+        assert_eq!(drivers[3].view_change_votes(), before);
+        let _ = drivers[3].on_view_change(&m2, &vc);
+    }
+
+    // ---- checkpointing ----
+
+    #[test]
+    fn start_checkpoint_emits_signed_checkpoint() {
+        let (m, mut drivers) = build_counting_ring();
+        let d = &mut drivers[2];
+        d.start_checkpoint().unwrap();
+        let out = d.drain_outbound();
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            BftOutbound::Checkpoint(cp) => {
+                assert_eq!(cp.ring_id, [1; 32]);
+                assert_eq!(cp.sequence, 0);
+                assert_ne!(cp.witness_sig, [0u8; 64]);
+            }
+            other => panic!("expected Checkpoint, got {other:?}"),
+        }
+        let _ = m;
+    }
+
+    #[test]
+    fn checkpoint_reaches_stability_at_quorum() {
+        let (m, mut drivers) = build_counting_ring();
+        for d in &mut drivers {
+            d.start_checkpoint().unwrap();
+        }
+        pump_checkpoints(&mut drivers, &m);
+        for (i, d) in drivers.iter().enumerate() {
+            assert!(
+                d.stable_checkpoint_signatures().is_some(),
+                "driver {i} should have a stable checkpoint"
+            );
+            assert_eq!(d.checkpoint_sequence(), 0);
+            assert!(d.stable_checkpoint_signatures().unwrap() >= m.quorum());
+        }
+    }
+
+    // ---- state transfer ----
+
+    #[test]
+    fn request_state_transfer_emits_empty_message() {
+        let (m, mut drivers) = build_counting_ring();
+        drivers[0].request_state_transfer().unwrap();
+        let out = drivers[0].drain_outbound();
+        assert_eq!(out.len(), 1);
+        match &out[0] {
+            BftOutbound::StateTransferRequest(msg) => {
+                assert_eq!(msg.checkpoint_sequence, 0);
+                assert!(msg.state.is_empty());
+            }
+            other => panic!("expected StateTransferRequest, got {other:?}"),
+        }
+        let _ = m;
+    }
+
+    #[test]
+    fn state_transfer_roundtrip() {
+        let (m, mut drivers) = build_counting_ring();
+
+        // Drive one successful round so the counting handlers all
+        // increment to 1.
+        drivers[0].start(operation("revocation")).unwrap();
+        let _ = pump_counting(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.handler().counter, 1);
+            assert_eq!(d.sequence(), 1);
+        }
+
+        // Force a checkpoint at sequence 1. It is not a multiple of
+        // CHECKPOINT_INTERVAL, so the caller drives it explicitly.
+        for d in &mut drivers {
+            d.start_checkpoint().unwrap();
+        }
+        pump_checkpoints(&mut drivers, &m);
+        assert_eq!(drivers[0].checkpoint_sequence(), 1);
+        assert!(drivers[0].stable_checkpoint_signatures().unwrap() >= m.quorum());
+
+        // Snapshot a healthy driver's state.
+        let healthy_state = drivers[3].handler().state_bytes();
+        let healthy_digest = drivers[3].handler().state_digest();
+        assert_eq!(healthy_digest, *drivers[0].checkpoint_digest());
+
+        // Make driver 0 look lagging.
+        drivers[0].handler_mut().counter = 0;
+        drivers[0].checkpoint_sequence = 0;
+        drivers[0].checkpoint_digest = [0u8; 32];
+        drivers[0].stable_checkpoint = None;
+        drivers[0].sequence = 0;
+
+        // Request state transfer.
+        drivers[0].request_state_transfer().unwrap();
+        let request = match drivers[0].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferRequest(msg)) => msg,
+            other => panic!("expected request, got {other:?}"),
+        };
+
+        // Deliver it to a healthy peer and collect its response.
+        drivers[2]
+            .on_state_transfer(&m.members()[0], &request)
+            .unwrap();
+        let response = match drivers[2].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferResponse(msg)) => msg,
+            other => panic!("expected response, got {other:?}"),
+        };
+
+        // Deliver the response to driver 0.
+        drivers[0]
+            .on_state_transfer(&m.members()[2], &response)
+            .unwrap();
+
+        assert_eq!(drivers[0].checkpoint_sequence, 1);
+        assert_eq!(drivers[0].checkpoint_digest, healthy_digest);
+        assert_eq!(drivers[0].handler().counter, 1);
+        assert_eq!(drivers[0].sequence(), 1);
+        assert_eq!(drivers[0].handler().state_bytes(), healthy_state);
+    }
+
+    #[test]
+    fn state_transfer_rejects_digest_mismatch() {
+        let (m, mut drivers) = build_counting_ring();
+
+        // Bring the ring to a stable checkpoint at sequence 1.
+        drivers[0].start(operation("revocation")).unwrap();
+        let _ = pump_counting(&mut drivers, &m);
+        for d in &mut drivers {
+            d.start_checkpoint().unwrap();
+        }
+        pump_checkpoints(&mut drivers, &m);
+        assert_eq!(drivers[0].checkpoint_sequence(), 1);
+
+        // Make driver 0 lagging.
+        drivers[0].handler_mut().counter = 0;
+        drivers[0].checkpoint_sequence = 0;
+        drivers[0].checkpoint_digest = [0u8; 32];
+        drivers[0].stable_checkpoint = None;
+        drivers[0].sequence = 0;
+
+        // Get a real response.
+        let request = BftStateTransfer {
+            ring_id: [1; 32],
+            checkpoint_sequence: 0,
+            state: Vec::new(),
+            checkpoint_digest: [0u8; 32],
+            ring_signature: RingSignature::Individual(IndividualRingSig {
+                signatures: Vec::new(),
+                signers: Vec::new(),
+            }),
+        };
+        drivers[2]
+            .on_state_transfer(&m.members()[0], &request)
+            .unwrap();
+        let mut response = match drivers[2].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferResponse(msg)) => msg,
+            other => panic!("expected response, got {other:?}"),
+        };
+
+        // Tamper with the state bytes, leaving the digest untouched.
+        response.state.push(0xFF);
+
+        let err = drivers[0].on_state_transfer(&m.members()[2], &response);
+        assert!(err.is_err(), "digest mismatch must be rejected");
+    }
+
+    #[test]
+    fn state_transfer_rejects_bad_ring_signature() {
+        let (m, mut drivers) = build_counting_ring();
+
+        let bad = BftStateTransfer {
+            ring_id: [1; 32],
+            checkpoint_sequence: 5,
+            state: vec![0, 0, 0, 0, 0, 0, 0, 1],
+            checkpoint_digest: sha256(&[0u8, 0, 0, 0, 0, 0, 0, 1]),
+            ring_signature: RingSignature::Individual(IndividualRingSig {
+                signatures: vec![[0u8; 64]; 5],
+                signers: vec![
+                    m.members()[0],
+                    m.members()[1],
+                    m.members()[2],
+                    m.members()[3],
+                    m.members()[4],
+                ],
+            }),
+        };
+        let err = drivers[0].on_state_transfer(&m.members()[3], &bad);
+        assert!(err.is_err(), "invalid ring signature must be rejected");
+    }
+
+    #[test]
+    fn state_transfer_ignores_older_sequence() {
+        let (m, mut drivers) = build_counting_ring();
+        drivers[0].sequence = 5;
+        drivers[0].checkpoint_sequence = 5;
+
+        let old = BftStateTransfer {
+            ring_id: [1; 32],
+            checkpoint_sequence: 3,
+            state: vec![0u8; 8],
+            checkpoint_digest: sha256(&[0u8; 8]),
+            ring_signature: RingSignature::Individual(IndividualRingSig {
+                signatures: vec![[0u8; 64]; 5],
+                signers: vec![
+                    m.members()[0],
+                    m.members()[1],
+                    m.members()[2],
+                    m.members()[3],
+                    m.members()[4],
+                ],
+            }),
+        };
+        drivers[0].on_state_transfer(&m.members()[3], &old).unwrap();
+        assert_eq!(drivers[0].checkpoint_sequence, 5);
     }
 
     // ---- rejection paths ----
@@ -1580,7 +2366,6 @@ mod tests {
         )
         .unwrap();
         d.start(operation("key_rotation")).unwrap();
-        // Drain preprepare + self-prepare.
         let _ = d.drain_outbound();
 
         let outsider = [0xeeu8; 32];
@@ -1609,7 +2394,7 @@ mod tests {
         )
         .unwrap();
         let bogus = BftPreprepare {
-            ring_id: [0xff; 32], // wrong ring
+            ring_id: [0xff; 32],
             view: 0,
             sequence: 0,
             operation: operation("key_rotation"),
@@ -1636,12 +2421,11 @@ mod tests {
         let stale = BftPreprepare {
             ring_id: [1; 32],
             view: 0,
-            sequence: 42, // wrong sequence
+            sequence: 42,
             operation: operation("key_rotation"),
             digest: [0; 32],
             primary_sig: [0; 64],
         };
-        // Silent no-op, no error.
         assert!(d.on_preprepare(&sender, &stale).is_ok());
         assert_eq!(*d.state(), RoundState::Idle);
     }

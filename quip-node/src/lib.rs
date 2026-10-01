@@ -1068,7 +1068,7 @@ mod tests {
     use quip_core::dvv::Dvv;
     use quip_core::time::ManualClock;
     use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
-    use quip_net::nat_driver::DhtClient;
+use quip_net::nat_driver::{DhtClient, DhtResult};
     use quip_net::nat_wire::{ConnectivityAnnounce, NAT_TYPE_OPEN};
     use quip_net::sync::{GetRequest, QueryPins};
     use quip_storage::CidTagging;

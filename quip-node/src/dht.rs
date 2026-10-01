@@ -2,7 +2,7 @@
 //! connections.
 //!
 //! [`LiveDht`] implements
-//! [`DhtClient`](quip_net::nat_driver::DhtClient) on top of the node's
+//! [`DhtClient`] on top of the node's
 //! existing T0 connections. It does not maintain a separate DHT peer
 //! set, does not do XOR-distance routing, and does not run cluster
 //! merge/split. Publishes broadcast to every connected peer; lookups

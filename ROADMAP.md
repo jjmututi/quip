@@ -39,7 +39,8 @@ update its row and the tag index in the same commit.
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
 | M9.4a | `quip-node`: live `DhtClient` over the node's peer connections | landed |
 | M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
-| M9.5 | Coral DHT: `WitnessDiscovery` wired into the node | not started |
+| M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
+| M9.5b | `quip-node`: real `NatDriver` + cluster merge/split | not started |
 
 Every protocol-level milestone (M1–M8) is landed. The application
 layer (M9.x) is in progress. M9.3 was folded into M9.4 and the M9.4
@@ -89,9 +90,9 @@ Baseline on `main`:
 quip-core      74 passed
 quip-net      471 passed
 quip-storage   57 passed
-quip-node      15 passed
+quip-node      20 passed
 doc-tests       4 passed (one per crate)
-             ~617 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~622 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -443,22 +444,46 @@ handshake and the steady-state loop.
 `dht_handle_clone_shares_routing_table`, and the existing connection
 tests (all now traverse the flow).
 
-### M9.5 — Coral DHT — NOT STARTED
+### M9.5a — shared Coral discovery — LANDED
 
-Wires `WitnessDiscovery` into the node so the flow's witness phase
-can run for real. It:
+`quip-node/src/discovery.rs` adds a `DiscoveryHandle` that wraps
+`WitnessDiscovery<Ed25519Signer>` behind an `Arc<Mutex<…>>`. Every
+peer task shares one instance, so the ring cache (24 h) and the
+spillover cache (5 min) are unified across the node.
 
-- Wires `WitnessDiscovery::start` / `ingest_lookup_response` /
-  `ingest_spillover_response` into the peer tasks, so `coral_lookup`
-  and its friends route over the wire.
-- Replaces `LiveDht::lookup_connectivity` / `lookup_candidates`
-  no-ops with real Coral-driven lookups.
-- Replaces the DHT router's broadcast with XOR-distance selection
-  from the routing table.
-- Runs cluster merge/split against `cluster.rs`'s state machine.
+- The flow's witness phase runs the real state machine. Each peer
+  task starts a discovery for its remote, sends a signed
+  `coral_lookup`, ingests the response, and either completes with
+  `Ready(Verified)` (4+ witnesses) or falls back to
+  `Ready(Pending)`.
+- The node is both a Coral client and a Coral server. During
+  establishment and in the steady-state loop, inbound
+  `coral_lookup` / `spillover` requests are answered with signed
+  responses. M9.5a's responder answers with no witnesses and no
+  consensus, which is honest — the node holds no
+  `WitnessStatement`s yet.
+- `NodeConfig` gains a `signer: SharedSigner` field
+  (`Arc<Ed25519Signer>`, not `Arc<dyn Signer>`: every verifier in
+  the workspace is `Ed25519Verifier`). `NodeConfig::new` now takes
+  the signer by value as `SharedSigner`.
+- `Node::discovery()` returns a `DiscoveryHandle` clone, so an
+  application can start a lookup directly.
 
-M9.5 is what makes the flow's witness phase reach `Ready(Verified)`
-for a peer with 4+ non-expired witness statements.
+**Scope note.** In a two-node network neither side holds
+witnesses, so both peers reach `Ready(Pending)`. The machinery is
+real; a larger network with actual witness statements reaches
+`Ready(Verified)`. The state machine's `Verified` path is covered
+by the unit tests in `quip-node::discovery`.
+
+**Known limitation.** The establishment-time discovery wait uses a
+wall-clock deadline (5 s), not the injected `Clock`. A frozen
+`ManualClock` would otherwise hang the phase forever. The injected
+clock is still used for phase timeouts and signature timestamps.
+
+**Evidence:** `ready_via_shared_discovery_on_both_sides`,
+`discovery_local_node_id_matches_node`,
+`discovery_clones_share_state`, plus the unit tests in
+`quip-node::discovery`.
 
 ---
 
@@ -567,6 +592,14 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
 | `quip-node/src/lib.rs` (`peer_run`) | M9.4b | establishment + steady-state entry point |
 | `quip-node/src/dht.rs` (`DhtHandle` impl `DhtClient`) | M9.4b | shared handle as DhtClient |
+| `quip-node/src/discovery.rs:1` | M9.5a | shared Coral discovery client |
+| `quip-node/src/discovery.rs` (`DiscoveryHandle`) | M9.5a | shared handle |
+| `quip-node/src/discovery.rs` (`respond_to_lookup`) | M9.5a | Coral server role |
+| `quip-node/src/discovery.rs` (`respond_to_spillover`) | M9.5a | spillover server role |
+| `quip-node/src/lib.rs` (`run_discovery_phase`) | M9.5a | flow witness phase driver |
+| `quip-node/src/lib.rs` (`make_lookup_paths`) | M9.5a | path selection |
+| `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
+| `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 
 The code subdivides NAT work as `M3a` / `M3b.1` / `M3b.2` / `M3b.3`
 and BFT work as `M4a` / `M4b`. The M3 section above numbers the later
@@ -591,6 +624,15 @@ next touch is cheap.
    Replace the flow's NAT-phase conclusion-from-transport with a
    real `NatDriver`. Run cluster merge/split against `cluster.rs`.
    Replace `LiveDht`'s lookup no-ops with real Coral lookups.
+2. **M9.5b — real `NatDriver` + cluster.** Wire a per-peer
+   `NatDriver` into the flow so the NAT phase concludes from a real
+   `NatEvent::DirectPathEstablished` rather than from the transport
+   being up. Run `ClusterState` merge/split against the routing
+   table.
+3. **M9.6 — witness accumulation.** The responder currently answers
+   with no witnesses; when the node accumulates `WitnessStatement`s
+   from its peers, the responder returns real rings and
+   `Ready(Verified)` becomes reachable in a two-node network.
 
 ### Protocol crates
 

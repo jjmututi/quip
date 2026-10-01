@@ -3,11 +3,13 @@
 //! [`Node`] binds a QUIC endpoint, accepts inbound connections, dials
 //! outbound ones, and surfaces a single event stream keyed by peer
 //! NodeId. It owns a [`QuipStore`] and uses it to auto-serve the
-//! storage-plane verbs that have a 1:1 wire mapping.
+//! storage-plane verbs that have a 1:1 wire mapping, and a
+//! [`LiveDht`](dht::LiveDht) that carries §12 NAT-plane verbs over the
+//! same connections.
 //!
 //! # Scope
 //!
-//! This is the third cut. It does:
+//! This is the fourth cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
@@ -23,17 +25,22 @@
 //!   `pin`, `unpin`, `query_pins`, and a raw `store()` accessor.
 //! - Read the wall clock through a [`Clock`], so tests can inject a
 //!   deterministic time source.
+//! - Own a `LiveDht` implementing `DhtClient`. §12 NAT verbs sent and
+//!   received through the node's peer connections are routed through
+//!   it; publishes broadcast to all connected peers.
 //!
 //! It does not (yet):
 //!
 //! - Run a
 //!   [`ConnectionFlow`](quip_net::establishment::ConnectionFlow)
-//!   per peer, and therefore emits no `Ready` event. Running the §16
-//!   flow without a real NAT driver or DHT client would only produce
-//!   placeholder trust statuses — `Ready(Pending)` for every
-//!   connection regardless of what is actually true. M9.4 lands the
-//!   flow and the DHT client together so that `Ready` means
-//!   something the first time it fires.
+//!   per peer, and therefore emits no `Ready` event. The flow, the
+//!   live witness-discovery path, and `NodeEvent::Ready` /
+//!   `NodeEvent::EstablishmentFailed` land in M9.4b.
+//! - Route DHT lookups. `DhtClient::lookup_*` are no-ops; §12 has no
+//!   lookup verb and a real lookup is a Coral `coral_lookup`, which is
+//!   M9.5.
+//! - Run cluster merge/split. The DHT's routing table records observed
+//!   `ClusterInfo` but nothing consumes it.
 //! - Auto-serve `register_tcid`, `delegation`, `derivative_link`,
 //!   `resource_announce`, or `query_resource`. Those carry signatures
 //!   the peer task cannot verify, or require a wire-to-storage type
@@ -47,8 +54,16 @@
 //! A peer goes straight from the §4 handshake and §16 Key Claim
 //! exchange — both performed inline by `ConnectionDriver` — into
 //! steady-state operation. There is no `ConnectionFlow` at the node
-//! layer yet; M9.4 introduces it alongside the DHT client it depends
-//! on.
+//! layer yet; M9.4b introduces it on top of the DHT client.
+//!
+//! # DHT routing
+//!
+//! §12 NAT verbs (`connectivity_announce`, `candidate_announce`,
+//! `relay_discovery`, `relay_response`) arriving on T0 are verified,
+//! matched against the sending peer, and enqueued into the node's
+//! [`LiveDht`](dht::LiveDht). Outgoing publishes are broadcast to every
+//! connected peer. There is no separate DHT peer set and no
+//! XOR-distance routing yet; M9.5 replaces the broadcast.
 //!
 //! # Auto-served verbs
 //!
@@ -130,6 +145,8 @@
 //! # }
 //! ```
 
+pub mod dht;
+
 use quip_core::cid::{CidOrV1, HashAlgo};
 use quip_core::dvv::NodeId;
 use quip_core::messages::{KeyClaim, PinEntry, Signer};
@@ -150,6 +167,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tokio::task::JoinHandle;
+
+use dht::DhtHandle;
 
 /// Capacity of the node's event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
@@ -205,8 +224,15 @@ impl core::fmt::Debug for NodeConfig {
 }
 
 impl NodeConfig {
-    /// Build a config with baseline capabilities, a claim derived from
-    /// `signer`, auto-serving enabled, and the system clock.
+    /// Build a config with baseline capabilities plus NAT traversal and
+    /// DHT discovery, a claim derived from `signer`, auto-serving
+    /// enabled, and the system clock.
+    ///
+    /// `NAT_TRAVERSAL` is what allows a peer to send and receive §12
+    /// verbs; without it the transport's capability gate rejects them.
+    /// `DHT_DISCOVERY` is what allows the Coral verbs of §13. Neither
+    /// is in the baseline set (which is transport-level), so both are
+    /// added explicitly here.
     pub fn new(
         bind: SocketAddr,
         signer: &impl Signer,
@@ -214,7 +240,9 @@ impl NodeConfig {
     ) -> Result<Self> {
         Ok(Self {
             bind,
-            capabilities: Capabilities::baseline(),
+            capabilities: Capabilities::baseline()
+                | Capabilities(Capabilities::NAT_TRAVERSAL)
+                | Capabilities(Capabilities::DHT_DISCOVERY),
             key_claim: make_key_claim(signer, now)?,
             auto_serve_pins: true,
             clock: Arc::new(SystemClock),
@@ -271,7 +299,7 @@ pub fn make_key_claim(signer: &impl Signer, now: Timestamp) -> Result<KeyClaim> 
 pub enum NodeEvent {
     /// A peer completed the §4 handshake and §16 Key Claim exchange.
     ///
-    /// The peer is reachable from `send_to` at this point. M9.4 will
+    /// The peer is reachable from `send_to` at this point. M9.4b will
     /// add a `Ready` event that marks the end of §16 establishment.
     Connected {
         /// The peer's NodeId, as claimed. The application is
@@ -287,7 +315,8 @@ pub enum NodeEvent {
     /// A framed message arrived from `peer` on `tier`.
     ///
     /// Verbs covered by [`NodeConfig::auto_serve_pins`] do not surface
-    /// here.
+    /// here. §12 NAT verbs do not surface here either; they are routed
+    /// into the node's DHT client.
     Message {
         /// The peer that sent it.
         peer: NodeId,
@@ -349,6 +378,11 @@ pub struct Node<B = MemoryBlobStore> {
     events_rx: mpsc::Receiver<NodeEvent>,
     events_tx: mpsc::Sender<NodeEvent>,
     accept_task: Option<JoinHandle<()>>,
+    /// The node's DHT client, shared with every peer task.
+    dht: DhtHandle,
+    /// The DHT router task, draining the DHT's outbound queue and
+    /// forwarding each message to connected peers. Aborted on `Drop`.
+    dht_task: Option<JoinHandle<()>>,
 }
 
 impl Node<MemoryBlobStore> {
@@ -389,12 +423,20 @@ where
         let store = Arc::new(Mutex::new(store));
         let clock = Arc::clone(&config.clock);
 
+        let local_id = config.key_claim.node_id;
+        let (dht, dht_outbound_rx) = DhtHandle::new(local_id);
+        let dht_task = tokio::spawn(dht_router_task(
+            dht_outbound_rx,
+            Arc::clone(&peers),
+        ));
+
         let accept_endpoint = Arc::clone(&endpoint);
         let accept_peers = Arc::clone(&peers);
         let accept_tasks = Arc::clone(&peer_tasks);
         let accept_store = Arc::clone(&store);
         let accept_clock = Arc::clone(&clock);
         let accept_tx = events_tx.clone();
+        let accept_dht = dht.clone();
         let auto_serve = config.auto_serve_pins;
         let accept_task = tokio::spawn(async move {
             accept_loop(
@@ -405,6 +447,7 @@ where
                 accept_clock,
                 auto_serve,
                 accept_tx,
+                accept_dht,
             )
             .await;
         });
@@ -420,6 +463,8 @@ where
             events_rx,
             events_tx,
             accept_task: Some(accept_task),
+            dht,
+            dht_task: Some(dht_task),
         })
     }
 
@@ -432,7 +477,7 @@ where
     /// as for [`NodeEvent::Connected`].
     ///
     /// The returned `NodeId` is available as soon as the transport
-    /// handshake completes. M9.4 will add a `Ready` event that fires
+    /// handshake completes. M9.4b will add a `Ready` event that fires
     /// later, after the §16 connection flow completes.
     pub async fn connect(
         &mut self,
@@ -455,6 +500,7 @@ where
             .lock()
             .await
             .insert(peer, PeerHandle { outbound: out_tx });
+        self.dht.note_peer(peer, Some(addr), clock.now()).await;
         let _ = self.events_tx.send(NodeEvent::Connected { peer }).await;
 
         let events_tx = self.events_tx.clone();
@@ -462,13 +508,14 @@ where
         let peer_tasks = Arc::clone(&self.peer_tasks);
         let store = Arc::clone(&self.store);
         let auto_serve = self.auto_serve_pins;
+        let dht = self.dht.clone();
         let handle = tokio::spawn(async move {
             // The client endpoint must outlive the connection, so it
             // is moved into the peer task and dropped when the loop
             // exits.
             let _keep_endpoint = client_endpoint;
             peer_steady_loop(
-                driver, peer, store, clock, auto_serve, events_tx, out_rx,
+                driver, peer, store, clock, auto_serve, events_tx, out_rx, dht,
             )
             .await;
             peers.lock().await.remove(&peer);
@@ -573,6 +620,16 @@ where
         self.store.lock().await
     }
 
+
+    /// Lock and access the node's DHT client.
+    ///
+    /// Applications can use this to inspect the routing table or drive
+    /// the DHT directly; the M9.4b flow drives it automatically and
+    /// does not require the application to reach in.
+    pub async fn dht(&self) -> MutexGuard<'_, dht::LiveDht> {
+        self.dht.lock().await
+    }
+
     // ---- Direct store helpers ----
 
     /// Pin `cid` for `resource_id` locally.
@@ -654,6 +711,9 @@ impl<B> Drop for Node<B> {
         if let Some(task) = self.accept_task.take() {
             task.abort();
         }
+        if let Some(task) = self.dht_task.take() {
+            task.abort();
+        }
         // Abort peer tasks. `try_lock` is safe inside a Drop that may
         // run on a tokio worker; `blocking_lock` would panic. If a
         // task holds the lock, we skip the abort — the endpoint close
@@ -671,7 +731,31 @@ impl<B> Drop for Node<B> {
 // Background tasks
 // -------------------------------------------------------------------------
 
+/// Drain the DHT's outbound queue and forward each message to every
+/// connected peer.
+///
+/// M9.5 replaces this with XOR-distance routing over a real DHT peer
+/// set. For now the network is small enough that broadcast is correct
+/// and cheap.
+async fn dht_router_task(
+    mut rx: mpsc::UnboundedReceiver<Message>,
+    peers: PeerMap,
+) {
+    while let Some(msg) = rx.recv().await {
+        // Copy the senders out of the map before awaiting on any of
+        // them, so a slow or stalled peer cannot hold the peer-map lock.
+        let senders: Vec<mpsc::Sender<Message>> = {
+            let map = peers.lock().await;
+            map.values().map(|h| h.outbound.clone()).collect()
+        };
+        for tx in senders {
+            let _ = tx.send(msg.clone()).await;
+        }
+    }
+}
+
 /// Accept inbound connections, drive each handshake, spawn a peer loop.
+#[allow(clippy::too_many_arguments)]
 async fn accept_loop<B>(
     endpoint: Arc<Endpoint>,
     peers: PeerMap,
@@ -680,6 +764,7 @@ async fn accept_loop<B>(
     clock: SharedClock,
     auto_serve_pins: bool,
     events_tx: mpsc::Sender<NodeEvent>,
+    dht: DhtHandle,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -699,6 +784,7 @@ async fn accept_loop<B>(
         let store = Arc::clone(&store);
         let clock = Arc::clone(&clock);
         let events_tx = events_tx.clone();
+        let dht = dht.clone();
 
         // The accept loop cannot know the peer's NodeId until the
         // handshake completes, so the peer task registers itself under
@@ -721,6 +807,7 @@ async fn accept_loop<B>(
                 .lock()
                 .await
                 .insert(peer, PeerHandle { outbound: out_tx });
+            dht.note_peer(peer, None, clock.now()).await;
             let _ = events_tx.send(NodeEvent::Connected { peer }).await;
 
             peer_steady_loop(
@@ -731,10 +818,12 @@ async fn accept_loop<B>(
                 auto_serve_pins,
                 events_tx,
                 out_rx,
+                dht.clone(),
             )
             .await;
             peers.lock().await.remove(&peer);
             peer_tasks.lock().await.remove(&peer);
+            dht.forget_peer(&peer).await;
         });
     }
 }
@@ -761,6 +850,7 @@ async fn drive_handshake(
 }
 
 /// Steady-state loop for one established peer.
+#[allow(clippy::too_many_arguments)]
 async fn peer_steady_loop<B>(
     mut driver: ConnectionDriver,
     peer: NodeId,
@@ -769,6 +859,7 @@ async fn peer_steady_loop<B>(
     auto_serve_pins: bool,
     events_tx: mpsc::Sender<NodeEvent>,
     mut outbound_rx: mpsc::Receiver<Message>,
+    dht: DhtHandle,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -780,11 +871,13 @@ async fn peer_steady_loop<B>(
         auto_serve_pins,
         &events_tx,
         &mut outbound_rx,
+        &dht,
     )
     .await;
     let _ = events_tx.send(NodeEvent::Disconnected { peer }).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_peer_loop<B>(
     driver: &mut ConnectionDriver,
     peer: NodeId,
@@ -793,6 +886,7 @@ async fn run_peer_loop<B>(
     auto_serve_pins: bool,
     events_tx: &mpsc::Sender<NodeEvent>,
     outbound_rx: &mut mpsc::Receiver<Message>,
+    dht: &DhtHandle,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -838,6 +932,16 @@ async fn run_peer_loop<B>(
                 Event::Frame { tier, msg, .. } => {
                     match message::dispatch(&msg.raw, tier) {
                         Ok(m) => {
+                            // §12 NAT verbs route into the DHT client
+                            // and never surface as a `Message` event.
+                            // `dht_result_from` verifies the signature
+                            // and the claimed NodeId before returning
+                            // a result.
+                            if let Some(result) = dht::dht_result_from(&m, &peer) {
+                                dht.note_peer(peer, None, now).await;
+                                dht.enqueue(result);
+                                continue;
+                            }
                             // Auto-serve eligible verbs from the store.
                             if auto_serve_pins {
                                 if let Some(reply) =
@@ -959,10 +1063,13 @@ fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use quip_core::address::Address;
     use quip_core::cid::Cid;
     use quip_core::dvv::Dvv;
     use quip_core::time::ManualClock;
     use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
+    use quip_net::nat_driver::DhtClient;
+    use quip_net::nat_wire::{ConnectivityAnnounce, NAT_TYPE_OPEN};
     use quip_net::sync::{GetRequest, QueryPins};
     use quip_storage::CidTagging;
 
@@ -1049,6 +1156,37 @@ mod tests {
             }
         }
         None
+    }
+
+    /// Sign a `ConnectivityAnnounce` with the signer for `seed_byte`.
+    fn signed_connectivity(
+        seed_byte: u8,
+        now: Timestamp,
+    ) -> ConnectivityAnnounce {
+        let signer = Ed25519Signer::from_seed(&seed(seed_byte));
+        let unsigned = ConnectivityAnnounce {
+            node_id: signer.public_key(),
+            external_addr: Address::V4 {
+                ip: [127, 0, 0, 1],
+                port: 9999,
+            },
+            internal_addr: Address::V4 {
+                ip: [10, 0, 0, 1],
+                port: 9999,
+            },
+            nat_type: NAT_TYPE_OPEN,
+            port_preservation: true,
+            relay_capable: false,
+            capacity: 0,
+            timestamp: now,
+            signature: [0u8; 64],
+        };
+        let payload = unsigned.signing_payload().unwrap();
+        let signature = signer.sign_ed25519(&payload);
+        ConnectivityAnnounce {
+            signature,
+            ..unsigned
+        }
     }
 
     // All tests use the default single-threaded #[tokio::test]
@@ -1282,5 +1420,107 @@ mod tests {
             }
         }
         assert!(found, "B's store did not receive the pin");
+    }
+
+    // ---- M9.4a: live DhtClient ----
+
+    /// A `connectivity_announce` published on A is delivered to B's
+    /// DHT client, signature and all, without surfacing as a
+    /// `NodeEvent::Message`.
+    #[tokio::test]
+    async fn dht_publish_connectivity_reaches_peer() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let a_node_id = a.local_node_id();
+        let b_node_id = b.local_node_id();
+
+        let peer_b = a.connect(b_addr, "localhost").await.unwrap();
+        assert_eq!(peer_b, b_node_id);
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+
+        let announce = signed_connectivity(1, a.now());
+        a.dht().await.publish_connectivity(announce.clone());
+
+        // B's DHT client should receive the announcement.
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(5_000);
+        let mut received: Option<ConnectivityAnnounce> = None;
+        while std::time::Instant::now() < deadline && received.is_none() {
+            if let Some(DhtResult::Connectivity(got)) = b.dht().await.poll() {
+                received = Some(got);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let received =
+            received.expect("B did not receive the connectivity_announce");
+        assert_eq!(received.node_id, a_node_id);
+        assert_eq!(received.signature, announce.signature);
+    }
+
+    /// The DHT routing table records directly-connected peers.
+    #[tokio::test]
+    async fn dht_routing_table_lists_peers() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let a_node_id = a.local_node_id();
+        let b_node_id = b.local_node_id();
+
+        // Before connecting, the tables are empty.
+        assert!(a.dht().await.table().is_empty());
+        assert!(b.dht().await.table().is_empty());
+
+        let _ = a.connect(b_addr, "localhost").await.unwrap();
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+
+        // A recorded B on the outbound side, B recorded A on the
+        // accept side.
+        assert!(a.dht().await.table().contains_key(&b_node_id));
+        assert!(b.dht().await.table().contains_key(&a_node_id));
+    }
+
+    /// A fresh node's DHT client returns `None` from `poll` and does
+    /// not panic when publishing with no peers.
+    #[tokio::test]
+    async fn dht_publish_with_no_peers_is_a_noop() {
+        let a = make_node(1).await;
+        let announce = signed_connectivity(1, a.now());
+        a.dht().await.publish_connectivity(announce);
+        assert!(a.dht().await.poll().is_none());
+        assert!(a.dht().await.table().is_empty());
+    }
+
+    /// A forged `connectivity_announce` (wrong attribution) is dropped
+    /// by `dht_result_from` and never reaches the DHT client.
+    #[tokio::test]
+    async fn dht_forged_connectivity_is_dropped() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let a_node_id = a.local_node_id();
+        let b_node_id = b.local_node_id();
+
+        let peer_b = a.connect(b_addr, "localhost").await.unwrap();
+        assert_eq!(peer_b, b_node_id);
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+
+        // A publishes an announcement signed by A but attributed to B.
+        // The signature is valid for A's NodeId but the message claims
+        // B's; the peer-loop check rejects it on the attribution.
+        let mut announce = signed_connectivity(1, a.now());
+        announce.node_id = b_node_id;
+        a.dht().await.publish_connectivity(announce);
+
+        // Give B a moment; nothing should arrive.
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(500);
+        while std::time::Instant::now() < deadline {
+            assert!(b.dht().await.poll().is_none(), "forged announce leaked");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
     }
 }

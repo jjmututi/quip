@@ -7,8 +7,8 @@ Implementation milestones for the reference implementation of
 
 Milestones are numbered `M1`–`M9` in dependency order, with dot
 sub-milestones where a milestone split during execution (`M6.1`,
-`M4b.1`, `M9.2`). The code cites its own milestone in comments; the
-**Tag index** at the bottom is the reverse mapping.
+`M4b.1`, `M9.2`, `M9.4a`). The code cites its own milestone in
+comments; the **Tag index** at the bottom is the reverse mapping.
 
 **Statuses are evidence-based.** A milestone is *landed* only when the
 code exists, is wired into the crate root, and its tests pass under
@@ -36,16 +36,19 @@ update its row and the tag index in the same commit.
 | Spec pass | S8 (`bft_state_transfer` ring signature scope) | open, spec-only |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
-| M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4 |
-| M9.4 | `quip-node`: `ConnectionFlow` integration + live `DhtClient` | not started |
+| M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
+| M9.4a | `quip-node`: live `DhtClient` over the node's peer connections | landed |
+| M9.4b | `quip-node`: `ConnectionFlow` integration | not started |
+| M9.5 | Coral DHT: `WitnessDiscovery` wired into the node | not started |
 
 Every protocol-level milestone (M1–M8) is landed. The application
-layer (M9.x) is in progress: M9.1 and M9.2 are landed. M9.3 was
-folded into M9.4 rather than shipped as a stub-only integration —
-running the §16 flow without a real DHT client would only produce
-placeholder trust statuses. §16 runs end-to-end through step 8
-across the protocol crates; the `Node` type composes them into a
-runnable peer.
+layer (M9.x) is in progress. M9.3 was folded into M9.4 and the M9.4
+work split in two: the DHT client first, then the flow that drives it.
+Running the §16 flow without a live DHT client would only produce a
+placeholder trust status; running it with one gives the NAT phase
+something real to talk to, and the flow reaches `Ready` on honest
+signals. §16 runs end-to-end through step 8 across the protocol
+crates; the `Node` type composes them into a runnable peer.
 
 ---
 
@@ -55,7 +58,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    610 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    615 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -86,9 +89,9 @@ Baseline on `main`:
 quip-core      74 passed
 quip-net      471 passed
 quip-storage   57 passed
-quip-node       9 passed
+quip-node      13 passed
 doc-tests       4 passed (one per crate)
-             ~611 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~615 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -361,7 +364,7 @@ auto-serves the storage-plane verbs with a 1:1 wire mapping.
 `peer_query_pins_is_auto_served`, `peer_pin_is_applied_to_store`, and
 the doctest.
 
-### M9.3 — ConnectionFlow integration — FOLDED INTO M9.4
+### M9.3 — ConnectionFlow integration — FOLDED INTO M9.4b
 
 Deferred. Running the §16 `ConnectionFlow` at the node layer without
 a real `NatDriver` and `DhtClient` can only drive the NAT phase to a
@@ -372,31 +375,81 @@ PENDING for a live connection) but it is a lie to the application,
 and a reference implementation should not ship it. The
 `ConnectionFlow::resume_from_key_claim` constructor was added to
 `quip-net` in preparation, with a unit test; the node consumes it
-in M9.4.
+in M9.4b.
 
-### M9.4 — ConnectionFlow integration + live DhtClient — NOT STARTED
+### M9.4a — Live DhtClient — LANDED
 
-Two pieces that land together:
+`quip-node/src/dht.rs` adds a live `DhtClient` on top of the node's
+existing T0 connections.
 
-- **Live `DhtClient`.** A `DhtClient` implementation for
-  `quip-net::nat_driver` (today only `NullDhtClient` and a test
-  `RecordingDht` exist). Routes `publish_connectivity`,
-  `lookup_connectivity`, `discover_relays`, and `coral_lookup` to
-  actual peers over QUIC, maintains a routing table, and runs
-  cluster merge/split against `cluster.rs`'s state.
-- **`ConnectionFlow` integration.** After `ConnectionDriver`
-  performs the §4/§16 exchanges inline, each peer task resumes the
-  flow at `NatTraversal` via
-  `ConnectionFlow::resume_from_key_claim`, runs NAT traversal
-  through the new `DhtClient`, runs witness discovery against the
-  new DHT, and reaches `Ready(kt_status)` with a trust status that
-  reflects reality. New `NodeEvent` variants: `Ready { peer,
-  kt_status }` on success, `EstablishmentFailed { peer, failure }`
-  on failure. `Node::connect` continues to return the peer's
-  `NodeId` as soon as the transport handshake completes;
-  `NodeEvent::Ready` fires later.
+- `LiveDht` implements `quip_net::nat_driver::DhtClient`. The three
+  publish verbs (`publish_connectivity`, `publish_candidates`,
+  `discover_relays`) broadcast to every connected peer. The two
+  lookup verbs are documented no-ops: §12 has no lookup verb, and a
+  real lookup is a Coral `coral_lookup` (§13.7) driven by
+  `WitnessDiscovery`, which is M9.5.
+- A `DhtHandle` bundles the shared `LiveDht` with a clone of the
+  inbound channel, so a peer task can record a peer and enqueue a
+  result in one call.
+- A router task drains the DHT's outbound queue and forwards each
+  message to every connected peer. M9.5 replaces broadcast with
+  XOR-distance routing.
+- §12 NAT verbs on T0 are intercepted in the peer steady loop before
+  the pin auto-serve path: `dht_result_from` verifies the signature
+  and the claimed NodeId, and only on success is the result enqueued.
+  A forged or mis-attributed verb is dropped silently, never reaching
+  the DHT client and never surfacing as a `NodeEvent::Message`.
+- `NodeConfig::new` now advertises `NAT_TRAVERSAL` and
+  `DHT_DISCOVERY` so §12 verbs pass the transport's capability gate.
+  Neither is in the baseline set.
 
-M9.4 is the last piece before anything beyond a two-node demo.
+Deliberately out of scope: cluster merge/split (the routing table
+records `ClusterInfo` but nothing consumes it), Coral lookups, and
+relay-response generation.
+
+**Evidence:** `dht_publish_connectivity_reaches_peer`,
+`dht_routing_table_lists_peers`, `dht_publish_with_no_peers_is_a_noop`,
+`dht_forged_connectivity_is_dropped`.
+
+### M9.4b — ConnectionFlow integration — NOT STARTED
+
+The §16 flow runs in each peer task, resuming at `NatTraversal` via
+`ConnectionFlow::resume_from_key_claim`. The peer task:
+
+- Runs a `NatDriver` per connection, driving it through
+  `NatDriver::poll(&mut driver, now)`.
+- Reports `flow.on_nat_complete(true)` once the transport is up, or
+  when `NatEvent::DirectPathEstablished` arrives.
+- Runs witness discovery. The full Coral path is M9.5; until then,
+  discovery is legitimately "not attempted → failed", which the flow
+  handles with `Ready(Pending)`.
+- Surfaces `NodeEvent::Ready { peer, kt_status }` and
+  `NodeEvent::EstablishmentFailed { peer, failure }`.
+
+Unresolved before M9.4b: NAT session-id coordination between peers.
+`NatTraversal::start_session` takes a caller-supplied `session_id`,
+and both sides must agree on it for `candidate_announce` correlation
+to work. The flow's `resume_from_key_claim` also takes a caller-
+supplied `session_id`. The coordination mechanism is not specified;
+M9.4b has to pick one (derive from both NodeIds, carry in a message,
+or reuse a transport identifier).
+
+### M9.5 — Coral DHT — NOT STARTED
+
+Wires `WitnessDiscovery` into the node so the flow's witness phase
+can run for real. It:
+
+- Wires `WitnessDiscovery::start` / `ingest_lookup_response` /
+  `ingest_spillover_response` into the peer tasks, so `coral_lookup`
+  and its friends route over the wire.
+- Replaces `LiveDht::lookup_connectivity` / `lookup_candidates`
+  no-ops with real Coral-driven lookups.
+- Replaces the DHT router's broadcast with XOR-distance selection
+  from the routing table.
+- Runs cluster merge/split against `cluster.rs`'s state machine.
+
+M9.5 is what makes the flow's witness phase reach `Ready(Verified)`
+for a peer with 4+ non-expired witness statements.
 
 ---
 
@@ -459,7 +512,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
 | `quip-net/src/establishment.rs:1` | M3.5 | §16 connection flow |
-| `quip-net/src/establishment.rs` (`resume_from_key_claim`) | M9.4 (prep) | flow started at `NatTraversal` |
+| `quip-net/src/establishment.rs` (`resume_from_key_claim`) | M9.4b (prep) | flow started at `NatTraversal` |
 | `quip-net/src/relay_hpke.rs:1` | M3.6 | concrete relay-hop HPKE sealer |
 | `quip-net/src/bft_driver.rs:1` | M4b.1–M4b.3 | BFT round core, view change, checkpointing |
 | `quip-net/src/bft_driver.rs` (`RingMembership`) | M4b.1 | canonical-order membership, quorum, primary rotation |
@@ -488,12 +541,19 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/range.rs` (`split_range`) | M7 | client-side range splitting |
 | `quip-net/src/range.rs` (`RangeResponder`) | M7 | responder with cap + quarantine |
 | `quip-net/src/test_support.rs:1` | — | test-only `FakeSigner` |
-| `quip-node/src/lib.rs:1` | M9.1, M9.2 | `Node` type, store integration, clock injection |
-| `quip-node/src/lib.rs` (`NodeConfig`) | M9.1, M9.2 | node configuration and clock |
+| `quip-node/src/lib.rs:1` | M9.1–M9.4a | `Node` type, store integration, clock injection, DHT routing |
+| `quip-node/src/lib.rs` (`NodeConfig`) | M9.1, M9.2, M9.4a | node configuration, clock, and capabilities |
 | `quip-node/src/lib.rs` (`Node::bind`) | M9.1 | server bind + accept loop |
-| `quip-node/src/lib.rs` (`Node::connect`) | M9.1 | dial + inline handshake |
+| `quip-node/src/lib.rs` (`Node::connect`) | M9.1, M9.4a | dial + inline handshake + DHT note_peer |
 | `quip-node/src/lib.rs` (`Node::store` and direct helpers) | M9.2 | store access and pin API |
 | `quip-node/src/lib.rs` (`try_auto_serve_pins`) | M9.2 | pin/unpin/query_pins auto-serve |
+| `quip-node/src/lib.rs` (`dht_router_task`) | M9.4a | broadcast DHT outbound to peers |
+| `quip-node/src/lib.rs` (`run_peer_loop` DHT branch) | M9.4a | intercept §12 NAT verbs |
+| `quip-node/src/dht.rs:1` | M9.4a | live `DhtClient` |
+| `quip-node/src/dht.rs` (`LiveDht`) | M9.4a | DHT client implementation |
+| `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a | node-owned DHT handle |
+| `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a | routing-table entry shape |
+| `quip-node/src/dht.rs` (`dht_result_from`) | M9.4a | §12 verb verification and conversion |
 
 The code subdivides NAT work as `M3a` / `M3b.1` / `M3b.2` / `M3b.3`
 and BFT work as `M4a` / `M4b`. The M3 section above numbers the later
@@ -502,9 +562,10 @@ the source. `M3b.3` is retired — its only `TODO`
 (`port_preservation`) landed with M3.3.
 
 **Not yet tagged but milestone-owned:** `flow.rs` (M7), `rate.rs`
-(M7), `discovery.rs` (M2), `coral.rs` (M2), `message.rs` BFT arms
-(M4), `bft.rs` (M4), `xtask/` (M6.2), `.github/workflows/ci.yml`
-(M6.3). Tagging on the next touch is cheap.
+(M7), `discovery.rs` (M2, to be consumed in M9.5), `coral.rs` (M2, to
+be consumed in M9.5), `message.rs` BFT arms (M4), `bft.rs` (M4),
+`xtask/` (M6.2), `.github/workflows/ci.yml` (M6.3). Tagging on the
+next touch is cheap.
 
 ---
 
@@ -512,14 +573,14 @@ the source. `M3b.3` is retired — its only `TODO`
 
 ### Application layer (M9)
 
-1. **M9.4 — `ConnectionFlow` integration + live `DhtClient`.** The
-   two land together. The `ConnectionFlow` type and its
-   `resume_from_key_claim` constructor are ready in `quip-net`;
-   the node does not consume them until the `DhtClient` exists,
-   because otherwise every connection reports
-   `Ready(Pending)` regardless of truth. New events: `Ready`,
-   `EstablishmentFailed`.
-2. **M9.4 — live `DhtClient`** (details in the M9.4 section above).
+1. **M9.4b — `ConnectionFlow` integration.** Wire the flow into each
+   peer task, resuming at `NatTraversal`. Land `NodeEvent::Ready` and
+   `NodeEvent::EstablishmentFailed`. Also settle the NAT session-id
+   coordination question (see the M9.4b section).
+2. **M9.5 — Coral DHT.** Wire `WitnessDiscovery` into the node.
+   Replace the DHT router's broadcast with XOR-distance routing.
+   Run cluster merge/split against `cluster.rs`. Replace
+   `LiveDht::lookup_*` no-ops with real Coral lookups.
 
 ### Protocol crates
 
@@ -541,8 +602,9 @@ the source. `M3b.3` is retired — its only `TODO`
 
 ### Housekeeping
 
-7. **Release tag.** `git tag v0.1.0-m9.2 && git push origin
-   v0.1.0-m9.2` after M9.4 lands, then `v0.1.0` once S8 lands.
+7. **Release tag.** `git tag v0.1.0-m9.4a && git push origin
+   v0.1.0-m9.4a` after M9.4a is on `main`, then `v0.1.0` once S8
+   lands.
 8. **GitHub metadata.** Repository description and topics.
 9. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
    The bound currently sits on `quip-node`'s `SharedClock` alias
@@ -574,3 +636,17 @@ anything and can land in any order.
 - **Repo description and topics** on GitHub.
 - **A `<link>` from `quip-node/src/lib.rs` to this file.** The other
   three crates have it; `quip-node` was created after that pass.
+
+### Roadmap edits at a glance
+
+- Status table: M9.3 marked "folded into M9.4b"; M9.4 split into
+  M9.4a (landed) and M9.4b (not started); M9.5 (Coral DHT) added.
+- M9.3 section updated to reference M9.4b, not M9.4.
+- M9.4 section replaced by M9.4a (what landed) and M9.4b (what
+  remains), each with its own scope notes.
+- Baseline counts: `quip-node` 9 → 13, total ~610 → ~615.
+- Open items 1–2 updated to reflect the new milestones.
+- Release-tag item updated to `v0.1.0-m9.4a`.
+- Tag index: `resume_from_key_claim` row updated to M9.4b; new rows
+  for `dht_router_task`, the peer-loop DHT branch, and the four items
+  in `dht.rs`.

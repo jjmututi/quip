@@ -38,7 +38,7 @@ update its row and the tag index in the same commit.
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
 | M9.4a | `quip-node`: live `DhtClient` over the node's peer connections | landed |
-| M9.4b | `quip-node`: `ConnectionFlow` integration | not started |
+| M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
 | M9.5 | Coral DHT: `WitnessDiscovery` wired into the node | not started |
 
 Every protocol-level milestone (M1–M8) is landed. The application
@@ -89,9 +89,9 @@ Baseline on `main`:
 quip-core      74 passed
 quip-net      471 passed
 quip-storage   57 passed
-quip-node      13 passed
+quip-node      15 passed
 doc-tests       4 passed (one per crate)
-             ~615 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~617 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ---
@@ -411,28 +411,37 @@ relay-response generation.
 `dht_routing_table_lists_peers`, `dht_publish_with_no_peers_is_a_noop`,
 `dht_forged_connectivity_is_dropped`.
 
-### M9.4b — ConnectionFlow integration — NOT STARTED
+### M9.4b — ConnectionFlow integration — LANDED
 
-The §16 flow runs in each peer task, resuming at `NatTraversal` via
-`ConnectionFlow::resume_from_key_claim`. The peer task:
+Each peer task now runs a `ConnectionFlow` between the inline §4/§16
+handshake and the steady-state loop.
 
-- Runs a `NatDriver` per connection, driving it through
-  `NatDriver::poll(&mut driver, now)`.
-- Reports `flow.on_nat_complete(true)` once the transport is up, or
-  when `NatEvent::DirectPathEstablished` arrives.
-- Runs witness discovery. The full Coral path is M9.5; until then,
-  discovery is legitimately "not attempted → failed", which the flow
-  handles with `Ready(Pending)`.
-- Surfaces `NodeEvent::Ready { peer, kt_status }` and
-  `NodeEvent::EstablishmentFailed { peer, failure }`.
+- `run_establishment` resumes the flow at `NatTraversal` via
+  `ConnectionFlow::resume_from_key_claim`, using a session identifier
+  derived symmetrically from the two NodeIds (`local[0..16] XOR
+  remote[0..16]`). Both sides compute the same value without
+  exchanging it on the wire.
+- The NAT phase concludes from the live transport: the handshake
+  proves direct connectivity, so `on_nat_complete(true)` reflects a
+  fact rather than a stub. M9.5 replaces this with a real `NatDriver`
+  waiting on `NatEvent::DirectPathEstablished`.
+- The witness phase concludes as "not attempted" (Coral discovery is
+  M9.5). The flow translates that into `Ready(Pending)` per §16
+  step 18.
+- `NodeEvent::Ready { peer, kt_status }` fires on success;
+  `NodeEvent::EstablishmentFailed { peer, failure }` fires on failure
+  and is followed by `NodeEvent::Disconnected`.
+- `DhtHandle` is refactored to `Clone` and to implement `DhtClient`
+  directly, with a `std::sync::Mutex` for its shared state. This is
+  groundwork for M9.5, which will wrap a `DhtHandle` in a per-peer
+  `NatDriver` without a further refactor.
+- `Node::dht()` returns a `DhtHandle` clone rather than holding a
+  lock; the routing table is reachable via `table_snapshot`,
+  `table_contains`, and `table_is_empty`.
 
-Unresolved before M9.4b: NAT session-id coordination between peers.
-`NatTraversal::start_session` takes a caller-supplied `session_id`,
-and both sides must agree on it for `candidate_announce` correlation
-to work. The flow's `resume_from_key_claim` also takes a caller-
-supplied `session_id`. The coordination mechanism is not specified;
-M9.4b has to pick one (derive from both NodeIds, carry in a message,
-or reuse a transport identifier).
+**Evidence:** `ready_fires_after_connect`,
+`dht_handle_clone_shares_routing_table`, and the existing connection
+tests (all now traverse the flow).
 
 ### M9.5 — Coral DHT — NOT STARTED
 
@@ -554,6 +563,10 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a | node-owned DHT handle |
 | `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a | routing-table entry shape |
 | `quip-node/src/dht.rs` (`dht_result_from`) | M9.4a | §12 verb verification and conversion |
+| `quip-node/src/lib.rs` (`run_establishment`) | M9.4b | §16 flow driven per peer |
+| `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
+| `quip-node/src/lib.rs` (`peer_run`) | M9.4b | establishment + steady-state entry point |
+| `quip-node/src/dht.rs` (`DhtHandle` impl `DhtClient`) | M9.4b | shared handle as DhtClient |
 
 The code subdivides NAT work as `M3a` / `M3b.1` / `M3b.2` / `M3b.3`
 and BFT work as `M4a` / `M4b`. The M3 section above numbers the later
@@ -573,14 +586,11 @@ next touch is cheap.
 
 ### Application layer (M9)
 
-1. **M9.4b — `ConnectionFlow` integration.** Wire the flow into each
-   peer task, resuming at `NatTraversal`. Land `NodeEvent::Ready` and
-   `NodeEvent::EstablishmentFailed`. Also settle the NAT session-id
-   coordination question (see the M9.4b section).
-2. **M9.5 — Coral DHT.** Wire `WitnessDiscovery` into the node.
+1. **M9.5 — Coral DHT.** Wire `WitnessDiscovery` into the node.
    Replace the DHT router's broadcast with XOR-distance routing.
-   Run cluster merge/split against `cluster.rs`. Replace
-   `LiveDht::lookup_*` no-ops with real Coral lookups.
+   Replace the flow's NAT-phase conclusion-from-transport with a
+   real `NatDriver`. Run cluster merge/split against `cluster.rs`.
+   Replace `LiveDht`'s lookup no-ops with real Coral lookups.
 
 ### Protocol crates
 

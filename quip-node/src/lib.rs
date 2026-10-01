@@ -4,17 +4,19 @@
 //! outbound ones, and surfaces a single event stream keyed by peer
 //! NodeId. It owns a [`QuipStore`] and uses it to auto-serve the
 //! storage-plane verbs that have a 1:1 wire mapping, and a
-//! [`LiveDht`](dht::LiveDht) that carries §12 NAT-plane verbs over the
-//! same connections.
+//! [`DhtHandle`] that carries §12 NAT-plane verbs over
+//! the same connections.
 //!
 //! # Scope
 //!
-//! This is the fourth cut. It does:
+//! This is the fifth cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
 //!   completion in a background task.
 //! - Dial outbound connections; drive the handshake inline.
+//! - Run a [`ConnectionFlow`] per peer, sequencing §16 establishment
+//!   from the point the transport's inline handshake leaves off.
 //! - Expose `send_to(peer, msg)` and `poll() -> Vec<NodeEvent>`.
 //! - Track a `NodeId -> outbound sender` table.
 //! - Track every peer task it spawns and abort them all on `Drop`.
@@ -25,22 +27,20 @@
 //!   `pin`, `unpin`, `query_pins`, and a raw `store()` accessor.
 //! - Read the wall clock through a [`Clock`], so tests can inject a
 //!   deterministic time source.
-//! - Own a `LiveDht` implementing `DhtClient`. §12 NAT verbs sent and
-//!   received through the node's peer connections are routed through
-//!   it; publishes broadcast to all connected peers.
+//! - Own a `DhtHandle` implementing `DhtClient`. §12 NAT verbs sent
+//!   and received through the node's peer connections are routed
+//!   through it; publishes broadcast to all connected peers.
 //!
 //! It does not (yet):
 //!
-//! - Run a
-//!   [`ConnectionFlow`](quip_net::establishment::ConnectionFlow)
-//!   per peer, and therefore emits no `Ready` event. The flow, the
-//!   live witness-discovery path, and `NodeEvent::Ready` /
-//!   `NodeEvent::EstablishmentFailed` land in M9.4b.
+//! - Drive a real `NatDriver` or run Coral witness discovery. The
+//!   flow's NAT phase concludes from the live transport; its witness
+//!   phase concludes as `Pending`. M9.5 wires both.
 //! - Route DHT lookups. `DhtClient::lookup_*` are no-ops; §12 has no
-//!   lookup verb and a real lookup is a Coral `coral_lookup`, which is
-//!   M9.5.
-//! - Run cluster merge/split. The DHT's routing table records observed
-//!   `ClusterInfo` but nothing consumes it.
+//!   lookup verb and a real lookup is a Coral `coral_lookup`, which
+//!   is M9.5.
+//! - Run cluster merge/split. The DHT's routing table records
+//!   observed `ClusterInfo` but nothing consumes it.
 //! - Auto-serve `register_tcid`, `delegation`, `derivative_link`,
 //!   `resource_announce`, or `query_resource`. Those carry signatures
 //!   the peer task cannot verify, or require a wire-to-storage type
@@ -51,18 +51,25 @@
 //!
 //! # Establishment
 //!
-//! A peer goes straight from the §4 handshake and §16 Key Claim
-//! exchange — both performed inline by `ConnectionDriver` — into
-//! steady-state operation. There is no `ConnectionFlow` at the node
-//! layer yet; M9.4b introduces it on top of the DHT client.
+//! After the §4 handshake and §16 Key Claim exchange — both performed
+//! inline by `ConnectionDriver` — each peer task runs a
+//! [`ConnectionFlow`] resumed at `NatTraversal` via
+//! [`ConnectionFlow::resume_from_key_claim`]. The flow's NAT phase
+//! concludes from the transport being up: direct connectivity is
+//! already proven by the handshake, so declaring success is not a
+//! stub, it is the truth. The witness phase concludes as
+//! `DiscoveryTimeout`-equivalent — "not attempted" — which the flow
+//! translates to `Ready(Pending)` per §16 step 18. M9.5 replaces the
+//! witness phase with real Coral lookups; when those succeed the flow
+//! reaches `Ready(Verified)`.
 //!
 //! # DHT routing
 //!
 //! §12 NAT verbs (`connectivity_announce`, `candidate_announce`,
 //! `relay_discovery`, `relay_response`) arriving on T0 are verified,
 //! matched against the sending peer, and enqueued into the node's
-//! [`LiveDht`](dht::LiveDht). Outgoing publishes are broadcast to every
-//! connected peer. There is no separate DHT peer set and no
+//! [`DhtHandle`]. Outgoing publishes are broadcast to
+//! every connected peer. There is no separate DHT peer set and no
 //! XOR-distance routing yet; M9.5 replaces the broadcast.
 //!
 //! # Auto-served verbs
@@ -135,6 +142,9 @@
 //! // React to peers.
 //! for event in node.poll().await? {
 //!     match event {
+//!         NodeEvent::Ready { peer, kt_status } => {
+//!             println!("ready: {peer:?} ({kt_status:?})");
+//!         }
 //!         NodeEvent::Message { peer, msg, .. } => {
 //!             println!("{} from {:?}", msg.verb(), peer);
 //!         }
@@ -151,6 +161,9 @@ use quip_core::cid::{CidOrV1, HashAlgo};
 use quip_core::dvv::NodeId;
 use quip_core::messages::{KeyClaim, PinEntry, Signer};
 use quip_core::time::{Clock, SystemClock, Timestamp};
+use quip_net::establishment::{
+    ConnectionFlow, FlowAction, FlowConfig, FlowFailure, FlowPhase, KtStatus,
+};
 use quip_net::frame::Tier;
 use quip_net::handshake::Capabilities;
 use quip_net::message::{self, Message};
@@ -224,8 +237,8 @@ impl core::fmt::Debug for NodeConfig {
 }
 
 impl NodeConfig {
-    /// Build a config with baseline capabilities plus NAT traversal and
-    /// DHT discovery, a claim derived from `signer`, auto-serving
+    /// Build a config with baseline capabilities plus NAT traversal
+    /// and DHT discovery, a claim derived from `signer`, auto-serving
     /// enabled, and the system clock.
     ///
     /// `NAT_TRAVERSAL` is what allows a peer to send and receive §12
@@ -299,13 +312,37 @@ pub fn make_key_claim(signer: &impl Signer, now: Timestamp) -> Result<KeyClaim> 
 pub enum NodeEvent {
     /// A peer completed the §4 handshake and §16 Key Claim exchange.
     ///
-    /// The peer is reachable from `send_to` at this point. M9.4b will
-    /// add a `Ready` event that marks the end of §16 establishment.
+    /// The peer is reachable from `send_to` at this point; the
+    /// establishment flow still has to run before T2/T3 traffic is
+    /// appropriate. That completion is signalled by
+    /// [`NodeEvent::Ready`].
     Connected {
         /// The peer's NodeId, as claimed. The application is
         /// responsible for verifying the claim's signature and
         /// applying its own TOFU / rotation policy.
         peer: NodeId,
+    },
+    /// The establishment flow reached `Ready`.
+    ///
+    /// `kt_status` is the trust level the flow computed. With M9.4b's
+    /// stubbed witness discovery, this is always
+    /// [`KtStatus::Pending`]; M9.5 will produce `Verified` for peers
+    /// with 4+ non-expired witness statements.
+    Ready {
+        /// The peer.
+        peer: NodeId,
+        /// KT status at the moment the flow completed.
+        kt_status: KtStatus,
+    },
+    /// The establishment flow failed before reaching `Ready`.
+    ///
+    /// The peer task terminates and [`NodeEvent::Disconnected`]
+    /// follows. The transport connection is closed.
+    EstablishmentFailed {
+        /// The peer.
+        peer: NodeId,
+        /// Why the flow failed.
+        failure: FlowFailure,
     },
     /// A peer disconnected.
     Disconnected {
@@ -477,8 +514,8 @@ where
     /// as for [`NodeEvent::Connected`].
     ///
     /// The returned `NodeId` is available as soon as the transport
-    /// handshake completes. M9.4b will add a `Ready` event that fires
-    /// later, after the §16 connection flow completes.
+    /// handshake completes. `NodeEvent::Ready` fires later, after the
+    /// establishment flow completes.
     pub async fn connect(
         &mut self,
         addr: SocketAddr,
@@ -500,7 +537,7 @@ where
             .lock()
             .await
             .insert(peer, PeerHandle { outbound: out_tx });
-        self.dht.note_peer(peer, Some(addr), clock.now()).await;
+        self.dht.note_peer(peer, Some(addr), clock.now());
         let _ = self.events_tx.send(NodeEvent::Connected { peer }).await;
 
         let events_tx = self.events_tx.clone();
@@ -514,7 +551,7 @@ where
             // is moved into the peer task and dropped when the loop
             // exits.
             let _keep_endpoint = client_endpoint;
-            peer_steady_loop(
+            peer_run(
                 driver, peer, store, clock, auto_serve, events_tx, out_rx, dht,
             )
             .await;
@@ -620,14 +657,13 @@ where
         self.store.lock().await
     }
 
-
-    /// Lock and access the node's DHT client.
+    /// A clone of the node's DHT handle.
     ///
-    /// Applications can use this to inspect the routing table or drive
-    /// the DHT directly; the M9.4b flow drives it automatically and
-    /// does not require the application to reach in.
-    pub async fn dht(&self) -> MutexGuard<'_, dht::LiveDht> {
-        self.dht.lock().await
+    /// Clones share the routing table and the inbound and outbound
+    /// queues. Used by the peer tasks (for M9.5's `NatDriver`) and by
+    /// applications that want to inspect or drive the DHT.
+    pub fn dht(&self) -> DhtHandle {
+        self.dht.clone()
     }
 
     // ---- Direct store helpers ----
@@ -807,10 +843,10 @@ async fn accept_loop<B>(
                 .lock()
                 .await
                 .insert(peer, PeerHandle { outbound: out_tx });
-            dht.note_peer(peer, None, clock.now()).await;
+            dht.note_peer(peer, None, clock.now());
             let _ = events_tx.send(NodeEvent::Connected { peer }).await;
 
-            peer_steady_loop(
+            peer_run(
                 driver,
                 peer,
                 store,
@@ -823,7 +859,7 @@ async fn accept_loop<B>(
             .await;
             peers.lock().await.remove(&peer);
             peer_tasks.lock().await.remove(&peer);
-            dht.forget_peer(&peer).await;
+            dht.forget_peer(&peer);
         });
     }
 }
@@ -849,9 +885,122 @@ async fn drive_handshake(
     }
 }
 
-/// Steady-state loop for one established peer.
+/// Derive a session identifier from the two NodeIds of a connection.
+///
+/// Symmetric, so both sides compute the same value without exchanging
+/// one on the wire. The low 16 bytes of the two NodeIds, XORed. A
+/// collision requires two distinct NodeId pairs to agree on their low
+/// halves, which is 2^-128 for uniformly-distributed NodeIds — well
+/// below any practical threshold.
+///
+/// The value is unused in M9.4b (`run_establishment` only passes it to
+/// the flow, which does not drive a `NatDriver` yet). It is derived
+/// now so that M9.5, which will start a `NatDriver` per peer, has a
+/// stable, symmetric scheme already in place.
+fn derive_session_id(local: &NodeId, remote: &NodeId) -> [u8; 16] {
+    let mut id = [0u8; 16];
+    for i in 0..16 {
+        id[i] = local[i] ^ remote[i];
+    }
+    id
+}
+
+/// Drive the §16 connection flow to completion.
+///
+/// Returns `true` on `Ready`. On any failure the `EstablishmentFailed`
+/// event has already been emitted and the return is `false`. The
+/// caller should then emit `Disconnected` and stop.
+///
+/// # M9.4b scope
+///
+/// The NAT phase concludes from the live transport: `ConnectionDriver`
+/// has already exchanged the §4 handshake and §16 Key Claims, which
+/// proves direct connectivity, so declaring `on_nat_complete(true)` is
+/// the truth, not a stub. The witness phase concludes as `Pending`
+/// because Coral discovery is M9.5; the flow translates the failure
+/// into `Ready(Pending)` per §16 step 18.
+async fn run_establishment(
+    local_claim: &KeyClaim,
+    peer_claim: &KeyClaim,
+    peer: NodeId,
+    clock: &SharedClock,
+    events_tx: &mpsc::Sender<NodeEvent>,
+) -> bool {
+    let session_id = derive_session_id(&local_claim.node_id, &peer);
+    let mut flow = ConnectionFlow::resume_from_key_claim(
+        local_claim.clone(),
+        peer_claim.clone(),
+        session_id,
+        FlowConfig::default(),
+        clock.now(),
+    );
+
+    loop {
+        let now = clock.now();
+
+        // Check for phase timeouts before driving the phase. An
+        // overdue phase fails here rather than being advanced.
+        for action in flow.poll(now) {
+            if let FlowAction::Failed(failure) = action {
+                let _ = events_tx
+                    .send(NodeEvent::EstablishmentFailed { peer, failure })
+                    .await;
+                return false;
+            }
+        }
+
+        match flow.phase() {
+            FlowPhase::NatTraversal => {
+                // The transport is up; direct connectivity is proven.
+                // M9.5 replaces this with a real `NatDriver` waiting
+                // for `NatEvent::DirectPathEstablished`.
+                let _ = flow.on_nat_complete(true, now);
+            }
+            FlowPhase::WitnessDiscovery => {
+                // M9.5 wires `WitnessDiscovery` into the node. Until
+                // then, "not attempted" is the honest answer, and the
+                // flow translates that to `Ready(Pending)`.
+                let _ = flow.on_discovery_failed();
+            }
+            FlowPhase::Ready(status) => {
+                let kt_status = *status;
+                let _ = events_tx
+                    .send(NodeEvent::Ready { peer, kt_status })
+                    .await;
+                return true;
+            }
+            FlowPhase::Failed(failure) => {
+                let failure = *failure;
+                let _ = events_tx
+                    .send(NodeEvent::EstablishmentFailed { peer, failure })
+                    .await;
+                return false;
+            }
+            FlowPhase::AwaitHandshake | FlowPhase::AwaitKeyClaim => {
+                // `resume_from_key_claim` starts the flow at
+                // `NatTraversal`, so reaching these phases here is a
+                // bug, not a runtime condition. Emit a protocol error
+                // and give up.
+                let error = Error::Transport(
+                    "establishment flow in a pre-NAT phase".into(),
+                );
+                let _ = events_tx
+                    .send(NodeEvent::Error {
+                        peer: Some(peer),
+                        error,
+                    })
+                    .await;
+                return false;
+            }
+        }
+    }
+}
+
+/// Run the establishment flow, then hand off to the steady-state loop.
+///
+/// Shared by the accept loop and `Node::connect`.
 #[allow(clippy::too_many_arguments)]
-async fn peer_steady_loop<B>(
+async fn peer_run<B>(
     mut driver: ConnectionDriver,
     peer: NodeId,
     store: Arc<Mutex<QuipStore<B>>>,
@@ -863,6 +1012,38 @@ async fn peer_steady_loop<B>(
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
+    // `drive_handshake` returns only after the §16 Key Claim exchange,
+    // so both claims are populated. Clone them out before the flow
+    // borrows anything; the driver then goes to the steady loop.
+    let local_claim = driver.local_key_claim().clone();
+    let peer_claim = match driver.peer_key_claim().cloned() {
+        Some(c) => c,
+        None => {
+            // Unreachable in practice; guard defensively in case the
+            // transport's guarantees change.
+            let failure = FlowFailure::KeyClaimTimeout;
+            let _ = events_tx
+                .send(NodeEvent::EstablishmentFailed { peer, failure })
+                .await;
+            let _ = events_tx.send(NodeEvent::Disconnected { peer }).await;
+            return;
+        }
+    };
+
+    let ready = run_establishment(
+        &local_claim,
+        &peer_claim,
+        peer,
+        &clock,
+        &events_tx,
+    )
+    .await;
+
+    if !ready {
+        let _ = events_tx.send(NodeEvent::Disconnected { peer }).await;
+        return;
+    }
+
     run_peer_loop(
         &mut driver,
         peer,
@@ -938,7 +1119,7 @@ async fn run_peer_loop<B>(
                             // and the claimed NodeId before returning
                             // a result.
                             if let Some(result) = dht::dht_result_from(&m, &peer) {
-                                dht.note_peer(peer, None, now).await;
+                                dht.note_peer(peer, None, now);
                                 dht.enqueue(result);
                                 continue;
                             }
@@ -1068,7 +1249,7 @@ mod tests {
     use quip_core::dvv::Dvv;
     use quip_core::time::ManualClock;
     use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
-use quip_net::nat_driver::{DhtClient, DhtResult};
+    use quip_net::nat_driver::DhtClient;
     use quip_net::nat_wire::{ConnectivityAnnounce, NAT_TYPE_OPEN};
     use quip_net::sync::{GetRequest, QueryPins};
     use quip_storage::CidTagging;
@@ -1131,6 +1312,29 @@ use quip_net::nat_driver::{DhtClient, DhtResult};
             }
         }
         false
+    }
+
+    /// Wait for `node` to emit a `Ready` event for `expected` and
+    /// return the KT status.
+    async fn wait_for_ready(
+        node: &mut Node,
+        expected: NodeId,
+        timeout_ms: u64,
+    ) -> Option<KtStatus> {
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        while std::time::Instant::now() < deadline {
+            if let Ok(events) = node.poll().await {
+                for e in events {
+                    if let NodeEvent::Ready { peer, kt_status } = e {
+                        if peer == expected {
+                            return Some(kt_status);
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Wait for `node` to see a `pin_list` from `expected` and return
@@ -1211,6 +1415,25 @@ use quip_net::nat_driver::{DhtClient, DhtResult};
             wait_for_connected(&mut b, a_node_id, 5_000).await,
             "B should see the inbound connection from A"
         );
+    }
+
+    #[tokio::test]
+    async fn ready_fires_after_connect() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        let peer_b = a.connect(b_addr, "localhost").await.unwrap();
+        assert_eq!(peer_b, b_node_id);
+
+        // With M9.4b's witness phase reaching Ready(Pending), both
+        // sides should surface that event.
+        let a_status = wait_for_ready(&mut a, b_node_id, 5_000)
+            .await
+            .expect("A should reach Ready");
+        assert_eq!(a_status, KtStatus::Pending);
     }
 
     #[tokio::test]
@@ -1441,14 +1664,18 @@ use quip_net::nat_driver::{DhtClient, DhtResult};
         assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
 
         let announce = signed_connectivity(1, a.now());
-        a.dht().await.publish_connectivity(announce.clone());
+        let mut a_dht = a.dht();
+        a_dht.publish_connectivity(announce.clone());
 
         // B's DHT client should receive the announcement.
+        let mut b_dht = b.dht();
         let deadline =
             std::time::Instant::now() + Duration::from_millis(5_000);
         let mut received: Option<ConnectivityAnnounce> = None;
         while std::time::Instant::now() < deadline && received.is_none() {
-            if let Some(DhtResult::Connectivity(got)) = b.dht().await.poll() {
+            if let Some(quip_net::nat_driver::DhtResult::Connectivity(got)) =
+                b_dht.poll()
+            {
                 received = Some(got);
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -1470,16 +1697,27 @@ use quip_net::nat_driver::{DhtClient, DhtResult};
         let b_node_id = b.local_node_id();
 
         // Before connecting, the tables are empty.
-        assert!(a.dht().await.table().is_empty());
-        assert!(b.dht().await.table().is_empty());
+        assert!(a.dht().table_is_empty());
+        assert!(b.dht().table_is_empty());
 
         let _ = a.connect(b_addr, "localhost").await.unwrap();
         assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
 
         // A recorded B on the outbound side, B recorded A on the
         // accept side.
-        assert!(a.dht().await.table().contains_key(&b_node_id));
-        assert!(b.dht().await.table().contains_key(&a_node_id));
+        assert!(a.dht().table_contains(&b_node_id));
+        assert!(b.dht().table_contains(&a_node_id));
+    }
+
+    /// Two clones of a `DhtHandle` share the routing table.
+    #[tokio::test]
+    async fn dht_handle_clone_shares_routing_table() {
+        let a = make_node(1).await;
+        let h1 = a.dht();
+        let h2 = a.dht();
+        let peer: NodeId = [0x42; 32];
+        h1.note_peer(peer, None, a.now());
+        assert!(h2.table_contains(&peer));
     }
 
     /// A fresh node's DHT client returns `None` from `poll` and does
@@ -1488,9 +1726,10 @@ use quip_net::nat_driver::{DhtClient, DhtResult};
     async fn dht_publish_with_no_peers_is_a_noop() {
         let a = make_node(1).await;
         let announce = signed_connectivity(1, a.now());
-        a.dht().await.publish_connectivity(announce);
-        assert!(a.dht().await.poll().is_none());
-        assert!(a.dht().await.table().is_empty());
+        let mut h = a.dht();
+        h.publish_connectivity(announce);
+        assert!(h.poll().is_none());
+        assert!(a.dht().table_is_empty());
     }
 
     /// A forged `connectivity_announce` (wrong attribution) is dropped
@@ -1513,13 +1752,15 @@ use quip_net::nat_driver::{DhtClient, DhtResult};
         // B's; the peer-loop check rejects it on the attribution.
         let mut announce = signed_connectivity(1, a.now());
         announce.node_id = b_node_id;
-        a.dht().await.publish_connectivity(announce);
+        let mut a_dht = a.dht();
+        a_dht.publish_connectivity(announce);
 
         // Give B a moment; nothing should arrive.
+        let mut b_dht = b.dht();
         let deadline =
             std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            assert!(b.dht().await.poll().is_none(), "forged announce leaked");
+            assert!(b_dht.poll().is_none(), "forged announce leaked");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }

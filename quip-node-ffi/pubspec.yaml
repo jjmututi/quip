@@ -1,0 +1,10 @@
+name: quip_node_ffi
+description: FFI bindings for the QUIP node.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.0.0
+
+dependencies:
+  flutter_rust_bridge: 2.13.0

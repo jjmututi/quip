@@ -1,65 +1,30 @@
-# QUIP — Roadmap
+# QUIP — Changelog
 
-Implementation milestones for the reference implementation of
-[draft-mututi-quip-03](./draft-mututi-quip-03.xml).
-
-## How to read this file
-
-Milestones are numbered `M1`–`M9` in dependency order, with dot
-sub-milestones where a milestone split during execution (`M6.1`,
-`M4b.1`, `M9.2`, `M9.4a`). The code cites its own milestone in
-comments; the **Tag index** at the bottom is the reverse mapping.
+A running record of every landed milestone in the QUIP reference
+implementation of [draft-mututi-quip-03](./draft-mututi-quip-03.xml),
+plus the current state of the workspace and the known gaps.
 
 **Statuses are evidence-based.** A milestone is *landed* only when the
 code exists, is wired into the crate root, and its tests pass under
 `cargo test --workspace --all-features`. "Drafted but not verified" is
 not a status this file recognises.
 
-**This file and the code must not drift.** When a milestone lands,
-update its row and the tag index in the same commit.
-
 ---
 
-## Status at a glance
-
-| Milestone | Scope | Status |
-|---|---|---|
-| M1 | Foundation: dispatch, codec, frame, error, constants | landed |
-| M2 | Coral DHT state: routing, cluster, witness discovery | landed |
-| M3 | NAT traversal: codecs, state machine, driver, connection flow, sealer | landed |
-| M4 | BFT consensus: wire codecs, round core, view change, checkpointing | landed |
-| M5 | QUIC transport: endpoint, handshake, T0/T1/T2/T3 I/O | landed |
-| M6 | Integration: §16 flow, test vectors, CI | landed |
-| M7 | Hardening: rate limits, caches, quarantine, state machines | landed |
-| M8 | Range fetch: bao verified streaming | landed |
-| Spec pass | S1–S7 and D4 resolved in the draft | landed |
-| Spec pass | S8 (`bft_state_transfer` ring signature scope) | open, spec-only |
-| M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
-| M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
-| M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
-| M9.4a | `quip-node`: live `DhtClient` over the node's peer connections | landed |
-| M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
-| M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
-| M9.5b | `quip-node`: real `NatDriver` + cluster merge/split | not started |
+## Current state
 
 Every protocol-level milestone (M1–M8) is landed. The application
-layer (M9.x) is in progress. M9.3 was folded into M9.4 and the M9.4
-work split in two: the DHT client first, then the flow that drives it.
-Running the §16 flow without a live DHT client would only produce a
-placeholder trust status; running it with one gives the NAT phase
-something real to talk to, and the flow reaches `Ready` on honest
-signals. §16 runs end-to-end through step 8 across the protocol
+layer (M9.x) is in progress: M9.1 through M9.5a are landed, M9.5b is
+not started. §16 runs end-to-end through step 8 across the protocol
 crates; the `Node` type composes them into a runnable peer.
 
----
-
-## Build status
+### Build status
 
 All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    615 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    619 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -88,16 +53,40 @@ Baseline on `main`:
 
 ```
 quip-core      74 passed
-quip-net      471 passed
+quip-net      465 passed
 quip-storage   57 passed
-quip-node      20 passed
+quip-node      23 passed
 doc-tests       4 passed (one per crate)
-             ~622 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~619 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
+
+### Status at a glance
+
+| Milestone | Scope | Status |
+|---|---|---|
+| M1 | Foundation: dispatch, codec, frame, error, constants | landed |
+| M2 | Coral DHT state: routing, cluster, witness discovery | landed |
+| M3 | NAT traversal: codecs, state machine, driver, connection flow, sealer | landed |
+| M4 | BFT consensus: wire codecs, round core, view change, checkpointing | landed |
+| M5 | QUIC transport: endpoint, handshake, T0/T1/T2/T3 I/O | landed |
+| M6 | Integration: §16 flow, test vectors, CI | landed |
+| M7 | Hardening: rate limits, caches, quarantine, state machines | landed |
+| M8 | Range fetch: bao verified streaming | landed |
+| Spec pass | S1–S7 and D4 resolved in the draft | landed |
+| Spec pass | S8 (`bft_state_transfer` ring signature scope) | open, spec-only |
+| M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
+| M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
+| M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
+| M9.4a | `quip-node`: live `DhtClient` over the node's peer connections | landed |
+| M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
+| M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
+| M9.5b | `quip-node`: real `NatDriver` + cluster merge/split | not started |
 
 ---
 
-## M1 — Foundation — LANDED
+## Landed milestones
+
+### M1 — Foundation — LANDED
 
 The dispatcher, codec closure, frame format, error codes, and shared
 constants every other module builds on.
@@ -106,15 +95,13 @@ constants every other module builds on.
 `messages`, `time`. `quip-net`: `codec`, `frame`, `error`,
 `constants`, `dispatch`.
 
-**Evidence:** the full `quip-core` suite (74 tests) and the
-`frame`/`codec` test groups.
+Tests: the full `quip-core` suite (74 tests) and the `frame`/`codec`
+test groups.
 
----
+### M2 — Coral DHT state — LANDED
 
-## M2 — Coral DHT state — LANDED
-
-Cluster self-organisation, XOR-distance routing, witness discovery, and
-the in-memory state a driver consults.
+Cluster self-organisation, XOR-distance routing, witness discovery,
+and the in-memory state a driver consults.
 
 - `cluster.rs` — `ClusterLevel`, `ClusterInfo`, acceptance (§13.2),
   merge (§13.4), split (§13.5), size estimation (§13.6).
@@ -125,12 +112,10 @@ the in-memory state a driver consults.
   XOR-distance selection and cross-path consensus.
 - `discovery.rs` — `WitnessDiscovery` state machine driving §5.3.2.
 
-**Evidence:** `cluster::tests`, `dht::tests`, `coral::tests`,
+Tests: `cluster::tests`, `dht::tests`, `coral::tests`,
 `discovery::tests`.
 
----
-
-## M3 — NAT traversal (§12) — LANDED
+### M3 — NAT traversal (§12) — LANDED
 
 - **Wire codecs (`M3.1`).** `nat_wire.rs` defines `Address`,
   `Candidate`, `RelayEntry`, and the four top-level messages:
@@ -141,17 +126,12 @@ the in-memory state a driver consults.
   observers), `CandidateTable`, `RelayManager` (§12.2 selection
   order), `HolePunchSession`, and the `NatTraversal` façade.
   `nat_driver.rs` holds the `DhtClient` trait, `DhtResult`,
-  `NullDhtClient`, and `NatDriver::poll()`. Outbound arms that need
-  an `Endpoint` or a `Signer` forward to the application as
-  `NatEvent`s.
+  `NullDhtClient`, and `NatDriver::poll()`.
 - **Relay emission (`M3.3`).** `NatTraversal::poll` runs a four-phase
-  per-session ladder (probe direct candidates; wait out the
-  collection window; emit `RequestRelays` once with a fresh
-  `request_id`; time out). `on_relay_response` correlates by both
+  per-session ladder. `on_relay_response` correlates by both
   `request_id` and `target`. `AddressState::port_preservation`
   replaces a hardcoded `true`.
-- **Driver-side handlers (`M3.4`).** `NatApplication` trait
-  (`probe_candidate`, `send_relay_discovery`, `on_nat_event`);
+- **Driver-side handlers (`M3.4`).** `NatApplication` trait;
   `NatDriver::build_relay_discovery`; `NatDriver::dispatch_event`;
   `poll_and_dispatch` convenience.
 - **Connection-establishment orchestration (`M3.5`).**
@@ -159,73 +139,47 @@ the in-memory state a driver consults.
   flow-control frames). `ConnectionFlow` sequences §16 phases:
   `AwaitHandshake → AwaitKeyClaim → NatTraversal → WitnessDiscovery
   → Ready(KtStatus)`, with `Failed(FlowFailure)` reachable via
-  timeout. `FlowAction` carries the next step: `Send`,
-  `StartNatTraversal`, `StartWitnessDiscovery`, `Ready`, `Failed`.
-  KT status computed from accumulated `AnnounceWitness`: 4+
-  non-expired ⇒ `Verified`, else `Pending`. A failed discovery
-  yields `Ready(Pending)`. `resume_from_key_claim` (added in the
-  M9 series) starts the flow at `NatTraversal` for callers whose
-  transport performs the §4/§16 exchanges inline.
+  timeout. `resume_from_key_claim` (added in the M9 series) starts
+  the flow at `NatTraversal` for callers whose transport performs the
+  §4/§16 exchanges inline.
 - **Residuals (`M3.6`).** Adaptive re-announce (§12.1) via
   `AddressState::observe_at` + `NatTraversal::current_reannounce_percent`.
   Multi-hop relay chains via `RelayManager::best_chain` and
-  `build_chain_recursive`, sealing each hop's `traffic_key ||
-  CBOR(trailing chain)`. Relay-announce rate limit via a per-peer
-  `RelayAnnounceWindow`.
+  `build_chain_recursive`.
 - **Concrete sealer.** `relay_hpke.rs` implements `RelayHopSealer`:
   HPKE `mode_base`, `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` /
-  `ChaCha20Poly1305`, `info = "QUIP-relay-hop-v1"`, empty `aad`. The
-  recipient key is the Ed25519→X25519 birational map of `relay_id`,
-  exposed as `ed25519_to_x25519`. Behind the `hpke` feature (off by
-  default; `full` enables it).
+  `ChaCha20Poly1305`, `info = "QUIP-relay-hop-v1"`, empty `aad`.
 
-**Evidence:** `nat::tests`, `nat_wire::tests`, `nat_driver::tests`,
+Tests: `nat::tests`, `nat_wire::tests`, `nat_driver::tests`,
 `establishment::tests`, `relay_hpke::tests`.
 
----
-
-## M4 — BFT consensus (§5.3.4, §5.3.4.1) — LANDED
+### M4 — BFT consensus (§5.3.4, §5.3.4.1) — LANDED
 
 - **Wire codecs (`M4a`).** `bft.rs` defines all eight messages with
   `to_bytes` / `from_bytes` / `signing_payload` / `verify`. `Operation`
-  is a real struct (`kind: tstr`, `subject: bytes`, `body: any`).
-  `BftPreprepare::compute_digest` recomputes
+  is a real struct. `BftPreprepare::compute_digest` recomputes
   `SHA-256(ring_id || view || sequence || QUIP-CBOR(operation))` with
-  8-byte big-endian view and sequence; `verify_digest` and
-  `verify_full` enforce it. Wired into `message.rs`.
+  8-byte big-endian view and sequence.
 - **Round core (`M4b.1`).** `bft_driver.rs` runs the four-phase
   protocol in a single view. `RingMembership` holds members in
   canonical NodeId order (S3); `primary_for(v)` is
   `members[v mod |R|]`; `quorum()` is `n - f`. `BftHandler` is the
-  application-side apply hook. `RoundState` and `try_advance` drive
-  each quorum transition exactly once.
+  application-side apply hook.
 - **View change (`M4b.2`).** `start_view_change` broadcasts a
-  `bft_view_change` for `view + 1`. `on_view_change` discards
-  superseded votes before signature verification, joins a
-  peer-initiated view change, ignores votes for a different target.
-  `on_new_view` verifies the sender is the primary for the target
-  view, verifies the primary signature, decodes each enclosed
-  view-change message, resolves each signer by trial verification
-  against the ring (`find_view_change_signer`, O(|R|) per message),
-  enforces distinct signers, adopts on quorum.
+  `bft_view_change` for `view + 1`. `on_new_view` verifies the sender
+  is the primary for the target view, verifies the primary signature,
+  decodes each enclosed view-change message, resolves each signer by
+  trial verification against the ring.
 - **Checkpointing and state transfer (`M4b.3`).** `BftHandler` gains
-  `state_digest()`, `state_bytes()`, `apply_state()` with
-  conservative defaults. `apply_current` triggers a checkpoint every
-  `CHECKPOINT_INTERVAL`; `start_checkpoint()` is public.
-  `on_checkpoint` collects witness signatures over
-  `(sequence, state_digest)` and promotes to stable at quorum;
-  stability is checked against `stable_checkpoint`, not
-  `checkpoint_sequence`, so a checkpoint at sequence 0 is not
-  mistaken for one already held. `request_state_transfer` emits a
-  `bft_state_transfer` with empty state and empty ring signature;
-  `on_state_transfer` dispatches on whether the ring signature is
-  empty and installs a verified response.
+  `state_digest()`, `state_bytes()`, `apply_state()`. `on_checkpoint`
+  collects witness signatures over `(sequence, state_digest)` and
+  promotes to stable at quorum. `request_state_transfer` emits a
+  `bft_state_transfer`; `on_state_transfer` dispatches on whether the
+  ring signature is empty and installs a verified response.
 
-**Evidence:** `bft::tests`, `bft_driver::tests`.
+Tests: `bft::tests`, `bft_driver::tests`.
 
----
-
-## M5 — QUIC transport (§11, §12, §16) — LANDED
+### M5 — QUIC transport (§11, §12, §16) — LANDED
 
 `transport.rs` binds QUIP to QUIC via `quinn`.
 
@@ -237,66 +191,41 @@ the in-memory state a driver consults.
 - Per-tier send halves (T0/T1), per-resource T2 streams held for the
   connection's lifetime; read halves moved into tasks feeding a
   shared `mpsc::Sender<Event>`.
-- Four read loops: T0, T1, T2-accept, T3-datagram. `Event` enum:
-  `Frame`, `Datagram`, `BulkStreamOpened`, `ControlConnected`,
-  `Error`.
+- Four read loops: T0, T1, T2-accept, T3-datagram.
 
-**Evidence:** 16 tests in `transport::tests` over a real QUIC
-handshake pair.
+Tests: 16 tests in `transport::tests` over a real QUIC handshake pair.
 
----
+### M6 — Integration + vectors + CI — LANDED
 
-## M6 — Integration + vectors + CI — LANDED
-
-- **§16 integration (`M6.1`).** Five tests, one per stage 4–8:
-  `bulk_full_transfer_verifies_cid`,
-  `fetch_range_round_trip_with_proof`,
-  `governance_register_tcid_round_trips`,
-  `bft_consensus_sequence_round_trips`,
-  `cross_path_validation_round_trips`. Stages 1–3 covered by the
-  pre-existing transport tests. Two non-test changes were needed:
-  `Endpoint` holds a `QuipNetConfig`; `ConnectionDriver` keeps the
-  receive half of every outbound T2 stream alive.
+- **§16 integration (`M6.1`).** Five tests, one per stage 4–8.
 - **Signing vectors (`M6.2`).** `test-vectors/` holds
   `key_claim.json`, `witness_statement.json`,
   `individual_ring_sig.json`, `frost_ring_sig.json`. Generated by
-  `cargo xtask generate-vectors`. A CI job regenerates and diffs.
+  `cargo xtask generate-vectors`.
 - **CI (`M6.3`).** `.github/workflows/ci.yml` runs five independent
   jobs: `test`, `clippy`, `doc`, `no_std`, `vectors`.
 
----
-
-## M7 — Hardening (§11, §19.4) — LANDED
+### M7 — Hardening (§11, §19.4) — LANDED
 
 - **Rate limiting.** `ConnectionDriver` enforces inbound limits per
-  peer NodeId via `RateLimiter`. T2 (bulk) exempt; pre-handshake
-  unbounded. Per-connection scope.
-- **Bao chunk-tree cache.** `bao_cache.rs` holds bao *outboards*
-  (~6.25% of a resource) keyed by BLAKE3 digest. LRU, bounded.
-  `extract_proof_cached` serves from the cache on a hit.
-  `ExtractedProof::recomputed` signals §8.2's rate-limit case.
-- **Quarantine on range.** `range::QuarantineCheck` implemented for
-  `quip_storage::QuarantineStore`; `NoQuarantine` for deployments
-  without the primitive. `serve_range` and `RangeResponder` consult
-  the policy and return `E_QUARANTINED`.
+  peer NodeId via `RateLimiter`. T2 (bulk) exempt.
+- **Bao chunk-tree cache.** `bao_cache.rs` holds bao outboards keyed
+  by BLAKE3 digest. LRU, bounded.
+- **Quarantine on range.** `QuarantineCheck` implemented for
+  `QuarantineStore`; `NoQuarantine` for deployments without the
+  primitive.
 - **Range length cap.** `RangeResponder::serve` binds cache,
   quarantine policy, and negotiated `max_range_length`.
-- **T1 SYNC state machine.** `sync_stream.rs` models six states and
-  their transitions; the transport driver consults it.
+- **T1 SYNC state machine.** `sync_stream.rs` models six states.
 - **Connection throttling.** `backoff::BackoffTracker<K>`;
-  `dht::WitnessLoad` caps concurrent ring participation at 10. The
-  transport driver records per-peer errors into a
-  `BackoffTracker<NodeId>`.
+  `dht::WitnessLoad` caps concurrent ring participation at 10.
 - **DoS bounds.** `split_range` plans multi-request fetches;
-  concurrent inbound T2 streams capped at `T2_MAX_STREAMS` via a
-  `Semaphore`.
+  concurrent inbound T2 streams capped at `T2_MAX_STREAMS`.
 - **Flow control.** `flow.rs` codec and state machine (§11).
 - **Pin eviction.** `quip-storage/src/pins.rs` evicts by lowest
   `ref_count` then age.
 
----
-
-## M8 — Range fetch — LANDED
+### M8 — Range fetch — LANDED
 
 `range.rs` defines `fetch_range` and `range_response`;
 `bao_support::extract_proof` and `verify_response` are behind the
@@ -307,112 +236,77 @@ handshake pair.
   `(MAX_MESSAGE_SIZE - 1024) / 2`.
 - Range bounds checked before encoding.
 
-**Evidence:** `range::tests` (30 tests: 6 codec, 3 quarantine-policy,
-21 in `bao_tests`, 9 of which exercise the M7 cached path).
+Tests: `range::tests` (30 tests: 6 codec, 3 quarantine-policy, 21 in
+`bao_tests`, 9 of which exercise the M7 cached path).
 
----
-
-## M9 — Application layer — IN PROGRESS
-
-The `quip-node` crate. `Node` binds a QUIC endpoint, accepts inbound
-connections, dials outbound ones, and owns a `QuipStore` that
-auto-serves the storage-plane verbs with a 1:1 wire mapping.
-
-### M9.1 — Transport integration — LANDED
+### M9.1 — `quip-node` transport integration — LANDED
 
 - `NodeConfig::new` derives a signed `KeyClaim` from a `Signer`.
 - `Node::bind` spawns an accept loop; each accepted
   `ConnectionDriver` is driven through the §4/§16 handshake and
   handed to a peer task.
-- `Node::connect` dials, drives the handshake inline, and returns the
-  peer's `NodeId`.
+- `Node::connect` dials, drives the handshake inline, and returns
+  the peer's `NodeId`.
 - `Node::poll` drains the event channel with a short timeout.
 - `Node::send_to` routes a `Message` to a peer's outbound queue.
 - `Node::shutdown` closes the endpoint; `Drop` aborts the accept task
-  and every peer task. The peer-task map and its `Drop` handling came
-  out of the first CI round; without it, dropped nodes leaked tasks
-  and hung the test binary.
+  and every peer task.
 
-**Evidence:** `quip-node::tests::two_nodes_connect`,
-`two_nodes_exchange_messages`, `send_to_unknown_peer_errors`,
-`local_addr_is_bound`, `peers_snapshot_grows_after_connect`,
-`drop_releases_peer_tasks`.
+Tests: `two_nodes_connect`, `two_nodes_exchange_messages`,
+`send_to_unknown_peer_errors`, `local_addr_is_bound`,
+`peers_snapshot_grows_after_connect`, `drop_releases_peer_tasks`.
 
-### M9.2 — Store integration — LANDED
+### M9.2 — `quip-node` store integration — LANDED
 
 - `Node<B>` owns an `Arc<Mutex<QuipStore<B>>>` shared across peer
-  tasks; `B` defaults to `MemoryBlobStore` and can be any
-  `BlobStore + Send + Sync`.
+  tasks.
 - Direct store helpers: `put_content`, `get_content`, `pin`,
   `unpin`, `query_pins`, `store()`.
 - With `auto_serve_pins` on (default), inbound `pin`, `unpin`, and
   `query_pins` are applied to the store inside the peer task and do
-  not surface as `NodeEvent::Message`. `query_pins` replies with a
-  `pin_list` on the same tier.
+  not surface as `NodeEvent::Message`.
 - `register_tcid`, `delegation`, and `derivative_link` are
-  deliberately not auto-served: they carry signatures the peer task
-  cannot verify, so the application handles them, verifies, then
-  calls `store()`.
+  deliberately not auto-served.
 - **Clock injection.** `NodeConfig::clock` is a `SharedClock`
-  (`Arc<dyn Clock + Send + Sync + 'static>`) defaulting to
-  `SystemClock`; tests inject a
-  [`ManualClock`](quip-core/src/time.rs). Every peer task reads the
-  clock instead of `quip_net::unix_now()`, so timestamps the
-  application and the peer tasks compute agree by construction.
-  Fixes the auto-serve expiration mismatch the first cut of M9.2 hit.
+  defaulting to `SystemClock`; tests inject a `ManualClock`.
 
-**Evidence:** `put_and_get_content_round_trip`,
+Tests: `put_and_get_content_round_trip`,
 `peer_query_pins_is_auto_served`, `peer_pin_is_applied_to_store`, and
 the doctest.
 
-### M9.3 — ConnectionFlow integration — FOLDED INTO M9.4b
+### M9.3 — `quip-node` ConnectionFlow integration — FOLDED INTO M9.4b
 
 Deferred. Running the §16 `ConnectionFlow` at the node layer without
 a real `NatDriver` and `DhtClient` can only drive the NAT phase to a
 hardcoded success and the witness-discovery phase to a hardcoded
 failure, yielding `Ready(Pending)` for every connection regardless of
-what is actually true. That is spec-legal (§16 step 18 permits
-PENDING for a live connection) but it is a lie to the application,
-and a reference implementation should not ship it. The
-`ConnectionFlow::resume_from_key_claim` constructor was added to
-`quip-net` in preparation, with a unit test; the node consumes it
-in M9.4b.
+what is actually true. The `ConnectionFlow::resume_from_key_claim`
+constructor was added to `quip-net` in preparation; the node consumes
+it in M9.4b.
 
-### M9.4a — Live DhtClient — LANDED
+### M9.4a — `quip-node` live DhtClient — LANDED
 
 `quip-node/src/dht.rs` adds a live `DhtClient` on top of the node's
 existing T0 connections.
 
 - `LiveDht` implements `quip_net::nat_driver::DhtClient`. The three
-  publish verbs (`publish_connectivity`, `publish_candidates`,
-  `discover_relays`) broadcast to every connected peer. The two
-  lookup verbs are documented no-ops: §12 has no lookup verb, and a
-  real lookup is a Coral `coral_lookup` (§13.7) driven by
-  `WitnessDiscovery`, which is M9.5.
+  publish verbs broadcast to every connected peer. The two lookup
+  verbs are documented no-ops.
 - A `DhtHandle` bundles the shared `LiveDht` with a clone of the
-  inbound channel, so a peer task can record a peer and enqueue a
-  result in one call.
+  inbound channel.
 - A router task drains the DHT's outbound queue and forwards each
-  message to every connected peer. M9.5 replaces broadcast with
-  XOR-distance routing.
+  message to every connected peer.
 - §12 NAT verbs on T0 are intercepted in the peer steady loop before
   the pin auto-serve path: `dht_result_from` verifies the signature
   and the claimed NodeId, and only on success is the result enqueued.
-  A forged or mis-attributed verb is dropped silently, never reaching
-  the DHT client and never surfacing as a `NodeEvent::Message`.
 - `NodeConfig::new` now advertises `NAT_TRAVERSAL` and
   `DHT_DISCOVERY` so §12 verbs pass the transport's capability gate.
-  Neither is in the baseline set.
 
-Deliberately out of scope: cluster merge/split (the routing table
-records `ClusterInfo` but nothing consumes it), Coral lookups, and
-relay-response generation.
-
-**Evidence:** `dht_publish_connectivity_reaches_peer`,
+Tests: `dht_publish_connectivity_reaches_peer`,
 `dht_routing_table_lists_peers`, `dht_publish_with_no_peers_is_a_noop`,
 `dht_forged_connectivity_is_dropped`.
 
-### M9.4b — ConnectionFlow integration — LANDED
+### M9.4b — `quip-node` ConnectionFlow integration — LANDED
 
 Each peer task now runs a `ConnectionFlow` between the inline §4/§16
 handshake and the steady-state loop.
@@ -420,67 +314,52 @@ handshake and the steady-state loop.
 - `run_establishment` resumes the flow at `NatTraversal` via
   `ConnectionFlow::resume_from_key_claim`, using a session identifier
   derived symmetrically from the two NodeIds (`local[0..16] XOR
-  remote[0..16]`). Both sides compute the same value without
-  exchanging it on the wire.
+  remote[0..16]`).
 - The NAT phase concludes from the live transport: the handshake
-  proves direct connectivity, so `on_nat_complete(true)` reflects a
-  fact rather than a stub. M9.5 replaces this with a real `NatDriver`
-  waiting on `NatEvent::DirectPathEstablished`.
-- The witness phase concludes as "not attempted" (Coral discovery is
-  M9.5). The flow translates that into `Ready(Pending)` per §16
-  step 18.
+  proves direct connectivity. M9.5 replaces this with a real
+  `NatDriver` waiting on `NatEvent::DirectPathEstablished`.
+- The witness phase concludes as "not attempted". The flow translates
+  that into `Ready(Pending)` per §16 step 18.
 - `NodeEvent::Ready { peer, kt_status }` fires on success;
   `NodeEvent::EstablishmentFailed { peer, failure }` fires on failure
   and is followed by `NodeEvent::Disconnected`.
 - `DhtHandle` is refactored to `Clone` and to implement `DhtClient`
-  directly, with a `std::sync::Mutex` for its shared state. This is
-  groundwork for M9.5, which will wrap a `DhtHandle` in a per-peer
-  `NatDriver` without a further refactor.
+  directly, with a `std::sync::Mutex` for its shared state.
 - `Node::dht()` returns a `DhtHandle` clone rather than holding a
-  lock; the routing table is reachable via `table_snapshot`,
-  `table_contains`, and `table_is_empty`.
+  lock.
 
-**Evidence:** `ready_fires_after_connect`,
+Tests: `ready_fires_after_connect`,
 `dht_handle_clone_shares_routing_table`, and the existing connection
 tests (all now traverse the flow).
 
-### M9.5a — shared Coral discovery — LANDED
+### M9.5a — `quip-node` shared Coral discovery — LANDED
 
 `quip-node/src/discovery.rs` adds a `DiscoveryHandle` that wraps
-`WitnessDiscovery<Ed25519Signer>` behind an `Arc<Mutex<…>>`. Every
-peer task shares one instance, so the ring cache (24 h) and the
-spillover cache (5 min) are unified across the node.
+`WitnessDiscovery<Ed25519Signer>` behind an `Arc<Mutex<…>>`.
 
 - The flow's witness phase runs the real state machine. Each peer
   task starts a discovery for its remote, sends a signed
   `coral_lookup`, ingests the response, and either completes with
   `Ready(Verified)` (4+ witnesses) or falls back to
   `Ready(Pending)`.
-- The node is both a Coral client and a Coral server. During
-  establishment and in the steady-state loop, inbound
+- The node is both a Coral client and a Coral server. Inbound
   `coral_lookup` / `spillover` requests are answered with signed
   responses. M9.5a's responder answers with no witnesses and no
   consensus, which is honest — the node holds no
   `WitnessStatement`s yet.
 - `NodeConfig` gains a `signer: SharedSigner` field
-  (`Arc<Ed25519Signer>`, not `Arc<dyn Signer>`: every verifier in
-  the workspace is `Ed25519Verifier`). `NodeConfig::new` now takes
-  the signer by value as `SharedSigner`.
-- `Node::discovery()` returns a `DiscoveryHandle` clone, so an
-  application can start a lookup directly.
+  (`Arc<Ed25519Signer>`, not `Arc<dyn Signer>`).
+- `Node::discovery()` returns a `DiscoveryHandle` clone.
 
-**Scope note.** In a two-node network neither side holds
-witnesses, so both peers reach `Ready(Pending)`. The machinery is
-real; a larger network with actual witness statements reaches
-`Ready(Verified)`. The state machine's `Verified` path is covered
-by the unit tests in `quip-node::discovery`.
+**Scope note.** In a two-node network neither side holds witnesses,
+so both peers reach `Ready(Pending)`. The machinery is real; a larger
+network with actual witness statements reaches `Ready(Verified)`.
 
 **Known limitation.** The establishment-time discovery wait uses a
 wall-clock deadline (5 s), not the injected `Clock`. A frozen
-`ManualClock` would otherwise hang the phase forever. The injected
-clock is still used for phase timeouts and signature timestamps.
+`ManualClock` would otherwise hang the phase forever.
 
-**Evidence:** `ready_via_shared_discovery_on_both_sides`,
+Tests: `ready_via_shared_discovery_on_both_sides`,
 `discovery_local_node_id_matches_node`,
 `discovery_clones_share_state`, plus the unit tests in
 `quip-node::discovery`.
@@ -500,10 +379,9 @@ and one open revision.
 - **S3 — View-change ordering.** §5.3.4 pins ring order to canonical
   NodeId order; primary for `v` is `members[v mod |R|]`.
 - **S4 — `bft_state_transfer.state` contents.** §5.3.4.1 requires the
-  state to be opaque, digest-bound
-  (`checkpoint_digest = SHA-256(state)`), deterministically
-  decodable, and to encode the DVV, view, sequence, and
-  post-checkpoint operations at minimum.
+  state to be opaque, digest-bound, deterministically decodable, and
+  to encode the DVV, view, sequence, and post-checkpoint operations
+  at minimum.
 - **S5 — Handshake framing.** §4 specifies self-delimiting CBOR
   without the varint prefix. Buffer cap is `MAX_HANDSHAKE_BYTES`
   (4096).
@@ -527,6 +405,55 @@ and one open revision.
 
 ---
 
+## Known gaps and deferred work
+
+### Application layer (M9)
+
+1. **M9.5b — real `NatDriver` + cluster.** Wire a per-peer
+   `NatDriver` into the flow so the NAT phase concludes from a real
+   `NatEvent::DirectPathEstablished` rather than from the transport
+   being up. Run `ClusterState` merge/split against the routing
+   table. Replace `LiveDht`'s lookup no-ops with real Coral lookups
+   and replace the DHT router's broadcast with XOR-distance routing.
+2. **M9.6 — witness accumulation.** The responder currently answers
+   with no witnesses; when the node accumulates `WitnessStatement`s
+   from its peers, the responder returns real rings and
+   `Ready(Verified)` becomes reachable in a two-node network.
+
+### Protocol crates
+
+3. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
+   describes the extra round trip a fresh quorum ring signature
+   would require, or whether it adopts the checkpoint-signatures
+   interpretation the implementation uses.
+4. **Prepared-operation carry-forward on view change.** The new
+   primary does not yet re-propose operations prepared in an earlier
+   view; `bft_new_view.prepared_messages` is emitted empty.
+5. **Checkpoint carry-forward on view change.**
+   `bft_new_view.checkpoint_messages` is emitted empty. The driver
+   already retains `stable_checkpoint`, but `maybe_emit_new_view`
+   does not encode it.
+6. **FROST ring signature verification** in
+   `verify_checkpoint_ring_sig`. Requires a group public key on the
+   ring; the driver does not hold one today. The individual-signature
+   path is complete.
+
+### Housekeeping
+
+7. **Release tag.** `git tag v0.1.0-m9.5a && git push origin
+   v0.1.0-m9.5a`, then `v0.1.0` once S8 lands.
+8. **GitHub metadata.** Repository description and topics.
+9. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+   The bound currently sits on `quip-node`'s `SharedClock` alias
+   because widening the trait is a breaking change. Every reasonable
+   clock satisfies the stronger bound; the alias should eventually
+   become unnecessary.
+10. **A `<link>` from `quip-node/src/lib.rs` to this file.** The
+    other three crates have it; `quip-node` was created after that
+    pass.
+
+---
+
 ## Tag index
 
 Milestone citations in the source. Update both when a tag moves.
@@ -546,7 +473,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
 | `quip-net/src/establishment.rs:1` | M3.5 | §16 connection flow |
-| `quip-net/src/establishment.rs` (`resume_from_key_claim`) | M9.4b (prep) | flow started at `NatTraversal` |
+| `quip-net/src/establishment.rs` (`resume_from_key_claim`) | M9.4b | flow started at `NatTraversal` |
 | `quip-net/src/relay_hpke.rs:1` | M3.6 | concrete relay-hop HPKE sealer |
 | `quip-net/src/bft_driver.rs:1` | M4b.1–M4b.3 | BFT round core, view change, checkpointing |
 | `quip-net/src/bft_driver.rs` (`RingMembership`) | M4b.1 | canonical-order membership, quorum, primary rotation |
@@ -608,97 +535,7 @@ the source. `M3b.3` is retired — its only `TODO`
 (`port_preservation`) landed with M3.3.
 
 **Not yet tagged but milestone-owned:** `flow.rs` (M7), `rate.rs`
-(M7), `discovery.rs` (M2, to be consumed in M9.5), `coral.rs` (M2, to
-be consumed in M9.5), `message.rs` BFT arms (M4), `bft.rs` (M4),
+(M7), `discovery.rs` (M2, consumed in M9.5a), `coral.rs` (M2, to be
+consumed in M9.5b), `message.rs` BFT arms (M4), `bft.rs` (M4),
 `xtask/` (M6.2), `.github/workflows/ci.yml` (M6.3). Tagging on the
 next touch is cheap.
-
----
-
-## Open items
-
-### Application layer (M9)
-
-1. **M9.5 — Coral DHT.** Wire `WitnessDiscovery` into the node.
-   Replace the DHT router's broadcast with XOR-distance routing.
-   Replace the flow's NAT-phase conclusion-from-transport with a
-   real `NatDriver`. Run cluster merge/split against `cluster.rs`.
-   Replace `LiveDht`'s lookup no-ops with real Coral lookups.
-2. **M9.5b — real `NatDriver` + cluster.** Wire a per-peer
-   `NatDriver` into the flow so the NAT phase concludes from a real
-   `NatEvent::DirectPathEstablished` rather than from the transport
-   being up. Run `ClusterState` merge/split against the routing
-   table.
-3. **M9.6 — witness accumulation.** The responder currently answers
-   with no witnesses; when the node accumulates `WitnessStatement`s
-   from its peers, the responder returns real rings and
-   `Ready(Verified)` becomes reachable in a two-node network.
-
-### Protocol crates
-
-3. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
-   describes the extra round trip a fresh quorum ring signature
-   would require, or whether it adopts the checkpoint-signatures
-   interpretation the implementation uses.
-4. **Prepared-operation carry-forward on view change.** The new
-   primary does not yet re-propose operations prepared in an earlier
-   view; `bft_new_view.prepared_messages` is emitted empty.
-5. **Checkpoint carry-forward on view change.**
-   `bft_new_view.checkpoint_messages` is emitted empty. Same shape as
-   (4): the driver already retains `stable_checkpoint`, but
-   `maybe_emit_new_view` does not encode it.
-6. **FROST ring signature verification** in
-   `verify_checkpoint_ring_sig`. Requires a group public key on the
-   ring; the driver does not hold one today. The individual-signature
-   path is complete.
-
-### Housekeeping
-
-7. **Release tag.** `git tag v0.1.0-m9.4a && git push origin
-   v0.1.0-m9.4a` after M9.4a is on `main`, then `v0.1.0` once S8
-   lands.
-8. **GitHub metadata.** Repository description and topics.
-9. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
-   The bound currently sits on `quip-node`'s `SharedClock` alias
-   because widening the trait is a breaking change. Every reasonable
-   clock satisfies the stronger bound; the alias should eventually
-   become unnecessary.
-
-Items 1 and 2 block the application layer. Items 3–6 do not block
-anything and can land in any order.
-
----
-
-## Housekeeping
-
-### Done
-- `git init` and first push; branch `main` at
-  `github.com/jjmututi/quip`.
-- `LICENSE-MIT` and `LICENSE-APACHE`, matching `MIT OR Apache-2.0`
-  in every manifest.
-- `.gitignore` with `target/`.
-- CI workflow at `.github/workflows/ci.yml`.
-- Draft at repository root.
-- Each crate's `lib.rs` links to this file (see `## Roadmap` in the
-  module docs).
-- `quip-core/quip-core.txt` and `quip-core/crate_dump.sh` deleted.
-- `README.md` at repository root.
-
-### Outstanding
-- **Repo description and topics** on GitHub.
-- **A `<link>` from `quip-node/src/lib.rs` to this file.** The other
-  three crates have it; `quip-node` was created after that pass.
-
-### Roadmap edits at a glance
-
-- Status table: M9.3 marked "folded into M9.4b"; M9.4 split into
-  M9.4a (landed) and M9.4b (not started); M9.5 (Coral DHT) added.
-- M9.3 section updated to reference M9.4b, not M9.4.
-- M9.4 section replaced by M9.4a (what landed) and M9.4b (what
-  remains), each with its own scope notes.
-- Baseline counts: `quip-node` 9 → 13, total ~610 → ~615.
-- Open items 1–2 updated to reflect the new milestones.
-- Release-tag item updated to `v0.1.0-m9.4a`.
-- Tag index: `resume_from_key_claim` row updated to M9.4b; new rows
-  for `dht_router_task`, the peer-loop DHT branch, and the four items
-  in `dht.rs`.

@@ -1,0 +1,9 @@
+# FRB-generated Dart bindings — regenerate with `flutter_rust_bridge_codegen generate`
+/lib/src/rust/
+
+# Dart package bookkeeping
+.dart_tool/
+.packages
+
+# Build output
+/target/

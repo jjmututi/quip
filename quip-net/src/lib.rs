@@ -7,7 +7,7 @@
 //! Milestone tags in the source (`M4b.1`, `M7`, …) cite entries in
 //! the [roadmap].
 //!
-//! [roadmap]: https://github.com/jjmututi/quip/blob/main/ROADMAP.md
+//! [roadmap]: https://github.com/jjmututi/quip/blob/main/CHANGELOG.md
 //!
 //! `quip-core` owns the wire message types, `quip-storage` owns persistent
 //! state; this crate owns everything that moves bytes between peers.

@@ -1,0 +1,21 @@
+[package]
+name = "quip-node-ffi"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+authors = ["J. J. Mututi <jjmututicloud@gmail.com>"]
+description = "FFI surface for the QUIP node, consumed by Dart/Flutter clients"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jjmututi/quip"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+quip-core = { path = "../quip-core" }
+quip-net = { path = "../quip-net", features = ["crypto", "quic"] }
+quip-storage = { path = "../quip-storage" }
+quip-node = { path = "../quip-node" }
+flutter_rust_bridge = "=2.13.0"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }

@@ -1,5 +1,12 @@
 //! A running QUIP node.
 //!
+//! # Changelog
+//!
+//! Milestone tags in the source (`M9.1`, `M10.1`, …) cite entries in
+//! the [changelog].
+//!
+//! [changelog]: https://github.com/jjmututi/quip/blob/main/CHANGELOG.md
+//!
 //! [`Node`] binds a QUIC endpoint, accepts inbound connections, dials
 //! outbound ones, and surfaces a single event stream keyed by peer
 //! NodeId. It owns a [`QuipStore`] and uses it to auto-serve the

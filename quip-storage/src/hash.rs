@@ -1,7 +1,7 @@
 //! Content hashing.
 //!
 //! `quip-storage` deliberately has no hashing dependency: like `quip-core`'s
-//! [`Verifier`](quip_core::messages::Verifier) trait for Ed25519, the digest
+//! [`quip_core::messages::Verifier`] trait for Ed25519, the digest
 //! algorithm is supplied by the application. A `std` application would
 //! typically wrap `sha2`/`blake3` behind [`ContentHasher`] (spec App. A.3).
 //!

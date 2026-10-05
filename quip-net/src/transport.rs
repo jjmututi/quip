@@ -59,7 +59,7 @@
 //! # Key Claim exchange
 //!
 //! §16 steps 7–8: after the §4 handshake, each peer sends its
-//! self-signed [`KeyClaim`](quip_core::messages::KeyClaim) on T0 and waits
+//! self-signed [`quip_core::messages::KeyClaim`] on T0 and waits
 //! for the other's. The driver sends its own and reads the peer's inline,
 //! before any read task is pawned, so the `announce_key` messages never
 //! surface as [`Event::Frame`]s.
@@ -94,7 +94,7 @@
 //!
 //! # T1 SYNC state machine
 //!
-//! The driver holds a [`SyncStream`](crate::sync_stream::SyncStream)
+//! The driver holds a [`crate::sync_stream::SyncStream`]
 //! that tracks whether T1 is currently serving a request (§11). The
 //! machine is fed inbound T1 request frames via
 //! `SyncStream::classify_verb`, and returned to `Idle` by the next
@@ -108,7 +108,7 @@
 //!
 //! # Backoff
 //!
-//! A [`BackoffTracker`](crate::backoff::BackoffTracker) records
+//! A [`crate::backoff::BackoffTracker`] records
 //! consecutive protocol errors keyed by peer NodeId. The driver only
 //! records; it does not act. The retry policy belongs to whichever layer
 //! dials the connection, so the tracker is exposed via
@@ -546,7 +546,7 @@ pub struct ConnectionDriver {
     /// currently serving a request.
     ///
     /// Fed inbound T1 request frames via
-    /// [`SyncStream::classify_verb`](crate::sync_stream::SyncStream::classify_verb),
+    /// [`crate::sync_stream::SyncStream::classify_verb`],
     /// and returned to `Idle` by the next successful T1 write while busy.
     /// See the module docs for the heuristic.
     sync_stream: SyncStream,

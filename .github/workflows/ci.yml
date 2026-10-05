@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         run: cargo test --workspace --all-features --locked
@@ -30,7 +30,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
@@ -43,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - name: cargo doc
         run: cargo doc --workspace --all-features --no-deps --locked
@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - name: cargo build (no default features)
         run: cargo build -p quip-core -p quip-storage -p quip-net --no-default-features --locked
@@ -69,7 +69,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: stable
+          toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
       - name: regenerate
         run: cargo xtask generate-vectors

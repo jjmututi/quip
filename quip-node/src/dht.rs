@@ -43,7 +43,7 @@
 //!
 //! - Lookups. The §12 wire protocol has no `lookup_connectivity` verb;
 //!   a real lookup is a Coral `coral_lookup` (§13.7), driven by
-//!   [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery). M9.5
+//!   [`quip_net::discovery::WitnessDiscovery`]. M9.5
 //!   wires that path.
 //! - Cluster merge/split. The routing table records a peer's
 //!   `ClusterInfo` when one arrives, but nothing consumes it.

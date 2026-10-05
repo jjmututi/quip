@@ -67,7 +67,7 @@
 //! [`ConnectionFlow::resume_from_key_claim`]. The NAT phase concludes
 //! from the transport being up: direct connectivity is already proven
 //! by the handshake. The witness phase runs a real
-//! [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
+//! [`quip_net::discovery::WitnessDiscovery`] against
 //! the peer: the flow sends a `coral_lookup`, ingests the response,
 //! and either completes with `Ready(KtStatus)` or falls back to
 //! `Ready(Pending)` when the discovery fails.
@@ -123,7 +123,7 @@
 //! Peer tasks read the current time through [`NodeConfig::clock`] —
 //! a shared `Arc<dyn Clock + Send + Sync>`, defaulting to
 //! [`SystemClock`]. Tests inject a
-//! [`ManualClock`](quip_core::time::ManualClock) so that pin and
+//! [`quip_core::time::ManualClock`] so that pin and
 //! query timestamps match by construction. The clock is also what an
 //! application should read via [`Node::clock`] when it wants a
 //! timestamp consistent with what the node's own peer tasks are
@@ -283,7 +283,7 @@ pub struct NodeConfig {
     /// is responsible for handling them.
     pub auto_serve_pins: bool,
     /// Time source used by peer tasks. Defaults to [`SystemClock`];
-    /// tests inject a [`ManualClock`](quip_core::time::ManualClock).
+    /// tests inject a [`quip_core::time::ManualClock`].
     pub clock: SharedClock,
     /// The node's signer. Shared with the DHT and the discovery
     /// client, so every signature the node produces traces to one
@@ -347,7 +347,7 @@ impl NodeConfig {
     ///
     /// The clock is read once per peer task iteration, so a frozen or
     /// slowly-advancing
-    /// [`ManualClock`](quip_core::time::ManualClock) makes the node
+    /// [`quip_core::time::ManualClock`] makes the node
     /// deterministic.
     pub fn with_clock(mut self, clock: SharedClock) -> Self {
         self.clock = clock;
@@ -1181,7 +1181,7 @@ async fn run_discovery_phase(
 /// has already exchanged the §4 handshake and §16 Key Claims, which
 /// proves direct connectivity, so declaring `on_nat_complete(true)` is
 /// the truth, not a stub. The witness phase runs a real
-/// [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
+/// [`quip_net::discovery::WitnessDiscovery`] against
 /// the peer; a later milestone replaces the NAT phase with a real
 /// `NatDriver`.
 #[allow(clippy::too_many_arguments)]

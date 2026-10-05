@@ -39,7 +39,7 @@
 //!
 //! Like the rest of the workspace, this crate never touches a socket
 //! unless the `quic` feature is enabled. Every time-dependent entry point
-//! takes an explicit [`Timestamp`](quip_core::time::Timestamp) so
+//! takes an explicit [`quip_core::time::Timestamp`] so
 //! behaviour is deterministic and testable.
 //!
 //! ## Example

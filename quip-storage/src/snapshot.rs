@@ -27,7 +27,7 @@ const SNAPSHOT_KEYS: &[&str] = &[
     "resources",
 ];
 
-/// Full point-in-time state of a [`QuipStore`](crate::store::QuipStore).
+/// Full point-in-time state of a [`crate::store::QuipStore`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Snapshot {
     /// Format version; must equal [`SNAPSHOT_VERSION`].

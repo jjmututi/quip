@@ -158,7 +158,7 @@ impl PinRecord {
 /// Identity of a pin: the resource name plus the content digest.
 ///
 /// The digest (not the raw/tagged form) identifies the content, matching
-/// [`BlobStore`](crate::blob::BlobStore).
+/// [`crate::blob::BlobStore`].
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct PinKey {
     resource_id: Vec<u8>,
@@ -452,7 +452,7 @@ impl PinTable {
     /// Insert records verbatim **without** enforcing capacity.
     ///
     /// Crate-internal: used only by
-    /// [`QuipStore::restore_snapshot`](crate::store::QuipStore::restore_snapshot),
+    /// [`crate::store::QuipStore::restore_snapshot`],
     /// where the input is trusted and silently dropping records would be
     /// a data-loss bug.
     pub(crate) fn restore_exact<I: IntoIterator<Item = PinRecord>>(&mut self, records: I) {

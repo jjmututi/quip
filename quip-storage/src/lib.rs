@@ -10,7 +10,7 @@
 //! [roadmap]: https://github.com/jjmututi/quip/blob/main/CHANGELOG.md
 //!
 //! Transport-agnostic, like [`quip_core`]: every entry point takes an explicit
-//! [`Timestamp`](quip_core::time::Timestamp) so behaviour is deterministic and
+//! [`quip_core::time::Timestamp`] so behaviour is deterministic and
 //! testable. `quip-net` supplies the clock and the framing; this crate owns the
 //! bytes and the bookkeeping.
 //!

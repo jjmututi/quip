@@ -10,7 +10,7 @@ use quip_core::time::Timestamp;
 /// Current Unix time as a [`Timestamp`].
 ///
 /// Only available with the `std` feature. `no_std` users supply a
-/// [`Clock`](quip_core::time::Clock) implementation from their runtime.
+/// [`quip_core::time::Clock`] implementation from their runtime.
 #[cfg(feature = "std")]
 pub fn unix_now() -> Timestamp {
     use quip_core::time::{Clock, SystemClock};

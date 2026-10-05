@@ -235,7 +235,7 @@ impl ConnectionFlow {
     ///
     /// Use this when the transport has already completed the §4
     /// handshake and §16 Key Claim exchange — as
-    /// [`ConnectionDriver`](crate::transport::ConnectionDriver) does
+    /// [`crate::transport::ConnectionDriver`] does
     /// inline. The flow skips `AwaitHandshake` and `AwaitKeyClaim`
     /// and begins collecting NAT and witness signals.
     ///

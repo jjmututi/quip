@@ -7,7 +7,7 @@
 //! - MUST NOT be returned in `query_resource` responses;
 //! - MUST NOT be discoverable via DHT searches;
 //! - MAY still be fetched by exact CID lookup (preserving immutability);
-//! - Are filtered by [`QuipStore`](crate::store::QuipStore).
+//! - Are filtered by [`crate::store::QuipStore`].
 //!
 //! Expiration:
 //! - A notice with `valid_until = 0` is permanent.

@@ -37,8 +37,8 @@
 //! # No expiry
 //!
 //! Outboards are content-addressed and immutable, so unlike
-//! [`SpilloverResponseCache`](crate::discovery::SpilloverResponseCache)
-//! and [`WitnessRingCache`](crate::dht::WitnessRingCache) this cache has
+//! [`crate::discovery::SpilloverResponseCache`]
+//! and [`crate::dht::WitnessRingCache`] this cache has
 //! no TTL and no `sweep`. Eviction is driven by size alone, least
 //! recently used first.
 //!

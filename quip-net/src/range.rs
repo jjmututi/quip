@@ -129,7 +129,7 @@ pub fn split_range(
 /// `nat_driver`: `quip-net` defines the interface and the caller supplies
 /// the state. It is implemented for
 /// [`quip_storage::QuarantineStore`], the same store
-/// [`QuipStore`](quip_storage::QuipStore) consults for whole-resource
+/// [`quip_storage::QuipStore`] consults for whole-resource
 /// reads, so the two cannot disagree.
 ///
 /// [`NoQuarantine`] is for callers that do not support the governance
@@ -480,7 +480,7 @@ pub mod bao_support {
     /// This is the entry point a responder should call. It consults
     /// `quarantine` before touching the cache, so a quarantined CID is
     /// neither served nor given a chunk tree, and it fails with
-    /// [`ErrorCode::Quarantined`](quip_core::ErrorCode::Quarantined)
+    /// [`quip_core::ErrorCode::Quarantined`]
     /// (0x10) as §8.2 recommends.
     ///
     /// [`extract_proof_cached`] is the same operation without the policy.

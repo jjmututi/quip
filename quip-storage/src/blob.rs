@@ -3,7 +3,7 @@
 //! Spec §8 and App. A.3: a CID is the SHA-256 or BLAKE3 digest of the payload, so
 //! bytes are addressed by their digest and never by a name the writer chooses.
 //! A [`BlobStore`] is a dumb key/value backend; verification lives in
-//! [`QuipStore`](crate::store::QuipStore), which hashes before writing and after
+//! [`crate::store::QuipStore`], which hashes before writing and after
 //! reading.
 //!
 //! Blobs are keyed by the **digest**, not by the tagged/raw form: both algorithms
@@ -71,10 +71,10 @@ impl BlobRecord {
 /// Read-only view of a content-addressed byte store.
 ///
 /// Writes are not exposed through this trait. The public write path is
-/// [`QuipStore::put_content`](crate::store::QuipStore::put_content), which
+/// [`crate::store::QuipStore::put_content`], which
 /// verifies the payload against the CID and enforces quarantine policy.
 /// The one named exception is
-/// [`QuipStore::restore_blob`](crate::store::QuipStore::restore_blob),
+/// [`crate::store::QuipStore::restore_blob`],
 /// documented as a trusted-input shortcut.
 pub trait BlobStore {
     /// Fetch the bytes for `cid`, or `None` if the digest is not held.
@@ -132,16 +132,16 @@ mod sealed {
 ///
 /// Sealed: the trait is public so that
 /// `impl<B: BlobStoreMut> QuipStore<B>` can appear on the public
-/// [`QuipStore`](crate::store::QuipStore) type without triggering Rust's
+/// [`crate::store::QuipStore`] type without triggering Rust's
 /// `private_bounds` lint, but the `sealed::Sealed` supertrait cannot be
 /// implemented outside this crate. Only [`MemoryBlobStore`] and (with
-/// `std`) [`FileBlobStore`](crate::file::FileBlobStore) implement it.
+/// `std`) [`crate::file::FileBlobStore`] implement it.
 ///
 /// Downstream users do **not** call these methods directly. The public
 /// write path is
-/// [`QuipStore::put_content`](crate::store::QuipStore::put_content); the
+/// [`crate::store::QuipStore::put_content`]; the
 /// one named exception is
-/// [`QuipStore::restore_blob`](crate::store::QuipStore::restore_blob).
+/// [`crate::store::QuipStore::restore_blob`].
 pub trait BlobStoreMut: BlobStore + sealed::Sealed {
     /// Store `bytes` under `cid`, replacing any existing record with the
     /// same digest. Enforces the byte budget.

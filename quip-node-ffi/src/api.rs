@@ -3,28 +3,19 @@
 //! Every public function or type in this module is exposed to Dart
 //! through `flutter_rust_bridge`. The generated Dart code lives in
 //! `lib/src/rust/` after running `flutter_rust_bridge_codegen generate`.
-//!
-//! # Scope
-//!
-//! M10.1 exposes the minimum surface needed to prove the boundary:
-//! bind a node, read its `NodeId`, shut it down. The event stream,
-//! trust policy, and content helpers land in later milestones.
 
 use quip_core::time::{Clock, SystemClock, Timestamp};
-use quip_node::{NodeConfig, Node as CoreNode};
 use quip_net::crypto::Ed25519Signer;
+use quip_net::establishment::{FlowFailure, KtStatus};
+use quip_node::{Node as CoreNode, NodeConfig, NodeEvent};
+use crate::frb_generated::StreamSink;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// An error surfaced to Dart.
-///
-/// FRB translates Rust `Result<T, E>` into a Dart `Future<T>` that
-/// throws when `E` is returned. `FfiError` is the single error type
-/// the FFI layer exposes; the underlying `quip_net::Error` and
-/// `quip_node` errors are folded into a human-readable message.
 #[derive(Debug, Clone)]
 pub struct FfiError {
-    /// A human-readable error message.
     pub message: String,
 }
 
@@ -38,47 +29,143 @@ impl std::error::Error for FfiError {}
 
 impl From<quip_net::Error> for FfiError {
     fn from(e: quip_net::Error) -> Self {
-        FfiError {
-            message: format!("{e}"),
-        }
+        FfiError { message: format!("{e}") }
     }
 }
 
 impl From<std::net::AddrParseError> for FfiError {
     fn from(e: std::net::AddrParseError) -> Self {
         FfiError {
-            message: format!("invalid bind address: {e}"),
+            message: format!("invalid address: {e}"),
         }
     }
 }
 
-/// The type FRB returns to Dart as the result of `bind`.
 pub type FfiResult<T> = Result<T, FfiError>;
+
+/// KT status, mirroring `quip_net::establishment::KtStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KtStatusFfi {
+    Pending,
+    Verified,
+}
+
+impl From<KtStatus> for KtStatusFfi {
+    fn from(k: KtStatus) -> Self {
+        match k {
+            KtStatus::Pending => KtStatusFfi::Pending,
+            KtStatus::Verified => KtStatusFfi::Verified,
+        }
+    }
+}
+
+/// Why the establishment flow failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlowFailureFfi {
+    KeyClaimTimeout,
+    NatFailed,
+    NatTimeout,
+    DiscoveryTimeout,
+}
+
+impl From<FlowFailure> for FlowFailureFfi {
+    fn from(f: FlowFailure) -> Self {
+        match f {
+            FlowFailure::KeyClaimTimeout => FlowFailureFfi::KeyClaimTimeout,
+            FlowFailure::NatFailed => FlowFailureFfi::NatFailed,
+            FlowFailure::NatTimeout => FlowFailureFfi::NatTimeout,
+            FlowFailure::DiscoveryTimeout => FlowFailureFfi::DiscoveryTimeout,
+        }
+    }
+}
+
+/// An event surfaced to Dart.
+///
+/// Simple variants (`Connected`, `Ready`, `Disconnected`,
+/// `EstablishmentFailed`) carry typed fields. The verbose variants
+/// (`Message`, `Datagram`) carry the wire verb and the raw bytes; a
+/// Dart consumer that needs the typed message calls `decode_message`
+/// (a later milestone) with the raw payload.
+pub enum NodeEventFfi {
+    Connected {
+        peer: Vec<u8>,
+    },
+    Ready {
+        peer: Vec<u8>,
+        kt_status: KtStatusFfi,
+    },
+    EstablishmentFailed {
+        peer: Vec<u8>,
+        failure: FlowFailureFfi,
+    },
+    Disconnected {
+        peer: Vec<u8>,
+    },
+    Message {
+        peer: Vec<u8>,
+        tier: u8,
+        verb: String,
+        raw: Vec<u8>,
+    },
+    Datagram {
+        peer: Vec<u8>,
+        verb: String,
+        raw: Vec<u8>,
+    },
+    Error {
+        peer: Option<Vec<u8>>,
+        message: String,
+    },
+}
+
+impl NodeEventFfi {
+    fn from_rust(event: NodeEvent) -> Self {
+        match event {
+            NodeEvent::Connected { peer } => NodeEventFfi::Connected {
+                peer: peer.to_vec(),
+            },
+            NodeEvent::Ready { peer, kt_status } => NodeEventFfi::Ready {
+                peer: peer.to_vec(),
+                kt_status: kt_status.into(),
+            },
+            NodeEvent::EstablishmentFailed { peer, failure } => {
+                NodeEventFfi::EstablishmentFailed {
+                    peer: peer.to_vec(),
+                    failure: failure.into(),
+                }
+            }
+            NodeEvent::Disconnected { peer } => NodeEventFfi::Disconnected {
+                peer: peer.to_vec(),
+            },
+            NodeEvent::Message { peer, tier, msg } => NodeEventFfi::Message {
+                peer: peer.to_vec(),
+                tier: tier as u8,
+                verb: msg.verb().to_string(),
+                raw: msg.to_bytes().unwrap_or_default(),
+            },
+            NodeEvent::Datagram { peer, msg } => NodeEventFfi::Datagram {
+                peer: peer.to_vec(),
+                verb: msg.verb().to_string(),
+                raw: msg.to_bytes().unwrap_or_default(),
+            },
+            NodeEvent::Error { peer, error } => NodeEventFfi::Error {
+                peer: peer.map(|p| p.to_vec()),
+                message: format!("{error}"),
+            },
+        }
+    }
+}
 
 /// A running QUIP node, exposed across the FFI boundary as an opaque
 /// handle.
-///
-/// Dart holds a reference to this object; the underlying Rust `Node`
-/// is owned by the handle and dropped when the Dart object is
-/// garbage-collected or when `shutdown()` is called explicitly.
-///
-/// The inner node is wrapped in `Arc` so the handle can be cloned
-/// without moving the endpoint, and so a future milestone can hand
-/// the same node to multiple Dart-side consumers.
 pub struct NodeHandle {
-    inner: Arc<CoreNode>,
+    inner: tokio::sync::Mutex<CoreNode>,
+    events: std::sync::Mutex<Option<mpsc::Receiver<NodeEvent>>>,
+    runtime: tokio::runtime::Handle,
 }
 
 impl NodeHandle {
     /// Bind a new QUIP node.
-    ///
-    /// `bind_addr` is a `host:port` string, e.g. `"127.0.0.1:0"` to
-    /// let the OS choose a port. `seed` is a 32-byte Ed25519 seed;
-    /// the node's identity is derived from it and cannot be changed
-    /// after bind.
-    ///
-    /// Returns a handle on success. The node's accept loop and DHT
-    /// router are already running by the time this future resolves.
     pub async fn bind(
         bind_addr: String,
         seed: Vec<u8>,
@@ -98,37 +185,81 @@ impl NodeHandle {
         let signer = Ed25519Signer::from_seed(&seed_arr);
         let now: Timestamp = SystemClock.now();
         let config = NodeConfig::new(addr, Arc::new(signer), now)?;
-        let node = CoreNode::bind(config).await?;
+        let mut node = CoreNode::bind(config).await?;
+        let events = node.take_events();
+        let runtime = tokio::runtime::Handle::current();
+
         Ok(NodeHandle {
-            inner: Arc::new(node),
+            inner: tokio::sync::Mutex::new(node),
+            events: std::sync::Mutex::new(events),
+            runtime,
         })
     }
 
-    /// The node's `NodeId` — its Ed25519 public key, as 32 raw bytes.
-    ///
-    /// Dart receives this as a `Uint8List`. The value never changes
-    /// for the lifetime of the node.
-    pub fn local_node_id(&self) -> Vec<u8> {
-        self.inner.local_node_id().to_vec()
+    /// The node's NodeId, as 32 raw bytes.
+    pub async fn local_node_id(&self) -> Vec<u8> {
+        self.inner.lock().await.local_node_id().to_vec()
     }
 
     /// The address the node's QUIC endpoint is bound to.
-    ///
-    /// Useful when `bind_addr` used port 0 and the OS chose the port.
-    pub fn local_addr(&self) -> FfiResult<String> {
+    pub async fn local_addr(&self) -> FfiResult<String> {
         self.inner
+            .lock()
+            .await
             .local_addr()
             .map(|a| a.to_string())
             .map_err(FfiError::from)
     }
 
-    /// Initiate a graceful shutdown of the node.
+    /// Dial a remote node. Returns the peer's NodeId as 32 raw bytes.
+    pub async fn connect(
+        &self,
+        addr: String,
+        server_name: String,
+    ) -> FfiResult<Vec<u8>> {
+        let addr: SocketAddr = addr.parse()?;
+        let mut guard = self.inner.lock().await;
+        let peer = guard.connect(addr, &server_name).await?;
+        Ok(peer.to_vec())
+    }
+
+    /// Subscribe to the node's event stream.
     ///
-    /// Closes the endpoint; in-flight peer tasks exit on their next
-    /// poll. `Drop` on the `NodeHandle` does the same thing, so
-    /// calling this is optional — it exists for callers that want an
-    /// explicit shutdown before the Dart GC runs.
-    pub fn shutdown(&self) {
-        self.inner.shutdown();
+    /// Returns a Dart `Stream<NodeEventFfi>`. The Rust side spawns a
+    /// task that drains the node's internal event channel and writes
+    /// each event to the sink. The task ends when Dart cancels the
+    /// subscription or the node shuts down.
+    ///
+    /// Only one subscription per node is allowed; a second call
+    /// returns an error.
+    pub fn subscribe_events(
+        &self,
+        sink: StreamSink<NodeEventFfi>,
+    ) -> FfiResult<()> {
+        let rx = self
+            .events
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.take())
+            .ok_or_else(|| FfiError {
+                message: "event stream already subscribed".into(),
+            })?;
+
+        self.runtime.spawn(async move {
+            let mut rx = rx;
+            while let Some(event) = rx.recv().await {
+                let ffi = NodeEventFfi::from_rust(event);
+                if sink.add(ffi).is_err() {
+                    break;
+                }
+            }
+        });
+
+        Ok(())
+    }
+
+    /// Initiate a graceful shutdown of the node.
+    pub async fn shutdown(&self) {
+        self.inner.lock().await.shutdown();
     }
 }

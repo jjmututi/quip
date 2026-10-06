@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 597136371;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2105135795;
 
 // Section: executor
 
@@ -86,13 +86,75 @@ fn wire__crate__api__NodeHandle_bind_impl(
         },
     )
 }
+fn wire__crate__api__NodeHandle_connect_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NodeHandle_connect",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NodeHandle>,
+            >>::sse_decode(&mut deserializer);
+            let api_addr = <String>::sse_decode(&mut deserializer);
+            let api_server_name = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, crate::api::FfiError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = crate::api::NodeHandle::connect(
+                            &*api_that_guard,
+                            api_addr,
+                            api_server_name,
+                        )
+                        .await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__NodeHandle_local_addr_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
     rust_vec_len_: i32,
     data_len_: i32,
 ) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
             debug_name: "NodeHandle_local_addr",
             port: Some(port_),
@@ -112,25 +174,32 @@ fn wire__crate__api__NodeHandle_local_addr_impl(
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NodeHandle>,
             >>::sse_decode(&mut deserializer);
             deserializer.end();
-            move |context| {
-                transform_result_sse::<_, crate::api::FfiError>((move || {
-                    let mut api_that_guard = None;
-                    let decode_indices_ =
-                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
-                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                &api_that, 0, false,
-                            ),
-                        ]);
-                    for i in decode_indices_ {
-                        match i {
-                            0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
-                            _ => unreachable!(),
+            move |context| async move {
+                transform_result_sse::<_, crate::api::FfiError>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
                         }
-                    }
-                    let api_that_guard = api_that_guard.unwrap();
-                    let output_ok = crate::api::NodeHandle::local_addr(&*api_that_guard)?;
-                    std::result::Result::Ok(output_ok)
-                })())
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok =
+                            crate::api::NodeHandle::local_addr(&*api_that_guard).await?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
             }
         },
     )
@@ -141,7 +210,7 @@ fn wire__crate__api__NodeHandle_local_node_id_impl(
     rust_vec_len_: i32,
     data_len_: i32,
 ) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
             debug_name: "NodeHandle_local_node_id",
             port: Some(port_),
@@ -161,26 +230,33 @@ fn wire__crate__api__NodeHandle_local_node_id_impl(
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NodeHandle>,
             >>::sse_decode(&mut deserializer);
             deserializer.end();
-            move |context| {
-                transform_result_sse::<_, ()>((move || {
-                    let mut api_that_guard = None;
-                    let decode_indices_ =
-                        flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
-                            flutter_rust_bridge::for_generated::LockableOrderInfo::new(
-                                &api_that, 0, false,
-                            ),
-                        ]);
-                    for i in decode_indices_ {
-                        match i {
-                            0 => api_that_guard = Some(api_that.lockable_decode_sync_ref()),
-                            _ => unreachable!(),
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
                         }
-                    }
-                    let api_that_guard = api_that_guard.unwrap();
-                    let output_ok =
-                        Ok::<_, ()>(crate::api::NodeHandle::local_node_id(&*api_that_guard))?;
-                    std::result::Result::Ok(output_ok)
-                })())
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = Ok::<_, ()>(
+                            crate::api::NodeHandle::local_node_id(&*api_that_guard).await,
+                        )?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
             }
         },
     )
@@ -191,7 +267,7 @@ fn wire__crate__api__NodeHandle_shutdown_impl(
     rust_vec_len_: i32,
     data_len_: i32,
 ) {
-    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_async::<flutter_rust_bridge::for_generated::SseCodec, _, _, _>(
         flutter_rust_bridge::for_generated::TaskInfo {
             debug_name: "NodeHandle_shutdown",
             port: Some(port_),
@@ -211,8 +287,69 @@ fn wire__crate__api__NodeHandle_shutdown_impl(
                 flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NodeHandle>,
             >>::sse_decode(&mut deserializer);
             deserializer.end();
+            move |context| async move {
+                transform_result_sse::<_, ()>(
+                    (move || async move {
+                        let mut api_that_guard = None;
+                        let decode_indices_ =
+                            flutter_rust_bridge::for_generated::lockable_compute_decode_order(
+                                vec![flutter_rust_bridge::for_generated::LockableOrderInfo::new(
+                                    &api_that, 0, false,
+                                )],
+                            );
+                        for i in decode_indices_ {
+                            match i {
+                                0 => {
+                                    api_that_guard =
+                                        Some(api_that.lockable_decode_async_ref().await)
+                                }
+                                _ => unreachable!(),
+                            }
+                        }
+                        let api_that_guard = api_that_guard.unwrap();
+                        let output_ok = Ok::<_, ()>({
+                            crate::api::NodeHandle::shutdown(&*api_that_guard).await;
+                        })?;
+                        std::result::Result::Ok(output_ok)
+                    })()
+                    .await,
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__NodeHandle_subscribe_events_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "NodeHandle_subscribe_events",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_that = <RustOpaqueMoi<
+                flutter_rust_bridge::for_generated::RustAutoOpaqueInner<NodeHandle>,
+            >>::sse_decode(&mut deserializer);
+            let api_sink = <StreamSink<
+                crate::api::NodeEventFfi,
+                flutter_rust_bridge::for_generated::SseCodec,
+            >>::sse_decode(&mut deserializer);
+            deserializer.end();
             move |context| {
-                transform_result_sse::<_, ()>((move || {
+                transform_result_sse::<_, crate::api::FfiError>((move || {
                     let mut api_that_guard = None;
                     let decode_indices_ =
                         flutter_rust_bridge::for_generated::lockable_compute_decode_order(vec![
@@ -227,9 +364,8 @@ fn wire__crate__api__NodeHandle_shutdown_impl(
                         }
                     }
                     let api_that_guard = api_that_guard.unwrap();
-                    let output_ok = Ok::<_, ()>({
-                        crate::api::NodeHandle::shutdown(&*api_that_guard);
-                    })?;
+                    let output_ok =
+                        crate::api::NodeHandle::subscribe_events(&*api_that_guard, api_sink)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -244,6 +380,14 @@ flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
 );
 
 // Section: dart2rust
+
+impl SseDecode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return flutter_rust_bridge::for_generated::anyhow::anyhow!("{}", inner);
+    }
+}
 
 impl SseDecode for NodeHandle {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -265,6 +409,16 @@ impl SseDecode
     }
 }
 
+impl SseDecode
+    for StreamSink<crate::api::NodeEventFfi, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <String>::sse_decode(deserializer);
+        return StreamSink::deserialize(inner);
+    }
+}
+
 impl SseDecode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -283,6 +437,39 @@ impl SseDecode for crate::api::FfiError {
     }
 }
 
+impl SseDecode for crate::api::FlowFailureFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::FlowFailureFfi::KeyClaimTimeout,
+            1 => crate::api::FlowFailureFfi::NatFailed,
+            2 => crate::api::FlowFailureFfi::NatTimeout,
+            3 => crate::api::FlowFailureFfi::DiscoveryTimeout,
+            _ => unreachable!("Invalid variant for FlowFailureFfi: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
+    }
+}
+
+impl SseDecode for crate::api::KtStatusFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::KtStatusFfi::Pending,
+            1 => crate::api::KtStatusFfi::Verified,
+            _ => unreachable!("Invalid variant for KtStatusFfi: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -292,6 +479,83 @@ impl SseDecode for Vec<u8> {
             ans_.push(<u8>::sse_decode(deserializer));
         }
         return ans_;
+    }
+}
+
+impl SseDecode for crate::api::NodeEventFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut tag_ = <i32>::sse_decode(deserializer);
+        match tag_ {
+            0 => {
+                let mut var_peer = <Vec<u8>>::sse_decode(deserializer);
+                return crate::api::NodeEventFfi::Connected { peer: var_peer };
+            }
+            1 => {
+                let mut var_peer = <Vec<u8>>::sse_decode(deserializer);
+                let mut var_ktStatus = <crate::api::KtStatusFfi>::sse_decode(deserializer);
+                return crate::api::NodeEventFfi::Ready {
+                    peer: var_peer,
+                    kt_status: var_ktStatus,
+                };
+            }
+            2 => {
+                let mut var_peer = <Vec<u8>>::sse_decode(deserializer);
+                let mut var_failure = <crate::api::FlowFailureFfi>::sse_decode(deserializer);
+                return crate::api::NodeEventFfi::EstablishmentFailed {
+                    peer: var_peer,
+                    failure: var_failure,
+                };
+            }
+            3 => {
+                let mut var_peer = <Vec<u8>>::sse_decode(deserializer);
+                return crate::api::NodeEventFfi::Disconnected { peer: var_peer };
+            }
+            4 => {
+                let mut var_peer = <Vec<u8>>::sse_decode(deserializer);
+                let mut var_tier = <u8>::sse_decode(deserializer);
+                let mut var_verb = <String>::sse_decode(deserializer);
+                let mut var_raw = <Vec<u8>>::sse_decode(deserializer);
+                return crate::api::NodeEventFfi::Message {
+                    peer: var_peer,
+                    tier: var_tier,
+                    verb: var_verb,
+                    raw: var_raw,
+                };
+            }
+            5 => {
+                let mut var_peer = <Vec<u8>>::sse_decode(deserializer);
+                let mut var_verb = <String>::sse_decode(deserializer);
+                let mut var_raw = <Vec<u8>>::sse_decode(deserializer);
+                return crate::api::NodeEventFfi::Datagram {
+                    peer: var_peer,
+                    verb: var_verb,
+                    raw: var_raw,
+                };
+            }
+            6 => {
+                let mut var_peer = <Option<Vec<u8>>>::sse_decode(deserializer);
+                let mut var_message = <String>::sse_decode(deserializer);
+                return crate::api::NodeEventFfi::Error {
+                    peer: var_peer,
+                    message: var_message,
+                };
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseDecode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<Vec<u8>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
     }
 }
 
@@ -314,13 +578,6 @@ impl SseDecode for usize {
     }
 }
 
-impl SseDecode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
-        deserializer.cursor.read_i32::<NativeEndian>().unwrap()
-    }
-}
-
 impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -338,9 +595,11 @@ fn pde_ffi_dispatcher_primary_impl(
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
         1 => wire__crate__api__NodeHandle_bind_impl(port, ptr, rust_vec_len, data_len),
-        2 => wire__crate__api__NodeHandle_local_addr_impl(port, ptr, rust_vec_len, data_len),
-        3 => wire__crate__api__NodeHandle_local_node_id_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__NodeHandle_shutdown_impl(port, ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__NodeHandle_connect_impl(port, ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__NodeHandle_local_addr_impl(port, ptr, rust_vec_len, data_len),
+        4 => wire__crate__api__NodeHandle_local_node_id_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__NodeHandle_shutdown_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__NodeHandle_subscribe_events_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -386,6 +645,107 @@ impl flutter_rust_bridge::IntoIntoDart<crate::api::FfiError> for crate::api::Ffi
         self
     }
 }
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::FlowFailureFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::KeyClaimTimeout => 0.into_dart(),
+            Self::NatFailed => 1.into_dart(),
+            Self::NatTimeout => 2.into_dart(),
+            Self::DiscoveryTimeout => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::FlowFailureFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::FlowFailureFfi> for crate::api::FlowFailureFfi {
+    fn into_into_dart(self) -> crate::api::FlowFailureFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::KtStatusFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Pending => 0.into_dart(),
+            Self::Verified => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::KtStatusFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::KtStatusFfi> for crate::api::KtStatusFfi {
+    fn into_into_dart(self) -> crate::api::KtStatusFfi {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::NodeEventFfi {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            crate::api::NodeEventFfi::Connected { peer } => {
+                [0.into_dart(), peer.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::NodeEventFfi::Ready { peer, kt_status } => [
+                1.into_dart(),
+                peer.into_into_dart().into_dart(),
+                kt_status.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::NodeEventFfi::EstablishmentFailed { peer, failure } => [
+                2.into_dart(),
+                peer.into_into_dart().into_dart(),
+                failure.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::NodeEventFfi::Disconnected { peer } => {
+                [3.into_dart(), peer.into_into_dart().into_dart()].into_dart()
+            }
+            crate::api::NodeEventFfi::Message {
+                peer,
+                tier,
+                verb,
+                raw,
+            } => [
+                4.into_dart(),
+                peer.into_into_dart().into_dart(),
+                tier.into_into_dart().into_dart(),
+                verb.into_into_dart().into_dart(),
+                raw.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::NodeEventFfi::Datagram { peer, verb, raw } => [
+                5.into_dart(),
+                peer.into_into_dart().into_dart(),
+                verb.into_into_dart().into_dart(),
+                raw.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            crate::api::NodeEventFfi::Error { peer, message } => [
+                6.into_dart(),
+                peer.into_into_dart().into_dart(),
+                message.into_into_dart().into_dart(),
+            ]
+            .into_dart(),
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive for crate::api::NodeEventFfi {}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::NodeEventFfi> for crate::api::NodeEventFfi {
+    fn into_into_dart(self) -> crate::api::NodeEventFfi {
+        self
+    }
+}
+
+impl SseEncode for flutter_rust_bridge::for_generated::anyhow::Error {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(format!("{:?}", self), serializer);
+    }
+}
 
 impl SseEncode for NodeHandle {
     // Codec=Sse (Serialization based), see doc to use other codecs
@@ -405,6 +765,15 @@ impl SseEncode
     }
 }
 
+impl SseEncode
+    for StreamSink<crate::api::NodeEventFfi, flutter_rust_bridge::for_generated::SseCodec>
+{
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        unimplemented!("")
+    }
+}
+
 impl SseEncode for String {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -419,12 +788,115 @@ impl SseEncode for crate::api::FfiError {
     }
 }
 
+impl SseEncode for crate::api::FlowFailureFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::FlowFailureFfi::KeyClaimTimeout => 0,
+                crate::api::FlowFailureFfi::NatFailed => 1,
+                crate::api::FlowFailureFfi::NatTimeout => 2,
+                crate::api::FlowFailureFfi::DiscoveryTimeout => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for i32 {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::KtStatusFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::KtStatusFfi::Pending => 0,
+                crate::api::KtStatusFfi::Verified => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <u8>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for crate::api::NodeEventFfi {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        match self {
+            crate::api::NodeEventFfi::Connected { peer } => {
+                <i32>::sse_encode(0, serializer);
+                <Vec<u8>>::sse_encode(peer, serializer);
+            }
+            crate::api::NodeEventFfi::Ready { peer, kt_status } => {
+                <i32>::sse_encode(1, serializer);
+                <Vec<u8>>::sse_encode(peer, serializer);
+                <crate::api::KtStatusFfi>::sse_encode(kt_status, serializer);
+            }
+            crate::api::NodeEventFfi::EstablishmentFailed { peer, failure } => {
+                <i32>::sse_encode(2, serializer);
+                <Vec<u8>>::sse_encode(peer, serializer);
+                <crate::api::FlowFailureFfi>::sse_encode(failure, serializer);
+            }
+            crate::api::NodeEventFfi::Disconnected { peer } => {
+                <i32>::sse_encode(3, serializer);
+                <Vec<u8>>::sse_encode(peer, serializer);
+            }
+            crate::api::NodeEventFfi::Message {
+                peer,
+                tier,
+                verb,
+                raw,
+            } => {
+                <i32>::sse_encode(4, serializer);
+                <Vec<u8>>::sse_encode(peer, serializer);
+                <u8>::sse_encode(tier, serializer);
+                <String>::sse_encode(verb, serializer);
+                <Vec<u8>>::sse_encode(raw, serializer);
+            }
+            crate::api::NodeEventFfi::Datagram { peer, verb, raw } => {
+                <i32>::sse_encode(5, serializer);
+                <Vec<u8>>::sse_encode(peer, serializer);
+                <String>::sse_encode(verb, serializer);
+                <Vec<u8>>::sse_encode(raw, serializer);
+            }
+            crate::api::NodeEventFfi::Error { peer, message } => {
+                <i32>::sse_encode(6, serializer);
+                <Option<Vec<u8>>>::sse_encode(peer, serializer);
+                <String>::sse_encode(message, serializer);
+            }
+            _ => {
+                unimplemented!("");
+            }
+        }
+    }
+}
+
+impl SseEncode for Option<Vec<u8>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <Vec<u8>>::sse_encode(value, serializer);
         }
     }
 }
@@ -448,13 +920,6 @@ impl SseEncode for usize {
             .cursor
             .write_u64::<NativeEndian>(self as _)
             .unwrap();
-    }
-}
-
-impl SseEncode for i32 {
-    // Codec=Sse (Serialization based), see doc to use other codecs
-    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
-        serializer.cursor.write_i32::<NativeEndian>(self).unwrap();
     }
 }
 

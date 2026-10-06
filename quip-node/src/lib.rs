@@ -482,7 +482,7 @@ pub struct Node<B = MemoryBlobStore> {
     auto_serve_pins: bool,
     /// Time source handed to peer tasks.
     clock: SharedClock,
-    events_rx: mpsc::Receiver<NodeEvent>,
+    events_rx: Option<mpsc::Receiver<NodeEvent>>,
     events_tx: mpsc::Sender<NodeEvent>,
     accept_task: Option<JoinHandle<()>>,
     /// The node's DHT client, shared with every peer task.
@@ -573,7 +573,7 @@ where
             store,
             auto_serve_pins: config.auto_serve_pins,
             clock,
-            events_rx,
+            events_rx: Some(events_rx),
             events_tx,
             accept_task: Some(accept_task),
             dht,
@@ -643,11 +643,22 @@ where
     }
 
     /// Drain whatever events are ready, waiting briefly for the first.
+    ///
+    /// Returns an error if [`Self::take_events`] has been called: the
+    /// receiver is gone, and the caller is responsible for draining it.
     pub async fn poll(&mut self) -> Result<Vec<NodeEvent>> {
+        let rx = match self.events_rx.as_mut() {
+            Some(rx) => rx,
+            None => {
+                return Err(Error::Transport(
+                    "event receiver was taken by take_events()".into(),
+                ))
+            }
+        };
         let mut events = Vec::new();
         match tokio::time::timeout(
             Duration::from_millis(POLL_TIMEOUT_MS),
-            self.events_rx.recv(),
+            rx.recv(),
         )
         .await
         {
@@ -657,10 +668,21 @@ where
             }
             Err(_) => return Ok(events),
         }
-        while let Ok(e) = self.events_rx.try_recv() {
+        while let Ok(e) = rx.try_recv() {
             events.push(e);
         }
         Ok(events)
+    }
+
+    /// Take the event receiver out of the node.
+    ///
+    /// After this call [`Self::poll`] returns an error; the caller owns
+    /// the receiver and is responsible for draining it. The FFI layer
+    /// uses this to hand events to Dart without competing with `poll`.
+    ///
+    /// Calling it twice returns `None` the second time.
+    pub fn take_events(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
+        self.events_rx.take()
     }
 
     /// Send `msg` to `peer`.

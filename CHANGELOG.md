@@ -15,8 +15,10 @@ not a status this file recognises.
 
 Every protocol-level milestone (M1–M8) is landed. The application
 layer (M9.x) is in progress: M9.1 through M9.5a are landed, M9.5b is
-not started. §16 runs end-to-end through step 8 across the protocol
-crates; the `Node` type composes them into a runnable peer.
+not started. The interface layer (M10.x) has begun: M10.1 and M10.2
+are landed. §16 runs end-to-end through step 8 across the protocol
+crates; the `Node` type composes them into a runnable peer, and a Dart
+client can bind a node and subscribe to its event stream.
 
 ### Build status
 
@@ -24,7 +26,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    619 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    625 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -38,6 +40,17 @@ working tree changed.
 
 `quip-node` is not part of the `no_std` build: it depends on `tokio`,
 `std`, and the `quic` feature of `quip-net`.
+
+### Toolchain
+
+The workspace pins Rust to 1.99.0 via `rust-toolchain.toml`, and every
+CI job passes `toolchain: "1.99.0"` to `actions-rust-lang/setup-rust-toolchain`.
+The pin exists because `setup-rust-toolchain` resolves `stable` at run
+time, so CI drifts ahead of the local toolchain whenever a new stable
+ships. This last happened between 1.95.0 (local) and 1.99.0 (CI), when
+rustdoc widened `redundant_explicit_links` and flagged ~30 intra-doc
+links that the older toolchain silently accepted. Pinning defers the
+next drift to a deliberate bump.
 
 ### Verification baseline
 
@@ -53,11 +66,12 @@ Baseline on `main`:
 
 ```
 quip-core      74 passed
-quip-net      465 passed
+quip-net      471 passed
 quip-storage   57 passed
 quip-node      23 passed
+quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~619 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~625 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -81,6 +95,10 @@ doc-tests       4 passed (one per crate)
 | M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b | `quip-node`: real `NatDriver` + cluster merge/split | not started |
+| M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
+| M10.2 | `quip-node-ffi`: event stream across the FFI boundary | landed |
+| M10.3 | `quip-node-ffi`: `TrustPolicy` and peer trust events | not started |
+| M10.4 | `quip-node-ffi`: platform signer shim | not started |
 
 ---
 
@@ -364,6 +382,69 @@ Tests: `ready_via_shared_discovery_on_both_sides`,
 `discovery_clones_share_state`, plus the unit tests in
 `quip-node::discovery`.
 
+### M10.1 — `quip-node-ffi` bind and query — LANDED
+
+`quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
+to Dart through `flutter_rust_bridge` 2.13.0. The FFI boundary is
+proven end to end: a Dart CLI loads the Rust `cdylib`, binds a node
+via a static async method, reads its bound address and NodeId, and
+shuts down cleanly.
+
+- `NodeHandle::bind(bindAddr, seed) -> Future<NodeHandle>` — binds
+  a QUIC endpoint; `seed` is a 32-byte Ed25519 seed.
+- `NodeHandle::localAddr() -> Future<String>` — the bound address.
+- `NodeHandle::localNodeId() -> Future<Uint8List>` — 32 raw bytes.
+- `NodeHandle::shutdown() -> Future<void>`.
+- `FfiError` is the single error type the boundary exposes;
+  underlying `quip_net::Error` and `quip_node` errors fold into a
+  human-readable message.
+
+The codegen is FRB v2 with codegen mode. Generated Dart lands in
+`lib/src/rust/`, which is gitignored; the Rust shim
+(`quip-node-ffi/src/frb_generated.rs`) is committed.
+
+**Toolchain note.** The crate is pure-Dart compatible: the FRB
+runtime has a `RustLib.init(externalLibrary: ExternalLibrary.open(path))`
+path for CLIs that don't use the Flutter engine. The 2 GB Flutter SDK
+download is not required for M10.1 or M10.2.
+
+Tests: `bin/smoke.dart` prints a bound NodeId and exits cleanly.
+
+### M10.2 — `quip-node-ffi` event stream — LANDED
+
+A Dart consumer can subscribe to a node's event stream. The Rust side
+drains the internal `mpsc::Receiver<NodeEvent>` into an FRB
+`StreamSink<NodeEventFfi>`; the Dart side receives a `Stream` of
+freezed-sealed classes it can pattern-match on.
+
+- `quip-node` gains `Node::take_events()` so the FFI layer can own
+  the receiver rather than competing with `Node::poll`. `poll` now
+  returns an error if called after `take_events`.
+- `NodeEventFfi` variants: `Connected`, `Ready`,
+  `EstablishmentFailed`, `Disconnected`, `Message`, `Datagram`,
+  `Error`. The first four carry typed fields; `Message` and
+  `Datagram` carry `verb: String` + `raw: Vec<u8>`; a typed decoder
+  lands in a later milestone.
+- `KtStatusFfi` and `FlowFailureFfi` mirror the `quip-net` enums.
+- `NodeHandle::subscribe_events(sink: StreamSink<NodeEventFfi>)`
+  spawns a drain task on FRB's runtime. Runtime handling: `bind`
+  captures `Handle::current()` while inside FRB's runtime;
+  `subscribe_events` uses the captured handle, since `tokio::spawn`
+  from a Dart-called sync method panics with "no reactor running".
+- The pubspec adds `freezed`, `freezed_annotation`, and
+  `build_runner`. `build_runner` is pinned below 2.15.2 to keep the
+  analyzer version compatible with `freezed` 3.x.
+
+**Known limitation.** The FRB-generated `frb_generated.web.dart`
+uses an `inline-class` language feature that the current Dart
+analyzer refuses to parse. The `.io.dart` backend is unaffected;
+Linux and Android builds are clean. Web target support would need an
+analysis_options change.
+
+Tests: `bin/smoke_events.dart` shows both nodes reaching
+`Ready(Pending)` through the FFI event stream, with peer IDs
+matching across both nodes' events.
+
 ---
 
 ## Spec pass
@@ -418,39 +499,60 @@ and one open revision.
 2. **M9.6 — witness accumulation.** The responder currently answers
    with no witnesses; when the node accumulates `WitnessStatement`s
    from its peers, the responder returns real rings and
-   `Ready(Verified)` becomes reachable in a two-node network.
+   `Ready(Verified)` becomes reachable in a network with at least
+   four independent witnesses.
+
+### Interface layer (M10)
+
+3. **M10.3 — `TrustPolicy` and peer trust events.** `quip-node`
+   gains a `TrustPolicy` module: `PeerTrust`, `StoredClaim`, and the
+   TOFU policy that decides how a valid Key Claim becomes a trust
+   decision. `NodeEventFfi` grows a `peer_trust` field on the peer-
+   related variants, or a `PeerTrustChanged` event. `NodeHandle`
+   gains a `trust_peer(peer, decision)` method for the application
+   to escalate or deny explicitly. Blocked on two decisions from
+   earlier in the milestone: whether `Trusted` and `Verified` render
+   differently in the UI, and what TOFU does by default.
+
+4. **M10.4 — platform signer shim.** A `SignerBackend` trait in
+   `quip-node` and one implementation per platform: Kotlin/JNI for
+   Android, Swift for iOS, C ABI for Linux/Windows. Hardware-backed
+   Ed25519 is available on Android 13+ with TEE or StrongBox, absent
+   in the iOS Secure Enclave (P-256 only), and software-only on
+   Linux. The shim exposes the fallback as a first-class case.
+
+5. **M10.5 — end-to-end verification on Android.** The smoke tests
+   from M10.1 and M10.2 re-run against an Android device, exercising
+   the platform signer shim.
 
 ### Protocol crates
 
-3. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
+6. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
    describes the extra round trip a fresh quorum ring signature
    would require, or whether it adopts the checkpoint-signatures
    interpretation the implementation uses.
-4. **Prepared-operation carry-forward on view change.** The new
+7. **Prepared-operation carry-forward on view change.** The new
    primary does not yet re-propose operations prepared in an earlier
    view; `bft_new_view.prepared_messages` is emitted empty.
-5. **Checkpoint carry-forward on view change.**
+8. **Checkpoint carry-forward on view change.**
    `bft_new_view.checkpoint_messages` is emitted empty. The driver
    already retains `stable_checkpoint`, but `maybe_emit_new_view`
    does not encode it.
-6. **FROST ring signature verification** in
+9. **FROST ring signature verification** in
    `verify_checkpoint_ring_sig`. Requires a group public key on the
    ring; the driver does not hold one today. The individual-signature
    path is complete.
 
 ### Housekeeping
 
-7. **Release tag.** `git tag v0.1.0-m9.5a && git push origin
-   v0.1.0-m9.5a`, then `v0.1.0` once S8 lands.
-8. **GitHub metadata.** Repository description and topics.
-9. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
-   The bound currently sits on `quip-node`'s `SharedClock` alias
-   because widening the trait is a breaking change. Every reasonable
-   clock satisfies the stronger bound; the alias should eventually
-   become unnecessary.
-10. **A `<link>` from `quip-node/src/lib.rs` to this file.** The
-    other three crates have it; `quip-node` was created after that
-    pass.
+10. **Release tag.** `git tag v0.1.0-m10.2 && git push origin
+    v0.1.0-m10.2`, then `v0.1.0` once S8 lands.
+11. **GitHub metadata.** Repository description and topics.
+12. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+    The bound currently sits on `quip-node`'s `SharedClock` alias
+    because widening the trait is a breaking change. Every reasonable
+    clock satisfies the stronger bound; the alias should eventually
+    become unnecessary.
 
 ---
 
@@ -527,6 +629,13 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`make_lookup_paths`) | M9.5a | path selection |
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
+| `quip-node/src/lib.rs` (`Node::take_events`) | M10.2 | receiver hand-off for the FFI layer |
+| `quip-node-ffi/src/api.rs:1` | M10.1, M10.2 | FFI surface |
+| `quip-node-ffi/src/api.rs` (`NodeHandle`) | M10.1, M10.2 | Dart-facing handle |
+| `quip-node-ffi/src/api.rs` (`NodeEventFfi`) | M10.2 | Dart-facing event enum |
+| `quip-node-ffi/src/api.rs` (`KtStatusFfi`, `FlowFailureFfi`) | M10.2 | mirrored enums |
+| `quip-node-ffi/bin/smoke.dart` | M10.1 | bind-and-query acceptance test |
+| `quip-node-ffi/bin/smoke_events.dart` | M10.2 | event-stream acceptance test |
 
 The code subdivides NAT work as `M3a` / `M3b.1` / `M3b.2` / `M3b.3`
 and BFT work as `M4a` / `M4b`. The M3 section above numbers the later

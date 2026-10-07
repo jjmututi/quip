@@ -1,25 +1,19 @@
 //! A running QUIP node.
 //!
-//! # Changelog
-//!
-//! Milestone tags in the source (`M9.1`, `M10.1`, …) cite entries in
-//! the [changelog].
-//!
-//! [changelog]: https://github.com/jjmututi/quip/blob/main/CHANGELOG.md
-//!
 //! [`Node`] binds a QUIC endpoint, accepts inbound connections, dials
 //! outbound ones, and surfaces a single event stream keyed by peer
 //! NodeId. It owns a [`QuipStore`] and uses it to auto-serve the
 //! storage-plane verbs that have a 1:1 wire mapping, a
 //! [`DhtHandle`] that carries §12 NAT-plane verbs over
-//! the same connections, and a
+//! the same connections, a
 //! [`DiscoveryHandle`] that runs Coral
 //! witness discovery for each peer and answers the peer's own
-//! lookups.
+//! lookups, and a [`TrustPolicy`] that decides how each peer's Key
+//! Claim maps to a trust level.
 //!
 //! # Scope
 //!
-//! This is the sixth cut. It does:
+//! This is the seventh cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
@@ -29,6 +23,9 @@
 //!   from the point the transport's inline handshake leaves off.
 //! - Run Coral witness discovery for each peer during the flow's
 //!   witness phase, answering the peer's own lookups.
+//! - Record every peer's Key Claim and expose an explicit trust
+//!   policy: a first-seen peer is `Unknown` until the application
+//!   calls [`Node::trust_peer`] with `Trusted`.
 //! - Expose `send_to(peer, msg)` and `poll() -> Vec<NodeEvent>`.
 //! - Track a `NodeId -> outbound sender` table.
 //! - Track every peer task it spawns and abort them all on `Drop`.
@@ -47,8 +44,9 @@
 //!   per peer.
 //! - Accumulate `WitnessStatement`s. The discovery client runs, but
 //!   the responder answers with no witnesses, so `Ready(Verified)`
-//!   is unreachable in a two-node network. A later milestone wires
-//!   witness accumulation and the responder returns real rings.
+//!   is unreachable in a network smaller than five independent
+//!   peers. A later milestone wires witness accumulation and the
+//!   responder returns real rings.
 //! - Run cluster merge/split. The DHT's routing table records
 //!   observed `ClusterInfo` but nothing consumes it.
 //! - Auto-serve `register_tcid`, `delegation`, `derivative_link`,
@@ -67,10 +65,25 @@
 //! [`ConnectionFlow::resume_from_key_claim`]. The NAT phase concludes
 //! from the transport being up: direct connectivity is already proven
 //! by the handshake. The witness phase runs a real
-//! [`quip_net::discovery::WitnessDiscovery`] against
+//! [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
 //! the peer: the flow sends a `coral_lookup`, ingests the response,
 //! and either completes with `Ready(KtStatus)` or falls back to
 //! `Ready(Pending)` when the discovery fails.
+//!
+//! # Trust policy
+//!
+//! Two independent axes determine whether a peer is usable:
+//!
+//! - **Policy trust** (`Unknown` / `Trusted` / `Untrusted` /
+//!   `Revoked`) is decided by [`TrustPolicy`] from the local store
+//!   and the application's explicit [`Node::trust_peer`] calls. A
+//!   first-seen peer is `Unknown`; nothing auto-escalates.
+//! - **Flow status** (`Pending` / `Verified`) is decided by the §16
+//!   witness-discovery phase and reflects 4+ independent witnesses.
+//!
+//! `Verified` is never set by the application — only the flow can
+//! promote a peer from `Trusted` to `Verified`. The combined
+//! [`PeerTrust`] returned on peer events reflects both axes.
 //!
 //! # Coral roles
 //!
@@ -83,8 +96,7 @@
 //!   consensus, which is honest — the node holds no
 //!   `WitnessStatement`s yet.
 //!
-//! Both roles share one
-//! [`DiscoveryHandle`], so the ring and
+//! Both roles share one [`DiscoveryHandle`], so the ring and
 //! spillover caches are unified across the node.
 //!
 //! # DHT routing
@@ -123,7 +135,7 @@
 //! Peer tasks read the current time through [`NodeConfig::clock`] —
 //! a shared `Arc<dyn Clock + Send + Sync>`, defaulting to
 //! [`SystemClock`]. Tests inject a
-//! [`quip_core::time::ManualClock`] so that pin and
+//! [`ManualClock`](quip_core::time::ManualClock) so that pin and
 //! query timestamps match by construction. The clock is also what an
 //! application should read via [`Node::clock`] when it wants a
 //! timestamp consistent with what the node's own peer tasks are
@@ -181,8 +193,8 @@
 //! // React to peers.
 //! for event in node.poll().await? {
 //!     match event {
-//!         NodeEvent::Ready { peer, kt_status } => {
-//!             println!("ready: {peer:?} ({kt_status:?})");
+//!         NodeEvent::Ready { peer, kt_status, trust } => {
+//!             println!("ready: {peer:?} ({kt_status:?}, {trust:?})");
 //!         }
 //!         NodeEvent::Message { peer, msg, .. } => {
 //!             println!("{} from {:?}", msg.verb(), peer);
@@ -196,6 +208,7 @@
 
 pub mod dht;
 pub mod discovery;
+pub mod trust;
 
 use quip_core::cid::{CidOrV1, HashAlgo};
 use quip_core::dvv::NodeId;
@@ -228,6 +241,8 @@ use tokio::task::JoinHandle;
 
 use dht::DhtHandle;
 use discovery::DiscoveryHandle;
+// M10.3: the trust policy and the trust level that peer events carry.
+use trust::{PeerTrust, TrustPolicy};
 
 /// Capacity of the node's event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
@@ -264,6 +279,10 @@ type SharedClock = Arc<dyn Clock + Send + Sync + 'static>;
 /// safe with no gain.
 pub type SharedSigner = Arc<Ed25519Signer>;
 
+// M10.3: shared handle around the trust policy, same shape as the
+// store and the DHT handle.
+type SharedTrust = Arc<Mutex<TrustPolicy>>;
+
 // -------------------------------------------------------------------------
 // Config
 // -------------------------------------------------------------------------
@@ -283,7 +302,7 @@ pub struct NodeConfig {
     /// is responsible for handling them.
     pub auto_serve_pins: bool,
     /// Time source used by peer tasks. Defaults to [`SystemClock`];
-    /// tests inject a [`quip_core::time::ManualClock`].
+    /// tests inject a [`ManualClock`](quip_core::time::ManualClock).
     pub clock: SharedClock,
     /// The node's signer. Shared with the DHT and the discovery
     /// client, so every signature the node produces traces to one
@@ -347,7 +366,7 @@ impl NodeConfig {
     ///
     /// The clock is read once per peer task iteration, so a frozen or
     /// slowly-advancing
-    /// [`quip_core::time::ManualClock`] makes the node
+    /// [`ManualClock`](quip_core::time::ManualClock) makes the node
     /// deterministic.
     pub fn with_clock(mut self, clock: SharedClock) -> Self {
         self.clock = clock;
@@ -385,24 +404,29 @@ pub enum NodeEvent {
     /// establishment flow still has to run before T2/T3 traffic is
     /// appropriate. That completion is signalled by
     /// [`NodeEvent::Ready`].
+    ///
+    /// `trust` is the policy's view of the peer's Key Claim at the
+    /// moment the event fired. A first-seen peer is
+    /// [`PeerTrust::Unknown`]; the application is expected to call
+    /// [`Node::trust_peer`] to accept or deny it.
     Connected {
-        /// The peer's NodeId, as claimed. The application is
-        /// responsible for verifying the claim's signature and
-        /// applying its own TOFU / rotation policy.
+        /// The peer's NodeId, as claimed.
         peer: NodeId,
+        /// The policy's current trust level for the peer.
+        trust: PeerTrust,
     },
     /// The establishment flow reached `Ready`.
     ///
     /// `kt_status` is the trust level the flow computed from the
-    /// witness discovery. In a two-node network the responder holds
-    /// no witnesses, so this is [`KtStatus::Pending`]; a larger
-    /// network can produce [`KtStatus::Verified`] once 4+ independent
-    /// witness statements are collected.
+    /// witness discovery. `trust` is the combined policy + flow view
+    /// of the peer.
     Ready {
         /// The peer.
         peer: NodeId,
         /// KT status at the moment the flow completed.
         kt_status: KtStatus,
+        /// The policy's current trust level for the peer.
+        trust: PeerTrust,
     },
     /// The establishment flow failed before reaching `Ready`.
     ///
@@ -413,11 +437,28 @@ pub enum NodeEvent {
         peer: NodeId,
         /// Why the flow failed.
         failure: FlowFailure,
+        /// The policy's current trust level for the peer.
+        trust: PeerTrust,
     },
     /// A peer disconnected.
     Disconnected {
         /// The peer's NodeId.
         peer: NodeId,
+        /// The policy's current trust level for the peer at the
+        /// moment of disconnection. The store retains this value, so
+        /// a reconnect sees the same trust.
+        trust: PeerTrust,
+    },
+    /// The peer's trust level changed.
+    ///
+    /// Fires when the application calls [`Node::trust_peer`], when a
+    /// claim mismatch demotes a peer to `Untrusted`, or when the flow
+    /// promotes a `Trusted` peer to `Verified`.
+    PeerTrustChanged {
+        /// The peer.
+        peer: NodeId,
+        /// The new trust level.
+        trust: PeerTrust,
     },
     /// A framed message arrived from `peer` on `tier`.
     ///
@@ -492,6 +533,9 @@ pub struct Node<B = MemoryBlobStore> {
     dht_task: Option<JoinHandle<()>>,
     /// The node's shared Coral discovery client.
     discovery: DiscoveryHandle,
+    /// The node's trust policy. Shared with every peer task and with
+    /// the application through [`Node::trust_peer`].
+    trust: SharedTrust,
 }
 
 impl Node<MemoryBlobStore> {
@@ -531,6 +575,8 @@ where
         let peer_tasks: TaskMap = Arc::new(Mutex::new(BTreeMap::new()));
         let store = Arc::new(Mutex::new(store));
         let clock = Arc::clone(&config.clock);
+        // M10.3: initialize the trust policy.
+        let trust: SharedTrust = Arc::new(Mutex::new(TrustPolicy::new()));
 
         let local_id = config.key_claim.node_id;
         let (dht, dht_outbound_rx) = DhtHandle::new(local_id);
@@ -549,6 +595,7 @@ where
         let accept_tx = events_tx.clone();
         let accept_dht = dht.clone();
         let accept_discovery = discovery.clone();
+        let accept_trust = Arc::clone(&trust);
         let auto_serve = config.auto_serve_pins;
         let accept_task = tokio::spawn(async move {
             accept_loop(
@@ -561,6 +608,7 @@ where
                 accept_tx,
                 accept_dht,
                 accept_discovery,
+                accept_trust,
             )
             .await;
         });
@@ -579,6 +627,7 @@ where
             dht,
             dht_task: Some(dht_task),
             discovery,
+            trust,
         })
     }
 
@@ -615,7 +664,29 @@ where
             .await
             .insert(peer, PeerHandle { outbound: out_tx });
         self.dht.note_peer(peer, Some(addr), clock.now());
-        let _ = self.events_tx.send(NodeEvent::Connected { peer }).await;
+
+        // M10.3: record the peer's claim before emitting Connected.
+        // A first-seen peer lands as `Unknown`; a reconnect to a peer
+        // already in the store reports its stored trust.
+        let peer_claim = match driver.peer_key_claim().cloned() {
+            Some(c) => c,
+            None => {
+                return Err(Error::Transport(
+                    "peer claim missing after handshake".into(),
+                ))
+            }
+        };
+        let trust_level = {
+            let mut policy = self.trust.lock().await;
+            policy.observe_claim(peer_claim, clock.now())
+        };
+        let _ = self
+            .events_tx
+            .send(NodeEvent::Connected {
+                peer,
+                trust: trust_level,
+            })
+            .await;
 
         let events_tx = self.events_tx.clone();
         let peers = Arc::clone(&self.peers);
@@ -624,14 +695,15 @@ where
         let auto_serve = self.auto_serve_pins;
         let dht = self.dht.clone();
         let discovery = self.discovery.clone();
+        let trust = Arc::clone(&self.trust);
         let handle = tokio::spawn(async move {
             // The client endpoint must outlive the connection, so it
             // is moved into the peer task and dropped when the loop
             // exits.
             let _keep_endpoint = client_endpoint;
             peer_run(
-                driver, peer, store, clock, auto_serve, events_tx, out_rx, dht,
-                discovery,
+                driver, peer, store, clock, auto_serve, events_tx, out_rx,
+                dht, discovery, trust,
             )
             .await;
             peers.lock().await.remove(&peer);
@@ -645,7 +717,8 @@ where
     /// Drain whatever events are ready, waiting briefly for the first.
     ///
     /// Returns an error if [`Self::take_events`] has been called: the
-    /// receiver is gone, and the caller is responsible for draining it.
+    /// receiver is gone, and the caller is responsible for draining
+    /// it.
     pub async fn poll(&mut self) -> Result<Vec<NodeEvent>> {
         let rx = match self.events_rx.as_mut() {
             Some(rx) => rx,
@@ -676,9 +749,10 @@ where
 
     /// Take the event receiver out of the node.
     ///
-    /// After this call [`Self::poll`] returns an error; the caller owns
-    /// the receiver and is responsible for draining it. The FFI layer
-    /// uses this to hand events to Dart without competing with `poll`.
+    /// After this call [`Self::poll`] returns an error; the caller
+    /// owns the receiver and is responsible for draining it. The FFI
+    /// layer uses this to hand events to Dart without competing with
+    /// `poll`.
     ///
     /// Calling it twice returns `None` the second time.
     pub fn take_events(&mut self) -> Option<mpsc::Receiver<NodeEvent>> {
@@ -774,6 +848,55 @@ where
     /// that want to start a lookup directly.
     pub fn discovery(&self) -> DiscoveryHandle {
         self.discovery.clone()
+    }
+
+    /// Record the node's trust decision for `peer`.
+    ///
+    /// The node records every peer's Key Claim on first contact but
+    /// does not decide trust by default: a first-seen peer stays
+    /// `Unknown` until the application calls this method with
+    /// [`PeerTrust::Trusted`]. `Trusted`, `Untrusted`, and `Revoked`
+    /// are accepted; `Unknown` and `Verified` are not — see
+    /// [`TrustPolicy::record_decision`] for the reasoning.
+    ///
+    /// Returns `true` if the decision was recorded. On a successful
+    /// change, a [`NodeEvent::PeerTrustChanged`] fires on the event
+    /// stream.
+    pub async fn trust_peer(
+        &self,
+        peer: &NodeId,
+        decision: PeerTrust,
+    ) -> bool {
+        let now = self.clock.now();
+        let (accepted, changed, resulting) = {
+            let mut policy = self.trust.lock().await;
+            let before = policy.trust_of(peer);
+            let accepted = policy.record_decision(peer, decision, now);
+            let resulting = policy.trust_of(peer);
+            (accepted, before != resulting, resulting)
+        };
+        if accepted && changed {
+            let _ = self
+                .events_tx
+                .send(NodeEvent::PeerTrustChanged {
+                    peer: *peer,
+                    trust: resulting,
+                })
+                .await;
+        }
+        accepted
+    }
+
+    /// Current trust level for `peer`.
+    pub async fn peer_trust(&self, peer: &NodeId) -> PeerTrust {
+        self.trust.lock().await.trust_of(peer)
+    }
+
+    /// Snapshot of the trust store.
+    pub async fn trust_snapshot(
+        &self,
+    ) -> Vec<(NodeId, trust::StoredClaim)> {
+        self.trust.lock().await.snapshot()
     }
 
     // ---- Direct store helpers ----
@@ -912,6 +1035,7 @@ async fn accept_loop<B>(
     events_tx: mpsc::Sender<NodeEvent>,
     dht: DhtHandle,
     discovery: DiscoveryHandle,
+    trust: SharedTrust,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -933,6 +1057,7 @@ async fn accept_loop<B>(
         let events_tx = events_tx.clone();
         let dht = dht.clone();
         let discovery = discovery.clone();
+        let trust = Arc::clone(&trust);
 
         // The accept loop cannot know the peer's NodeId until the
         // handshake completes, so the peer task registers itself under
@@ -956,7 +1081,33 @@ async fn accept_loop<B>(
                 .await
                 .insert(peer, PeerHandle { outbound: out_tx });
             dht.note_peer(peer, None, clock.now());
-            let _ = events_tx.send(NodeEvent::Connected { peer }).await;
+
+            // M10.3: same as Node::connect — record the claim, then
+            // emit Connected with the resulting trust.
+            let peer_claim = match driver.peer_key_claim().cloned() {
+                Some(c) => c,
+                None => {
+                    let _ = events_tx
+                        .send(NodeEvent::Error {
+                            peer: Some(peer),
+                            error: Error::Transport(
+                                "peer claim missing after handshake".into(),
+                            ),
+                        })
+                        .await;
+                    return;
+                }
+            };
+            let trust_level = {
+                let mut policy = trust.lock().await;
+                policy.observe_claim(peer_claim, clock.now())
+            };
+            let _ = events_tx
+                .send(NodeEvent::Connected {
+                    peer,
+                    trust: trust_level,
+                })
+                .await;
 
             peer_run(
                 driver,
@@ -968,6 +1119,7 @@ async fn accept_loop<B>(
                 out_rx,
                 dht.clone(),
                 discovery,
+                trust,
             )
             .await;
             peers.lock().await.remove(&peer);
@@ -1191,6 +1343,12 @@ async fn run_discovery_phase(
     }
 }
 
+/// Read the policy's trust level for `peer`, without holding the lock
+/// across the caller's subsequent await.
+async fn current_trust(trust: &SharedTrust, peer: &NodeId) -> PeerTrust {
+    trust.lock().await.trust_of(peer)
+}
+
 /// Drive the §16 connection flow to completion.
 ///
 /// Returns `true` on `Ready`. On any failure the `EstablishmentFailed`
@@ -1203,7 +1361,7 @@ async fn run_discovery_phase(
 /// has already exchanged the §4 handshake and §16 Key Claims, which
 /// proves direct connectivity, so declaring `on_nat_complete(true)` is
 /// the truth, not a stub. The witness phase runs a real
-/// [`quip_net::discovery::WitnessDiscovery`] against
+/// [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
 /// the peer; a later milestone replaces the NAT phase with a real
 /// `NatDriver`.
 #[allow(clippy::too_many_arguments)]
@@ -1215,6 +1373,7 @@ async fn run_establishment(
     clock: &SharedClock,
     events_tx: &mpsc::Sender<NodeEvent>,
     discovery: &DiscoveryHandle,
+    trust: &SharedTrust,
 ) -> bool {
     let session_id = derive_session_id(&local_claim.node_id, &peer);
     let mut flow = ConnectionFlow::resume_from_key_claim(
@@ -1232,8 +1391,13 @@ async fn run_establishment(
         // overdue phase fails here rather than being advanced.
         for action in flow.poll(now) {
             if let FlowAction::Failed(failure) = action {
+                let trust_level = current_trust(trust, &peer).await;
                 let _ = events_tx
-                    .send(NodeEvent::EstablishmentFailed { peer, failure })
+                    .send(NodeEvent::EstablishmentFailed {
+                        peer,
+                        failure,
+                        trust: trust_level,
+                    })
                     .await;
                 return false;
             }
@@ -1253,15 +1417,38 @@ async fn run_establishment(
             }
             FlowPhase::Ready(status) => {
                 let kt_status = *status;
+
+                // M10.3: a flow that reached `Verified` promotes a
+                // `Trusted` peer to `Verified`. The promotion is
+                // ignored if the policy has not already accepted the
+                // peer — witness corroboration is not a substitute
+                // for the application's own decision.
+                let trust_level = {
+                    let mut policy = trust.lock().await;
+                    if kt_status == KtStatus::Verified {
+                        policy.promote_to_verified(&peer);
+                    }
+                    policy.trust_of(&peer)
+                };
+                // Guard dropped above; safe to await the send.
                 let _ = events_tx
-                    .send(NodeEvent::Ready { peer, kt_status })
+                    .send(NodeEvent::Ready {
+                        peer,
+                        kt_status,
+                        trust: trust_level,
+                    })
                     .await;
                 return true;
             }
             FlowPhase::Failed(failure) => {
                 let failure = *failure;
+                let trust_level = current_trust(trust, &peer).await;
                 let _ = events_tx
-                    .send(NodeEvent::EstablishmentFailed { peer, failure })
+                    .send(NodeEvent::EstablishmentFailed {
+                        peer,
+                        failure,
+                        trust: trust_level,
+                    })
                     .await;
                 return false;
             }
@@ -1299,6 +1486,7 @@ async fn peer_run<B>(
     mut outbound_rx: mpsc::Receiver<Message>,
     dht: DhtHandle,
     discovery: DiscoveryHandle,
+    trust: SharedTrust,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -1312,12 +1500,27 @@ async fn peer_run<B>(
             // Unreachable in practice; guard defensively in case the
             // transport's guarantees change.
             let failure = FlowFailure::KeyClaimTimeout;
+            let trust_level = current_trust(&trust, &peer).await;
             let _ = events_tx
-                .send(NodeEvent::EstablishmentFailed { peer, failure })
+                .send(NodeEvent::EstablishmentFailed {
+                    peer,
+                    failure,
+                    trust: trust_level,
+                })
                 .await;
-            let _ = events_tx.send(NodeEvent::Disconnected { peer }).await;
+            let _ = events_tx.send(NodeEvent::Disconnected { peer, trust: trust_level }).await;
             return;
         }
+    };
+
+    // M10.3: record the peer's Key Claim before doing anything else.
+    // A first-seen peer lands as `Unknown`; a claim mismatch against
+    // the stored claim demotes to `Untrusted`; a tombstoned peer
+    // returns `Revoked`. In all cases the trust value is what the
+    // subsequent events carry.
+    let trust_level = {
+        let mut policy = trust.lock().await;
+        policy.observe_claim(peer_claim.clone(), clock.now())
     };
 
     let ready = run_establishment(
@@ -1328,11 +1531,17 @@ async fn peer_run<B>(
         &clock,
         &events_tx,
         &discovery,
+        &trust,
     )
     .await;
 
     if !ready {
-        let _ = events_tx.send(NodeEvent::Disconnected { peer }).await;
+        let _ = events_tx
+            .send(NodeEvent::Disconnected {
+                peer,
+                trust: trust_level,
+            })
+            .await;
         return;
     }
 
@@ -1348,7 +1557,13 @@ async fn peer_run<B>(
         &discovery,
     )
     .await;
-    let _ = events_tx.send(NodeEvent::Disconnected { peer }).await;
+    let trust_level = current_trust(&trust, &peer).await;
+    let _ = events_tx
+        .send(NodeEvent::Disconnected {
+            peer,
+            trust: trust_level,
+        })
+        .await;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1605,38 +1820,38 @@ mod tests {
         node: &mut Node,
         expected: NodeId,
         timeout_ms: u64,
-    ) -> bool {
+    ) -> Option<PeerTrust> {
         let deadline =
             std::time::Instant::now() + Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
             if let Ok(events) = node.poll().await {
                 for e in events {
-                    if let NodeEvent::Connected { peer } = e {
+                    if let NodeEvent::Connected { peer, trust } = e {
                         if peer == expected {
-                            return true;
+                            return Some(trust);
                         }
                     }
                 }
             }
         }
-        false
+        None
     }
 
     /// Wait for `node` to emit a `Ready` event for `expected` and
-    /// return the KT status.
+    /// return the KT status and the trust level.
     async fn wait_for_ready(
         node: &mut Node,
         expected: NodeId,
         timeout_ms: u64,
-    ) -> Option<KtStatus> {
+    ) -> Option<(KtStatus, PeerTrust)> {
         let deadline =
             std::time::Instant::now() + Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
             if let Ok(events) = node.poll().await {
                 for e in events {
-                    if let NodeEvent::Ready { peer, kt_status } = e {
+                    if let NodeEvent::Ready { peer, kt_status, trust } = e {
                         if peer == expected {
-                            return Some(kt_status);
+                            return Some((kt_status, trust));
                         }
                     }
                 }
@@ -1719,9 +1934,10 @@ mod tests {
         let peer = a.connect(b_addr, "localhost").await.unwrap();
         assert_eq!(peer, b_node_id, "A dials B and learns B's NodeId");
 
-        assert!(
+        assert_eq!(
             wait_for_connected(&mut b, a_node_id, 5_000).await,
-            "B should see the inbound connection from A"
+            Some(PeerTrust::Unknown),
+            "B should see the inbound connection from A as Unknown"
         );
     }
 
@@ -1739,10 +1955,34 @@ mod tests {
         // The discovery runs end to end. In a two-node network
         // neither side holds witnesses, so both peers surface
         // `Ready(Pending)`.
-        let a_status = wait_for_ready(&mut a, b_node_id, 10_000)
+        let (status, trust) = wait_for_ready(&mut a, b_node_id, 10_000)
             .await
             .expect("A should reach Ready");
-        assert_eq!(a_status, KtStatus::Pending);
+        assert_eq!(status, KtStatus::Pending);
+        assert_eq!(trust, PeerTrust::Unknown);
+    }
+
+    #[tokio::test]
+    async fn trust_escalates_after_explicit_call() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        let peer_b = a.connect(b_addr, "localhost").await.unwrap();
+        assert_eq!(peer_b, b_node_id);
+
+        // First-seen peer is Unknown.
+        assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Unknown);
+
+        // The application accepts it.
+        assert!(a.trust_peer(&b_node_id, PeerTrust::Trusted).await);
+        assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Trusted);
+
+        // Verified cannot be set directly.
+        assert!(!a.trust_peer(&b_node_id, PeerTrust::Verified).await);
+        assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Trusted);
     }
 
     #[tokio::test]
@@ -1758,7 +1998,7 @@ mod tests {
         assert_eq!(peer_b, b_node_id);
 
         assert!(
-            wait_for_connected(&mut b, a_node_id, 5_000).await,
+            wait_for_connected(&mut b, a_node_id, 5_000).await.is_some(),
             "B should see A connect"
         );
 
@@ -1887,7 +2127,7 @@ mod tests {
 
         let peer_b = a.connect(b_addr, "localhost").await.unwrap();
         assert_eq!(peer_b, b_node_id);
-        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await.is_some());
         let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
         let _ = wait_for_ready(&mut b, a_node_id, 10_000).await;
 
@@ -1930,7 +2170,7 @@ mod tests {
 
         let peer_b = a.connect(b_addr, "localhost").await.unwrap();
         assert_eq!(peer_b, b_node_id);
-        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await.is_some());
         let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
         let _ = wait_for_ready(&mut b, a_node_id, 10_000).await;
 
@@ -1977,7 +2217,7 @@ mod tests {
 
         let peer_b = a.connect(b_addr, "localhost").await.unwrap();
         assert_eq!(peer_b, b_node_id);
-        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await.is_some());
         let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
         let _ = wait_for_ready(&mut b, a_node_id, 10_000).await;
 
@@ -2017,7 +2257,7 @@ mod tests {
         assert!(b.dht().table_is_empty());
 
         let _ = a.connect(b_addr, "localhost").await.unwrap();
-        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await.is_some());
         let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
         let _ = wait_for_ready(&mut b, a_node_id, 10_000).await;
 
@@ -2058,7 +2298,7 @@ mod tests {
 
         let peer_b = a.connect(b_addr, "localhost").await.unwrap();
         assert_eq!(peer_b, b_node_id);
-        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await);
+        assert!(wait_for_connected(&mut b, a_node_id, 5_000).await.is_some());
         let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
         let _ = wait_for_ready(&mut b, a_node_id, 10_000).await;
 
@@ -2095,10 +2335,10 @@ mod tests {
         let peer_b = a.connect(b_addr, "localhost").await.unwrap();
         assert_eq!(peer_b, b_node_id);
 
-        let a_status = wait_for_ready(&mut a, b_node_id, 10_000).await;
-        let b_status = wait_for_ready(&mut b, a_node_id, 10_000).await;
-        assert_eq!(a_status, Some(KtStatus::Pending));
-        assert_eq!(b_status, Some(KtStatus::Pending));
+        let a_ready = wait_for_ready(&mut a, b_node_id, 10_000).await;
+        let b_ready = wait_for_ready(&mut b, a_node_id, 10_000).await;
+        assert_eq!(a_ready.map(|(s, _)| s), Some(KtStatus::Pending));
+        assert_eq!(b_ready.map(|(s, _)| s), Some(KtStatus::Pending));
     }
 
     /// The node's shared discovery handle exposes the same NodeId as
@@ -2121,5 +2361,80 @@ mod tests {
         let paths = make_lookup_paths(target, a.now());
         let _ = h1.start(target, paths, a.now()).unwrap();
         assert!(h2.status(&target).is_some());
+    }
+
+    // ---- M10.3: trust policy ----
+
+    /// A peer stays `Unknown` until the application decides.
+    #[tokio::test]
+    async fn peer_stays_unknown_until_decided() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        let _ = a.connect(b_addr, "localhost").await.unwrap();
+        assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Unknown);
+
+        // The store holds the claim.
+        let snapshot = a.trust_snapshot().await;
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].0, b_node_id);
+        assert_eq!(snapshot[0].1.trust, PeerTrust::Unknown);
+
+        // The application accepts.
+        assert!(a.trust_peer(&b_node_id, PeerTrust::Trusted).await);
+        assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Trusted);
+    }
+
+    /// `trust_peer` emits a `PeerTrustChanged` event.
+    #[tokio::test]
+    async fn trust_change_emits_event() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        let _ = a.connect(b_addr, "localhost").await.unwrap();
+        let _ = a.trust_peer(&b_node_id, PeerTrust::Trusted).await;
+
+        // Poll until we see the event.
+        let deadline =
+            std::time::Instant::now() + Duration::from_millis(2_000);
+        let mut saw = false;
+        while std::time::Instant::now() < deadline && !saw {
+            if let Ok(events) = a.poll().await {
+                for e in events {
+                    if let NodeEvent::PeerTrustChanged { peer, trust } = e {
+                        if peer == b_node_id && trust == PeerTrust::Trusted {
+                            saw = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(saw, "PeerTrustChanged event did not fire");
+    }
+
+    /// Revocation is terminal and fires a change event.
+    #[tokio::test]
+    async fn revocation_is_terminal() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        let _ = a.connect(b_addr, "localhost").await.unwrap();
+        let _ = a.trust_peer(&b_node_id, PeerTrust::Trusted).await;
+        assert!(a.trust_peer(&b_node_id, PeerTrust::Revoked).await);
+        assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Revoked);
+
+        // Attempting to re-trust does not lift revocation.
+        assert!(a.trust_peer(&b_node_id, PeerTrust::Trusted).await);
+        assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Revoked);
     }
 }

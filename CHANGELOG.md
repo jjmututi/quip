@@ -14,18 +14,23 @@ not a status this file recognises.
 ## Current state
 
 Every protocol-level milestone (M1–M8) is landed. The application
-layer (M9.x) is in progress: M9.1 through M9.5a are landed, M9.5b is
-not started. The interface layer (M10.x) has begun: M10.1 through
-M10.3 are landed. §16 runs end-to-end through step 8 across the
-protocol crates; the `Node` type composes them into a runnable peer;
-a Dart client can bind a node, subscribe to its event stream, and
-make explicit trust decisions about its peers.
+layer (M9.x) is in progress: M9.1 through M9.5a are landed, plus the
+M9.5b-a design contracts. The interface layer (M10.x) has begun:
+M10.1 through M10.3 are landed. §16 runs end-to-end through step 8
+across the protocol crates; the `Node` type composes them into a
+runnable peer; a Dart client can bind a node, subscribe to its event
+stream, and make explicit trust decisions about its peers.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
 view-change certificates, identity types, membership) and making the
 distributed parts withstand hostile conditions (adversarial
 simulation, bounded queues, adversarial routing models).
+
+The application layer's headless deployment shape — a `quip-node`
+binary running without Flutter — is the substrate the VPS tier,
+bootstrap nodes, and witness rings depend on. It lands as M9.7 after
+the M9.5b and M9.6 work that gives it something real to do.
 
 ### Build status
 
@@ -101,9 +106,11 @@ doc-tests       4 passed (one per crate)
 | M9.4a | `quip-node`: live `DhtClient` over the node's peer connections | landed |
 | M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
-| M9.5b | `quip-node`: real `NatDriver` + cluster merge/split | not started |
-| M9.5b-c | `quip-node`: M9.5b shared contracts (frozen) | landed |
+| M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
+| M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | not started |
+| M9.5b-c | `quip-node`: real `NatDriver`, cluster merge/split, XOR routing | not started |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
+| M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
 | M10.2 | `quip-node-ffi`: event stream across the FFI boundary | landed |
 | M10.3 | `quip-node-ffi`: explicit trust policy and peer trust events | landed |
@@ -261,9 +268,8 @@ Tests: 16 tests in `transport::tests` over a real QUIC handshake pair.
 - **Pin eviction.** `quip-storage/src/pins.rs` evicts by lowest
   `ref_count` then age.
 
-**Known incomplete**: `T2_MAX_STREAMS` in the draft was 256;
-`constants.rs` had 16 (D4, aligned). The DHT handle uses unbounded
-channels; bounding and coalescing is N-Hard.
+**Known incomplete**: the DHT handle uses unbounded channels;
+bounding and coalescing is N-Hard.
 
 ### M8 — Range fetch — LANDED
 
@@ -352,7 +358,7 @@ Tests: `dht_publish_connectivity_reaches_peer`,
 
 **Known incomplete**: broadcast is used where XOR-distance routing
 would be correct; the routing table holds direct peers only; lookups
-are no-ops. See M9.5b.
+are no-ops. See M9.5b-c.
 
 ### M9.4b — `quip-node` ConnectionFlow integration — LANDED
 
@@ -364,7 +370,7 @@ handshake and the steady-state loop.
   derived symmetrically from the two NodeIds (`local[0..16] XOR
   remote[0..16]`).
 - The NAT phase concludes from the live transport: the handshake
-  proves direct connectivity. M9.5b replaces this with a real
+  proves direct connectivity. M9.5b-c replaces this with a real
   `NatDriver` waiting on `NatEvent::DirectPathEstablished`.
 - The witness phase concludes as "not attempted". The flow translates
   that into `Ready(Pending)` per §16 step 18.
@@ -381,7 +387,7 @@ Tests: `ready_fires_after_connect`,
 tests (all now traverse the flow).
 
 **Known incomplete**: NAT phase is a placeholder; witness phase is a
-placeholder; both defer to M9.5b/M9.6.
+placeholder; both defer to M9.5b-c and M9.6.
 
 ### M9.5a — `quip-node` shared Coral discovery — LANDED
 
@@ -417,82 +423,46 @@ Tests: `ready_via_shared_discovery_on_both_sides`,
 
 **Known incomplete**: witness accumulation. See M9.6.
 
-### M9.5b-c — shared contracts — LANDED
+### M9.5b-a — M9.5b design contracts — LANDED
 
-The shared contracts for M9.5b's NAT and cluster integration tracks
-are frozen. The NAT and cluster tracks run in parallel against these
-contracts. Two gates were closed before freezing: §13.2's acceptance
-rule and `ConnectionFlow`'s failure semantics.
+`docs/M9.5b-design.md` freezes the shared contracts that the NAT and
+cluster integration tracks of M9.5b depend on. Written before either
+track starts, so the two can proceed in parallel without drifting.
 
-**Peer identity and generation.** `NodeId` identifies a logical node;
-`PeerSlot` identifies its active connection generation. Events are
-generation-scoped: an event from an obsolete `PeerSlot` must not
-mutate current routing or cluster state. `quinn::Connection::stable_id()`
-is the candidate for the generation identifier, subject to
-verification against the pinned Quinn version; an explicit per-peer
-counter is the fallback.
+Four contracts:
 
-**Lifecycle transitions.**
+- **`PeerSlot` generation identity.** A `PeerSlot` identifies a
+  particular connection generation for a logical `NodeId`. Events
+  from an obsolete generation cannot mutate current routing or
+  cluster state.
+- **`PeerLifecycle` transitions.** `Connecting → Established`;
+  `Established → NatDirect | NatRelayed | Failed`; a path change
+  between `NatDirect` and `NatRelayed` does not recreate the
+  connection; any nonterminal state can reach `Closing`; `Failed`
+  and `Closing` are terminal for a given slot.
+- **Routing-table record.** Keyed by `NodeId`, associated with the
+  active `PeerSlot`, with routing eligibility distinct from
+  physical connection existence.
+- **Cluster-membership eligibility.** Follows draft §13.2: the
+  cluster-joining decision requires the 90th-percentile RTT at or
+  below the cluster's threshold, using the specified 20-sample
+  procedure. The sample requirement binds the acceptance decision,
+  not individual members.
 
-```
-Connecting  → Established
-Established → NatDirect | NatRelayed | Failed
-NatDirect  ↔ NatRelayed
-NatDirect | NatRelayed → Failed
-Any nonterminal state  → Closing
-Failed, Closing → terminal for this PeerSlot
-```
+Three dimensions are kept separate: connection lifecycle, witness
+verification (`Pending` / `Verified`), and application trust
+(`Unknown` / `Trusted` / `Untrusted` / `Revoked`). A peer can be
+`NatDirect` with `Pending` witness status and `Unknown` application
+trust without a lifecycle variant for that combination.
 
-Recovery after `Failed` or `Closing` creates a new `PeerSlot`.
-Discovery failure does not transition the lifecycle:
-`on_discovery_failed()` yields `Ready(Pending)`, which the node
-treats as successful establishment. Witness status (`Pending` /
-`Verified`) and application trust (`Unknown` / `Trusted` /
-`Untrusted` / `Revoked`) are independent dimensions, not lifecycle
-states.
+Discovery failure does not transition the connection lifecycle.
+`ConnectionFlow::on_discovery_failed()` yields `Ready(Pending)`,
+which the node treats as successful establishment.
 
-**Routing-table record.** Keyed by logical `NodeId`, each active
-record associated with its current `PeerSlot`. Physical connection
-existence and routing eligibility are distinct. The NAT track sets
-eligibility when a peer reaches an eligible direct or relayed state;
-the lifecycle and cleanup path clears it on failure, closure, or
-replacement.
-
-**Cluster-membership eligibility.** Membership is a subset of
-routing-table peers. §13.2 requires the cluster-joining decision to
-pass a 90th-percentile RTT test using a minimum 20-sample procedure;
-the sample requirement binds the acceptance decision, not individual
-members. `ClusterState::is_acceptable` enforces
-`ACCEPTANCE_MIN_SAMPLES`. A peer with missing RTT data does not count
-toward the sample minimum and does not independently satisfy the
-acceptance test.
-
-**RTT observations.** `ConnectionDriver::rtt() -> Option<Duration>`
-in `quip-net`, reading the Quinn RTT statistic. `Option` because the
-statistic may not be populated before the first sample.
-
-**NAT session coordination.** Reuse the deterministic
-`derive_session_id(local, remote)` in `quip-node`. Both endpoints
-derive the same session identifier from the same logical peer
-identities, independent of endpoint ordering and independent of
-connection generation.
-
-**Verification record.** Two gates were closed before freezing:
-
-- §13.2 (draft): requires 90th-percentile RTT at or below the
-  cluster threshold, with a recommended minimum of 20 samples. The
-  sample requirement binds the acceptance decision, not per-member
-  history.
-- `ConnectionFlow` (quip-net/src/establishment.rs): discovery
-  failure yields `Ready(Pending)`, not `Failed`. Confirmed by
-  reading `on_discovery_failed()` and the node's
-  `run_discovery_phase`.
-
-**Still open** (gates 3–7 from the design): `PeerSlot` ownership and
-generation identity, lifecycle transitions as code, routing-table
-record semantics, routing-eligibility transitions, and the shared
-types plus RTT accessor. These are the next commit; the NAT and
-cluster tracks may proceed once they are in code.
+Verified against the current draft (§13.2) and the `quip-net`
+sources (`establishment.rs`, `cluster.rs`) before landing. The
+implementation of the shared types and the `ConnectionDriver::rtt()`
+accessor is M9.5b-b.
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
@@ -650,7 +620,7 @@ Organized by the axis it belongs to — correctness, network
 completion, validation, protocol design, or release discipline —
 rather than by milestone number. The status table above names the
 same items under their phase labels (BFT-A, BFT-V, N-Hard, Spec,
-M9.5b, M9.6, M10.4, M10.5, M11).
+M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### BFT correctness (BFT-A)
 
@@ -731,8 +701,9 @@ M9.5b, M9.6, M10.4, M10.5, M11).
    alone. Two connections from the same NodeId can race during
    cleanup, and the first's teardown can remove the second's live
    entry. Fix: `PeerSlot { connection_id, handle }`, with cleanup
-   conditional on the connection identity. Small, self-contained,
-   blocks nothing. (Frozen in M9.5b-c; implementation pending.)
+   conditional on the connection identity. This is the same fix
+   M9.5b-b introduces; doing it there closes N-Hard 9 as a
+   side-effect.
 
 10. **Bounded DHT queues.** `DhtHandle` uses unbounded channels for
     both inbound and outbound. An authenticated peer can flood the
@@ -741,8 +712,6 @@ M9.5b, M9.6, M10.4, M10.5, M11).
     DoS bounds wants. Replace with bounded channels and an explicit
     policy: coalesce by `NodeId` for announcements (latest-wins),
     drop newest or drop oldest for other kinds, per-peer limits.
-    This is a hardening issue, not a forging issue — the messages
-    are already signature-verified.
 
 11. **Adversarial DHT routing model.** A DHT is not hard because
     hash-to-bucket is hard; it's hard because an adversary controls
@@ -751,8 +720,7 @@ M9.5b, M9.6, M10.4, M10.5, M11).
     Sybil resistance, eclipse resistance, routing-table poisoning,
     lookup termination, lookup amplification, inconsistent witness
     responses, stale witness statements, adversarial churn, and
-    split-brain cluster membership. The existing `ClusterInfo` and
-    routing structures are a foundation; they are not the answer.
+    split-brain cluster membership.
 
 ### Protocol design (Spec)
 
@@ -782,56 +750,53 @@ M9.5b, M9.6, M10.4, M10.5, M11).
     Proposed: `PeerClaim` → `AuthenticatedPeer` → `TrustedPeer`,
     with `TrustPolicy` operating above `AuthenticatedPeer`.
 
-15. **Name hints as signed keyword sets.** A hint is a signed
-    keyword set — optional primary label, required keywords,
-    optional category, optional app metadata — embedded in the Coral
-    value blob for a resource announcement. The Coral lookup key is
+15. **Name hints and trust anchor.** A name hint is a signed
+    keyword set embedded in the Coral value blob for a resource
+    announcement. The Coral lookup key is
     `SHA-256(NFC(sorted_keywords) || category)`. Hints are not
     lookup keys; the lookup returns a candidate set, and the client
-    filters candidates through its own `TrustPolicy`. The protocol
-    cannot prevent key occupation in the DHT; the resolution layer
-    filters it.
+    filters candidates through its own `TrustPolicy`. `register_tcid`
+    is gated on `Trusted` or `Verified`; a rejected registration is
+    answered with `E_NOT_AUTHORIZED`.
 
-16. **Trust precedes registration.** `register_tcid` is gated on
-    `Trusted` or `Verified` in the receiver's `TrustPolicy`. The
-    gate is checked in the peer steady loop before dispatch; a
-    rejected registration is answered with `E_NOT_AUTHORIZED` rather
-    than dropped silently. Trusted peers gain access to the
-    governance verbs; untrusted peers do not.
-
-17. **Open questions from items 15 and 16.**
-
-    - Untrusted candidates in hint resolution: show with a marker,
-      or hide entirely?
-    - Storage-only `register_tcid` from `Unknown` peers: record for
-      later evaluation, or reject outright?
-    - Trust gate on `pin` / `unpin`: currently accepts from any
-      connected peer; should it match the `register_tcid` gate?
-    - Witness statement trust filtering: the discovery path ingests
-      witness statements without consulting `TrustPolicy`, but
-      `Verified` status is what trust filtering produces, so there
-      is a circularity to resolve.
+    Open questions: what a fresh client does with untrusted
+    candidates (show or hide); whether `Unknown` peers can register
+    storage-only TCIDs; whether `pin` / `unpin` follow the same
+    trust gate as `register_tcid`; whether witness statements are
+    filtered by `TrustPolicy` (and how to resolve the circularity
+    that filtering produces the trust that would filter).
 
 ### Application layer (M9)
 
-18. **M9.5b — real `NatDriver` + cluster merge/split.** Wire a
-    per-peer `NatDriver` into the flow so the NAT phase concludes
-    from a real `NatEvent::DirectPathEstablished` rather than from
-    the transport being up. Exchange actual candidates, perform
-    probing, distinguish direct / relayed / failed connectivity,
-    and propagate an explicit `NatStatus`. Run `ClusterState`
-    merge/split against the routing table. Replace `LiveDht`'s
-    lookup no-ops with real Coral lookups and the DHT router's
-    broadcast with XOR-distance routing. Shared contracts frozen in
-    M9.5b-c; implementation gates 3–7 still open.
+16. **M9.5b-b — shared types and RTT accessor.** `PeerSlot`,
+    `PeerLifecycle`, and `ConnectionDriver::rtt() -> Option<Duration>`.
+    This is the code that turns the M9.5b-a contracts into enforcement.
+    Prerequisite for M9.5b-c.
 
-19. **M9.6 — witness accumulation and trust bootstrap.** The
+17. **M9.5b-c — real `NatDriver`, cluster merge/split, XOR routing.**
+    Wire a per-peer `NatDriver` into the flow so the NAT phase
+    concludes from a real `NatEvent::DirectPathEstablished` rather
+    than from the transport being up. Exchange actual candidates,
+    perform probing, distinguish direct / relayed / failed
+    connectivity, and propagate an explicit `NatStatus`. Run
+    `ClusterState` merge/split against the routing table. Replace
+    `LiveDht`'s lookup no-ops with real Coral lookups and the DHT
+    router's broadcast with XOR-distance routing.
+
+18. **M9.6 — witness accumulation and trust bootstrap.** The
     responder currently answers with no witnesses; when the node
     accumulates `WitnessStatement`s from its peers, the responder
     returns real rings and `Ready(Verified)` becomes reachable in a
     network with at least four independent witnesses. The
     bootstrapping problem is real: a two-node network can never
     reach `Verified`, because verification requires third parties.
+
+19. **M9.7 — headless node binary and config.** A `quip-node`
+    binary that runs without Flutter: config file (bind address,
+    seed source, store path, bootstrap peers), logging, graceful
+    shutdown. This is the deployment shape the VPS tier, bootstrap
+    nodes, and witness rings depend on. Requires M9.5b-c and M9.6
+    to give it something real to do.
 
 ### Interface layer (M10)
 
@@ -852,14 +817,7 @@ M9.5b, M9.6, M10.4, M10.5, M11).
 
 ### Browser substrate (M11)
 
-22. **No rendering format.** The browser substrate renders standard
-    web formats (HTML, CSS, JS, images, media) via the existing
-    browser engine. QUIP does not define a markup language. Its
-    contribution is the resolver, the address scheme, and the trust
-    chrome around the content. This is a design constraint, not an
-    open question.
-
-23. **Local gateway.** A `quip-daemon` or FFI-exposed server that
+22. **Local gateway.** A `quip-daemon` or FFI-exposed server that
     answers `http://localhost:PORT/quip/<cid>` and
     `http://localhost:PORT/hint/<name>`, so any existing browser can
     resolve QUIP content without a bespoke browser. This is the tier
@@ -867,56 +825,62 @@ M9.5b, M9.6, M10.4, M10.5, M11).
     URL shape, content-type negotiation, trust-policy enforcement,
     all reachable from a Firefox tab.
 
-24. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
-    verify → policy → `GovernanceStore`), the CBOR value-blob schema
-    for what responders publish as Coral values (see Spec item 15),
-    and the name-hint mechanism.
+23. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
+    verify → policy → `GovernanceStore`), a CBOR value-blob schema
+    for what responders publish as Coral values, and the name-hint
+    mechanism that lets a client go from a hint string to a set of
+    CIDs via Coral lookup.
 
-25. **Content-type metadata.** How does a CID acquire a MIME type?
-    Options: pin-time metadata (cleanest, mirrors IPFS's
-    `Content-Disposition`), byte sniffing, or address hints. Needed
-    before the gateway can be useful for anything but downloads.
+24. **Content-type metadata.** CIDs do not carry MIME types. The
+    options are pin-time metadata, byte sniffing, or address hints.
+    Pin-time metadata is cleanest and mirrors how IPFS handles it.
+    The alternative is serving everything as
+    `application/octet-stream`, which makes the gateway useless for
+    anything but downloads.
 
-26. **VPS tier.** A user-controlled always-on anchor. Not a new
-    protocol layer: the same headless build, deployed differently.
-    Acts as rendezvous point, relay candidate, availability anchor,
-    and custodian of witness statements. Also the mechanism by which
-    a mobile client can be woken for sync — the VPS is a push
-    provider, using APNs and FCM as notification-only channels.
+25. **The VPS tier.** A user-controlled always-on anchor. Not a new
+    protocol layer: the same headless build (M9.7), deployed
+    differently. Acts as rendezvous point, relay candidate,
+    availability anchor, and custodian of witness statements. Also
+    the mechanism by which a mobile client can be woken for sync —
+    the VPS is a push provider, using APNs and FCM as
+    notification-only channels.
+
+26. **No rendering format.** The browser substrate renders standard
+    web formats (HTML, CSS, JS, images, media) via the existing
+    browser engine. QUIP does not define a markup language. Its
+    contribution is the resolver, the address scheme, and the trust
+    chrome around the content.
 
 ### FFI / API stabilization
 
 27. **Node lifecycle.** Duplicate connections, reconnect behavior,
     shutdown ordering, FFI-safe ownership and lifetimes. The FFI
     surface should not be frozen until the identity type boundary
-    (item 14) and the peer generation race (item 9) are resolved.
+    (Spec 14) and the peer generation race (N-Hard 9 / M9.5b-b) are
+    resolved.
 
 28. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
     carry `verb: String` + `raw: Vec<u8>`; a typed decoder
     (`decodeMessage(raw)`) is needed so Dart consumers do not
     reimplement CBOR parsing.
 
-29. **Test-vector synchronization.** `test-vectors/` currently holds
-    signing vectors. Once S8 is resolved, regenerate the vectors to
-    cover the state-transfer interpretation and any other wire shape
-    affected by the spec pass.
-
 ### Housekeeping
 
-30. **Release tag.** `git tag v0.1.0-m10.3 && git push origin
+29. **Release tag.** `git tag v0.1.0-m10.3 && git push origin
     v0.1.0-m10.3`, then `v0.1.0` once S8 and BFT-A land.
 
-31. **GitHub metadata.** Repository description and topics. The
+30. **GitHub metadata.** Repository description and topics. The
     README currently links to this file; the repo description is
     still blank.
 
-32. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+31. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
     The bound currently sits on `quip-node`'s `SharedClock` alias
     because widening the trait is a breaking change. Every
     reasonable clock satisfies the stronger bound; the alias should
     eventually become unnecessary.
 
-33. **Draft contribution log.** The reference implementation was
+32. **Draft contribution log.** The reference implementation was
     developed against earlier drafts; the resolutions that became
     revision 03 are documented in the spec-pass section above. A
     short paragraph in the draft's doc history — one line per
@@ -998,6 +962,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`make_lookup_paths`) | M9.5a | path selection |
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
+| `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
 | `quip-node/src/lib.rs` (`Node::take_events`) | M10.2 | receiver hand-off for the FFI layer |
 | `quip-node/src/trust.rs:1` | M10.3 | trust policy |
 | `quip-node/src/trust.rs` (`PeerTrust`) | M10.3 | five-level trust enum |
@@ -1022,6 +987,6 @@ the source. `M3b.3` is retired — its only `TODO`
 
 **Not yet tagged but milestone-owned:** `flow.rs` (M7), `rate.rs`
 (M7), `discovery.rs` (M2, consumed in M9.5a), `coral.rs` (M2, to be
-consumed in M9.5b), `message.rs` BFT arms (M4), `bft.rs` (M4),
+consumed in M9.5b-c), `message.rs` BFT arms (M4), `bft.rs` (M4),
 `xtask/` (M6.2), `.github/workflows/ci.yml` (M6.3). Tagging on the
 next touch is cheap.

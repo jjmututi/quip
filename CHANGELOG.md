@@ -15,10 +15,17 @@ not a status this file recognises.
 
 Every protocol-level milestone (M1–M8) is landed. The application
 layer (M9.x) is in progress: M9.1 through M9.5a are landed, M9.5b is
-not started. The interface layer (M10.x) has begun: M10.1 and M10.2
-are landed. §16 runs end-to-end through step 8 across the protocol
-crates; the `Node` type composes them into a runnable peer, and a Dart
-client can bind a node and subscribe to its event stream.
+not started. The interface layer (M10.x) has begun: M10.1 through
+M10.3 are landed. §16 runs end-to-end through step 8 across the
+protocol crates; the `Node` type composes them into a runnable peer;
+a Dart client can bind a node, subscribe to its event stream, and
+make explicit trust decisions about its peers.
+
+The protocol skeleton is complete. What remains is concentrated in
+two places: making the boundaries rigorous (BFT execution semantics,
+view-change certificates, identity types, membership) and making the
+distributed parts withstand hostile conditions (adversarial
+simulation, bounded queues, adversarial routing models).
 
 ### Build status
 
@@ -26,7 +33,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    625 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    626 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -68,10 +75,10 @@ Baseline on `main`:
 quip-core      74 passed
 quip-net      471 passed
 quip-storage   57 passed
-quip-node      23 passed
+quip-node      37 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~625 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~626 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -95,10 +102,18 @@ doc-tests       4 passed (one per crate)
 | M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b | `quip-node`: real `NatDriver` + cluster merge/split | not started |
+| M9.5b-c | `quip-node`: M9.5b shared contracts (frozen) | landed |
+| M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
 | M10.2 | `quip-node-ffi`: event stream across the FFI boundary | landed |
-| M10.3 | `quip-node-ffi`: `TrustPolicy` and peer trust events | not started |
+| M10.3 | `quip-node-ffi`: explicit trust policy and peer trust events | landed |
 | M10.4 | `quip-node-ffi`: platform signer shim | not started |
+| M10.5 | `quip-node-ffi`: end-to-end verification on Android | not started |
+| M11 | Browser substrate: local gateway, content layer, trust anchors | not started |
+| BFT-A | BFT correctness: `apply()` contract, prepared/checkpoint carry-forward | not started |
+| BFT-V | BFT validation: adversarial network simulator, property tests | not started |
+| N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | not started |
+| Spec | Membership boundaries and pin authorization model | not started |
 
 ---
 
@@ -197,6 +212,9 @@ Tests: `nat::tests`, `nat_wire::tests`, `nat_driver::tests`,
 
 Tests: `bft::tests`, `bft_driver::tests`.
 
+**Known incomplete**: the `apply()` contract permits post-commit
+failure; prepared and checkpoint carry-forward are absent. See BFT-A.
+
 ### M5 — QUIC transport (§11, §12, §16) — LANDED
 
 `transport.rs` binds QUIP to QUIC via `quinn`.
@@ -242,6 +260,10 @@ Tests: 16 tests in `transport::tests` over a real QUIC handshake pair.
 - **Flow control.** `flow.rs` codec and state machine (§11).
 - **Pin eviction.** `quip-storage/src/pins.rs` evicts by lowest
   `ref_count` then age.
+
+**Known incomplete**: `T2_MAX_STREAMS` in the draft was 256;
+`constants.rs` had 16 (D4, aligned). The DHT handle uses unbounded
+channels; bounding and coalescing is N-Hard.
 
 ### M8 — Range fetch — LANDED
 
@@ -292,6 +314,10 @@ Tests: `put_and_get_content_round_trip`,
 `peer_query_pins_is_auto_served`, `peer_pin_is_applied_to_store`, and
 the doctest.
 
+**Known incomplete**: pin authorization model. Whether §14 means "any
+connected peer may persist" or "the resource owner may" is not
+settled. See Spec.
+
 ### M9.3 — `quip-node` ConnectionFlow integration — FOLDED INTO M9.4b
 
 Deferred. Running the §16 `ConnectionFlow` at the node layer without
@@ -324,6 +350,10 @@ Tests: `dht_publish_connectivity_reaches_peer`,
 `dht_routing_table_lists_peers`, `dht_publish_with_no_peers_is_a_noop`,
 `dht_forged_connectivity_is_dropped`.
 
+**Known incomplete**: broadcast is used where XOR-distance routing
+would be correct; the routing table holds direct peers only; lookups
+are no-ops. See M9.5b.
+
 ### M9.4b — `quip-node` ConnectionFlow integration — LANDED
 
 Each peer task now runs a `ConnectionFlow` between the inline §4/§16
@@ -334,7 +364,7 @@ handshake and the steady-state loop.
   derived symmetrically from the two NodeIds (`local[0..16] XOR
   remote[0..16]`).
 - The NAT phase concludes from the live transport: the handshake
-  proves direct connectivity. M9.5 replaces this with a real
+  proves direct connectivity. M9.5b replaces this with a real
   `NatDriver` waiting on `NatEvent::DirectPathEstablished`.
 - The witness phase concludes as "not attempted". The flow translates
   that into `Ready(Pending)` per §16 step 18.
@@ -349,6 +379,9 @@ handshake and the steady-state loop.
 Tests: `ready_fires_after_connect`,
 `dht_handle_clone_shares_routing_table`, and the existing connection
 tests (all now traverse the flow).
+
+**Known incomplete**: NAT phase is a placeholder; witness phase is a
+placeholder; both defer to M9.5b/M9.6.
 
 ### M9.5a — `quip-node` shared Coral discovery — LANDED
 
@@ -381,6 +414,85 @@ Tests: `ready_via_shared_discovery_on_both_sides`,
 `discovery_local_node_id_matches_node`,
 `discovery_clones_share_state`, plus the unit tests in
 `quip-node::discovery`.
+
+**Known incomplete**: witness accumulation. See M9.6.
+
+### M9.5b-c — shared contracts — LANDED
+
+The shared contracts for M9.5b's NAT and cluster integration tracks
+are frozen. The NAT and cluster tracks run in parallel against these
+contracts. Two gates were closed before freezing: §13.2's acceptance
+rule and `ConnectionFlow`'s failure semantics.
+
+**Peer identity and generation.** `NodeId` identifies a logical node;
+`PeerSlot` identifies its active connection generation. Events are
+generation-scoped: an event from an obsolete `PeerSlot` must not
+mutate current routing or cluster state. `quinn::Connection::stable_id()`
+is the candidate for the generation identifier, subject to
+verification against the pinned Quinn version; an explicit per-peer
+counter is the fallback.
+
+**Lifecycle transitions.**
+
+```
+Connecting  → Established
+Established → NatDirect | NatRelayed | Failed
+NatDirect  ↔ NatRelayed
+NatDirect | NatRelayed → Failed
+Any nonterminal state  → Closing
+Failed, Closing → terminal for this PeerSlot
+```
+
+Recovery after `Failed` or `Closing` creates a new `PeerSlot`.
+Discovery failure does not transition the lifecycle:
+`on_discovery_failed()` yields `Ready(Pending)`, which the node
+treats as successful establishment. Witness status (`Pending` /
+`Verified`) and application trust (`Unknown` / `Trusted` /
+`Untrusted` / `Revoked`) are independent dimensions, not lifecycle
+states.
+
+**Routing-table record.** Keyed by logical `NodeId`, each active
+record associated with its current `PeerSlot`. Physical connection
+existence and routing eligibility are distinct. The NAT track sets
+eligibility when a peer reaches an eligible direct or relayed state;
+the lifecycle and cleanup path clears it on failure, closure, or
+replacement.
+
+**Cluster-membership eligibility.** Membership is a subset of
+routing-table peers. §13.2 requires the cluster-joining decision to
+pass a 90th-percentile RTT test using a minimum 20-sample procedure;
+the sample requirement binds the acceptance decision, not individual
+members. `ClusterState::is_acceptable` enforces
+`ACCEPTANCE_MIN_SAMPLES`. A peer with missing RTT data does not count
+toward the sample minimum and does not independently satisfy the
+acceptance test.
+
+**RTT observations.** `ConnectionDriver::rtt() -> Option<Duration>`
+in `quip-net`, reading the Quinn RTT statistic. `Option` because the
+statistic may not be populated before the first sample.
+
+**NAT session coordination.** Reuse the deterministic
+`derive_session_id(local, remote)` in `quip-node`. Both endpoints
+derive the same session identifier from the same logical peer
+identities, independent of endpoint ordering and independent of
+connection generation.
+
+**Verification record.** Two gates were closed before freezing:
+
+- §13.2 (draft): requires 90th-percentile RTT at or below the
+  cluster threshold, with a recommended minimum of 20 samples. The
+  sample requirement binds the acceptance decision, not per-member
+  history.
+- `ConnectionFlow` (quip-net/src/establishment.rs): discovery
+  failure yields `Ready(Pending)`, not `Failed`. Confirmed by
+  reading `on_discovery_failed()` and the node's
+  `run_discovery_phase`.
+
+**Still open** (gates 3–7 from the design): `PeerSlot` ownership and
+generation identity, lifecycle transitions as code, routing-table
+record semantics, routing-eligibility transitions, and the shared
+types plus RTT accessor. These are the next commit; the NAT and
+cluster tracks may proceed once they are in code.
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
@@ -445,6 +557,52 @@ Tests: `bin/smoke_events.dart` shows both nodes reaching
 `Ready(Pending)` through the FFI event stream, with peer IDs
 matching across both nodes' events.
 
+### M10.3 — `quip-node-ffi` explicit trust policy — LANDED
+
+A first-seen peer is `Unknown` and stays there until the application
+calls `Node::trust_peer(peer, Trusted)`. Nothing auto-escalates. This
+is the SSH `StrictHostKeyChecking=ask` model: the node records the
+claim on contact, and the trust decision belongs to the application
+(or the user behind it).
+
+Two independent axes:
+
+- **Policy**: `Unknown` / `Trusted` / `Untrusted` / `Revoked`,
+  decided by the local store and explicit calls.
+- **Flow**: `Pending` / `Verified`, decided by the §16
+  witness-discovery phase from 4+ independent witnesses.
+
+`Verified` is never set by the application; only the flow promotes
+a `Trusted` peer to `Verified`. `Revoked` is terminal — a subsequent
+`trust_peer(Trusted)` returns `true` (the call is processed) but the
+policy short-circuits to `Revoked` on any query.
+
+Peer-related events carry the current trust level. A
+`PeerTrustChanged` event fires only when the level actually changes,
+and carries the resulting state rather than the requested decision
+— so a re-trust attempt on a tombstoned peer emits nothing rather
+than emitting a misleading `Trusted`.
+
+- `quip-node/src/trust.rs` (new): `PeerTrust`, `StoredClaim`,
+  `TrustPolicy`.
+- `quip-node/src/lib.rs`: `pub mod trust;`, trust handle on `Node`,
+  claim observation at the two `Connected` emission sites,
+  promotion at `Ready(Verified)`, `Node::trust_peer` /
+  `Node::peer_trust` / `Node::trust_snapshot`.
+- `quip-node-ffi/src/api.rs`: `PeerTrustFfi`, `trust` field on peer
+  events, `PeerTrustChanged`, `trust_peer` / `peer_trust`.
+- `quip-node-ffi/bin/smoke_trust.dart` (new): acceptance test
+  covering first-contact `Unknown`, explicit escalation, the
+  `Verified`-is-not-settable rule, and revocation terminality.
+
+**Known incomplete**: the identity boundary is still collapsed. The
+transport produces a claimed `NodeId`, and `Node::connect` exposes
+it as a plain `NodeId`; `AuthenticatedPeer` / `TrustedPeer` are not
+distinct types. See Spec.
+
+Tests: `peer_stays_unknown_until_decided`, `trust_change_emits_event`,
+`revocation_is_terminal`, plus the unit tests in `quip-node::trust`.
+
 ---
 
 ## Spec pass
@@ -486,73 +644,284 @@ and one open revision.
 
 ---
 
-## Known gaps and deferred work
+## Outstanding work
 
-### Application layer (M9)
+Organized by the axis it belongs to — correctness, network
+completion, validation, protocol design, or release discipline —
+rather than by milestone number. The status table above names the
+same items under their phase labels (BFT-A, BFT-V, N-Hard, Spec,
+M9.5b, M9.6, M10.4, M10.5, M11).
 
-1. **M9.5b — real `NatDriver` + cluster.** Wire a per-peer
-   `NatDriver` into the flow so the NAT phase concludes from a real
-   `NatEvent::DirectPathEstablished` rather than from the transport
-   being up. Run `ClusterState` merge/split against the routing
-   table. Replace `LiveDht`'s lookup no-ops with real Coral lookups
-   and replace the DHT router's broadcast with XOR-distance routing.
-2. **M9.6 — witness accumulation.** The responder currently answers
-   with no witnesses; when the node accumulates `WitnessStatement`s
-   from its peers, the responder returns real rings and
-   `Ready(Verified)` becomes reachable in a network with at least
-   four independent witnesses.
+### BFT correctness (BFT-A)
 
-### Interface layer (M10)
+1. **`apply()` contract.** `BftHandler::apply(...) -> Result<()>`
+   currently permits a post-commit failure: replica A applies an
+   operation successfully, replica B returns `Err`, the driver emits
+   `ApplyFailed` on B and advances the sequence on both. Two honest
+   replicas now disagree about state while both believe consensus
+   progressed, which breaks the invariant BFT exists to provide.
 
-3. **M10.3 — `TrustPolicy` and peer trust events.** `quip-node`
-   gains a `TrustPolicy` module: `PeerTrust`, `StoredClaim`, and the
-   TOFU policy that decides how a valid Key Claim becomes a trust
-   decision. `NodeEventFfi` grows a `peer_trust` field on the peer-
-   related variants, or a `PeerTrustChanged` event. `NodeHandle`
-   gains a `trust_peer(peer, decision)` method for the application
-   to escalate or deny explicitly. Blocked on two decisions from
-   earlier in the milestone: whether `Trusted` and `Verified` render
-   differently in the UI, and what TOFU does by default.
+   Three resolutions are defensible:
 
-4. **M10.4 — platform signer shim.** A `SignerBackend` trait in
-   `quip-node` and one implementation per platform: Kotlin/JNI for
-   Android, Swift for iOS, C ABI for Linux/Windows. Hardware-backed
-   Ed25519 is available on Android 13+ with TEE or StrongBox, absent
-   in the iOS Secure Enclave (P-256 only), and software-only on
-   Linux. The shim exposes the fallback as a first-class case.
+   - **(a)** Make `apply` infallible by contract. Applications must
+     validate before the operation enters consensus.
+   - **(b)** Validate operations deterministically before consensus,
+     so `apply` cannot fail on committed operations.
+   - **(c)** Make the execution result part of the consensus
+     decision — commit the state transition, not the request.
 
-5. **M10.5 — end-to-end verification on Android.** The smoke tests
-   from M10.1 and M10.2 re-run against an Android device, exercising
-   the platform signer shim.
+   The reference implementation has not chosen. Current code does
+   none of the three and documents the gap.
 
-### Protocol crates
+2. **Prepared-operation carry-forward on view change.** The new
+   primary does not re-propose operations prepared in an earlier
+   view; `bft_new_view.prepared_messages` is emitted empty. A proper
+   view change must carry a prepared certificate so the operation
+   remains eligible for commitment.
 
-6. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
+3. **Checkpoint carry-forward on view change.**
+   `bft_new_view.checkpoint_messages` is emitted empty. The driver
+   already retains `stable_checkpoint`, but `maybe_emit_new_view`
+   does not encode it. Same shape as (2).
+
+4. **FROST ring signature verification** in
+   `verify_checkpoint_ring_sig`. Requires a group public key on the
+   ring; the driver does not hold one today. The individual-
+   signature path is complete.
+
+5. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
    describes the extra round trip a fresh quorum ring signature
    would require, or whether it adopts the checkpoint-signatures
    interpretation the implementation uses.
-7. **Prepared-operation carry-forward on view change.** The new
-   primary does not yet re-propose operations prepared in an earlier
-   view; `bft_new_view.prepared_messages` is emitted empty.
-8. **Checkpoint carry-forward on view change.**
-   `bft_new_view.checkpoint_messages` is emitted empty. The driver
-   already retains `stable_checkpoint`, but `maybe_emit_new_view`
-   does not encode it.
-9. **FROST ring signature verification** in
-   `verify_checkpoint_ring_sig`. Requires a group public key on the
-   ring; the driver does not hold one today. The individual-signature
-   path is complete.
+
+### BFT validation (BFT-V)
+
+6. **Adversarial network simulator.** A deterministic test harness
+   with delivery policies — `drop`, `duplicate`, `reorder`, `delay`,
+   `partition`, `heal`, `replay`, `byzantine(sender, message)` — so
+   BFT can be tested against hostile schedules rather than
+   cooperative ones. The current `pump()` helper propagates until
+   quiescence; real distributed-systems bugs live in the schedules
+   that never reach quiescence.
+
+7. **Property tests over safety invariants.** Once the simulator
+   exists, assert invariants rather than expected traces:
+
+   - no two honest replicas commit conflicting operations for the
+     same `(ring, view, sequence)`;
+   - no honest replica regresses its committed sequence;
+   - committed digests agree across honest replicas;
+   - old-view messages cannot corrupt new-view state;
+   - invalid membership cannot produce quorum;
+   - invalid signatures cannot advance state.
+
+   This is more valuable than another hundred happy-path tests.
+
+8. **Model checking of the BFT state machine.** The state space
+   (`view`, `sequence`, `phase`, prepared/precommit/commit
+   certificates, view-change votes, checkpoint) is small enough to
+   model-check. Enumerate message permutations, duplication,
+   omission, crashes, and Byzantine messages; assert safety and
+   liveness. Multi-week effort, but it is the confidence-building
+   work for the protocol's most ambitious component.
+
+### Network hardening (N-Hard)
+
+9. **Peer lifecycle race.** The peer registry is keyed by `NodeId`
+   alone. Two connections from the same NodeId can race during
+   cleanup, and the first's teardown can remove the second's live
+   entry. Fix: `PeerSlot { connection_id, handle }`, with cleanup
+   conditional on the connection identity. Small, self-contained,
+   blocks nothing. (Frozen in M9.5b-c; implementation pending.)
+
+10. **Bounded DHT queues.** `DhtHandle` uses unbounded channels for
+    both inbound and outbound. An authenticated peer can flood the
+    queue faster than the application drains it, and memory becomes
+    the backpressure mechanism — not what a protocol with §19.4
+    DoS bounds wants. Replace with bounded channels and an explicit
+    policy: coalesce by `NodeId` for announcements (latest-wins),
+    drop newest or drop oldest for other kinds, per-peer limits.
+    This is a hardening issue, not a forging issue — the messages
+    are already signature-verified.
+
+11. **Adversarial DHT routing model.** A DHT is not hard because
+    hash-to-bucket is hard; it's hard because an adversary controls
+    which nodes you see, which answer, which are close, and which
+    witnesses you select. The Coral layer needs explicit answers to
+    Sybil resistance, eclipse resistance, routing-table poisoning,
+    lookup termination, lookup amplification, inconsistent witness
+    responses, stale witness statements, adversarial churn, and
+    split-brain cluster membership. The existing `ClusterInfo` and
+    routing structures are a foundation; they are not the answer.
+
+### Protocol design (Spec)
+
+12. **Membership boundaries.** The relationship between "QUIP
+    peer," "Coral routing member," "witness candidate," "witness
+    ring member," and "BFT ring member" is not specified. The
+    protocol lets those sets coincide by accident; a dynamic Coral
+    makes that worse. This needs a design document and a section in
+    the draft. Especially: how does a changing DHT become a stable
+    BFT membership, given that an attacker can influence the DHT?
+
+13. **Pin authorization model.** §14's intent for `pin` / `unpin`
+    is not specified: does any connected peer have the authority to
+    make a resource persistent on my store, or is persistence an
+    owner-authorized operation? The current node auto-serves on
+    connection identity, which may or may not be correct. Fix: an
+    explicit `PinAuthorization` enum at the node boundary, with the
+    policy chosen by the application.
+
+14. **Claimed / authenticated / trusted identity types.** The
+    transport produces a claimed `NodeId`; `Node::connect` exposes
+    it as a plain `NodeId`. That collapses three distinct concepts
+    into one primitive. Downstream paths (`dht_result_from`, NAT)
+    re-verify, so this is an API-safety issue rather than a live
+    vulnerability — but the type boundary should be made explicit
+    before the FFI surface freezes around the current shape.
+    Proposed: `PeerClaim` → `AuthenticatedPeer` → `TrustedPeer`,
+    with `TrustPolicy` operating above `AuthenticatedPeer`.
+
+15. **Name hints as signed keyword sets.** A hint is a signed
+    keyword set — optional primary label, required keywords,
+    optional category, optional app metadata — embedded in the Coral
+    value blob for a resource announcement. The Coral lookup key is
+    `SHA-256(NFC(sorted_keywords) || category)`. Hints are not
+    lookup keys; the lookup returns a candidate set, and the client
+    filters candidates through its own `TrustPolicy`. The protocol
+    cannot prevent key occupation in the DHT; the resolution layer
+    filters it.
+
+16. **Trust precedes registration.** `register_tcid` is gated on
+    `Trusted` or `Verified` in the receiver's `TrustPolicy`. The
+    gate is checked in the peer steady loop before dispatch; a
+    rejected registration is answered with `E_NOT_AUTHORIZED` rather
+    than dropped silently. Trusted peers gain access to the
+    governance verbs; untrusted peers do not.
+
+17. **Open questions from items 15 and 16.**
+
+    - Untrusted candidates in hint resolution: show with a marker,
+      or hide entirely?
+    - Storage-only `register_tcid` from `Unknown` peers: record for
+      later evaluation, or reject outright?
+    - Trust gate on `pin` / `unpin`: currently accepts from any
+      connected peer; should it match the `register_tcid` gate?
+    - Witness statement trust filtering: the discovery path ingests
+      witness statements without consulting `TrustPolicy`, but
+      `Verified` status is what trust filtering produces, so there
+      is a circularity to resolve.
+
+### Application layer (M9)
+
+18. **M9.5b — real `NatDriver` + cluster merge/split.** Wire a
+    per-peer `NatDriver` into the flow so the NAT phase concludes
+    from a real `NatEvent::DirectPathEstablished` rather than from
+    the transport being up. Exchange actual candidates, perform
+    probing, distinguish direct / relayed / failed connectivity,
+    and propagate an explicit `NatStatus`. Run `ClusterState`
+    merge/split against the routing table. Replace `LiveDht`'s
+    lookup no-ops with real Coral lookups and the DHT router's
+    broadcast with XOR-distance routing. Shared contracts frozen in
+    M9.5b-c; implementation gates 3–7 still open.
+
+19. **M9.6 — witness accumulation and trust bootstrap.** The
+    responder currently answers with no witnesses; when the node
+    accumulates `WitnessStatement`s from its peers, the responder
+    returns real rings and `Ready(Verified)` becomes reachable in a
+    network with at least four independent witnesses. The
+    bootstrapping problem is real: a two-node network can never
+    reach `Verified`, because verification requires third parties.
+
+### Interface layer (M10)
+
+20. **M10.4 — platform signer shim.** A `SignerBackend` trait in
+    `quip-node` and one implementation per platform: Kotlin/JNI for
+    Android, Swift for iOS, C ABI for Linux/Windows. Hardware-backed
+    Ed25519 is available on Android 13+ with TEE or StrongBox,
+    absent in the iOS Secure Enclave (P-256 only), and software-only
+    on Linux. The shim exposes the fallback as a first-class case
+    and reports which backing a key uses. The trait belongs in
+    `quip-node`, not `quip-node-ffi`, because a hardware-backed key
+    cannot be coerced into `Ed25519Signer::from_seed`'s
+    `[u8; 32]` shape — the private bytes never exist.
+
+21. **M10.5 — end-to-end verification on Android.** The smoke tests
+    from M10.1 through M10.3 re-run against an Android device,
+    exercising the platform signer shim.
+
+### Browser substrate (M11)
+
+22. **No rendering format.** The browser substrate renders standard
+    web formats (HTML, CSS, JS, images, media) via the existing
+    browser engine. QUIP does not define a markup language. Its
+    contribution is the resolver, the address scheme, and the trust
+    chrome around the content. This is a design constraint, not an
+    open question.
+
+23. **Local gateway.** A `quip-daemon` or FFI-exposed server that
+    answers `http://localhost:PORT/quip/<cid>` and
+    `http://localhost:PORT/hint/<name>`, so any existing browser can
+    resolve QUIP content without a bespoke browser. This is the tier
+    that makes the "standards for content distribution" story real:
+    URL shape, content-type negotiation, trust-policy enforcement,
+    all reachable from a Firefox tab.
+
+24. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
+    verify → policy → `GovernanceStore`), the CBOR value-blob schema
+    for what responders publish as Coral values (see Spec item 15),
+    and the name-hint mechanism.
+
+25. **Content-type metadata.** How does a CID acquire a MIME type?
+    Options: pin-time metadata (cleanest, mirrors IPFS's
+    `Content-Disposition`), byte sniffing, or address hints. Needed
+    before the gateway can be useful for anything but downloads.
+
+26. **VPS tier.** A user-controlled always-on anchor. Not a new
+    protocol layer: the same headless build, deployed differently.
+    Acts as rendezvous point, relay candidate, availability anchor,
+    and custodian of witness statements. Also the mechanism by which
+    a mobile client can be woken for sync — the VPS is a push
+    provider, using APNs and FCM as notification-only channels.
+
+### FFI / API stabilization
+
+27. **Node lifecycle.** Duplicate connections, reconnect behavior,
+    shutdown ordering, FFI-safe ownership and lifetimes. The FFI
+    surface should not be frozen until the identity type boundary
+    (item 14) and the peer generation race (item 9) are resolved.
+
+28. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
+    carry `verb: String` + `raw: Vec<u8>`; a typed decoder
+    (`decodeMessage(raw)`) is needed so Dart consumers do not
+    reimplement CBOR parsing.
+
+29. **Test-vector synchronization.** `test-vectors/` currently holds
+    signing vectors. Once S8 is resolved, regenerate the vectors to
+    cover the state-transfer interpretation and any other wire shape
+    affected by the spec pass.
 
 ### Housekeeping
 
-10. **Release tag.** `git tag v0.1.0-m10.2 && git push origin
-    v0.1.0-m10.2`, then `v0.1.0` once S8 lands.
-11. **GitHub metadata.** Repository description and topics.
-12. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+30. **Release tag.** `git tag v0.1.0-m10.3 && git push origin
+    v0.1.0-m10.3`, then `v0.1.0` once S8 and BFT-A land.
+
+31. **GitHub metadata.** Repository description and topics. The
+    README currently links to this file; the repo description is
+    still blank.
+
+32. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
     The bound currently sits on `quip-node`'s `SharedClock` alias
-    because widening the trait is a breaking change. Every reasonable
-    clock satisfies the stronger bound; the alias should eventually
-    become unnecessary.
+    because widening the trait is a breaking change. Every
+    reasonable clock satisfies the stronger bound; the alias should
+    eventually become unnecessary.
+
+33. **Draft contribution log.** The reference implementation was
+    developed against earlier drafts; the resolutions that became
+    revision 03 are documented in the spec-pass section above. A
+    short paragraph in the draft's doc history — one line per
+    resolution, no reference to the reference implementation —
+    would close the loop between what the draft now says and why.
 
 ---
 
@@ -630,12 +999,20 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 | `quip-node/src/lib.rs` (`Node::take_events`) | M10.2 | receiver hand-off for the FFI layer |
-| `quip-node-ffi/src/api.rs:1` | M10.1, M10.2 | FFI surface |
-| `quip-node-ffi/src/api.rs` (`NodeHandle`) | M10.1, M10.2 | Dart-facing handle |
-| `quip-node-ffi/src/api.rs` (`NodeEventFfi`) | M10.2 | Dart-facing event enum |
+| `quip-node/src/trust.rs:1` | M10.3 | trust policy |
+| `quip-node/src/trust.rs` (`PeerTrust`) | M10.3 | five-level trust enum |
+| `quip-node/src/trust.rs` (`TrustPolicy`) | M10.3 | stored claims and decisions |
+| `quip-node/src/lib.rs` (`Node::trust_peer`) | M10.3 | explicit trust decision API |
+| `quip-node/src/lib.rs` (`Node::peer_trust`) | M10.3 | trust query API |
+| `quip-node/src/lib.rs` (`Node::trust_snapshot`) | M10.3 | trust store snapshot |
+| `quip-node-ffi/src/api.rs:1` | M10.1–M10.3 | FFI surface |
+| `quip-node-ffi/src/api.rs` (`NodeHandle`) | M10.1–M10.3 | Dart-facing handle |
+| `quip-node-ffi/src/api.rs` (`NodeEventFfi`) | M10.2, M10.3 | Dart-facing event enum |
 | `quip-node-ffi/src/api.rs` (`KtStatusFfi`, `FlowFailureFfi`) | M10.2 | mirrored enums |
+| `quip-node-ffi/src/api.rs` (`PeerTrustFfi`) | M10.3 | mirrored trust enum |
 | `quip-node-ffi/bin/smoke.dart` | M10.1 | bind-and-query acceptance test |
 | `quip-node-ffi/bin/smoke_events.dart` | M10.2 | event-stream acceptance test |
+| `quip-node-ffi/bin/smoke_trust.dart` | M10.3 | trust-policy acceptance test |
 
 The code subdivides NAT work as `M3a` / `M3b.1` / `M3b.2` / `M3b.3`
 and BFT work as `M4a` / `M4b`. The M3 section above numbers the later

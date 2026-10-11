@@ -21,11 +21,14 @@ This repository is the reference implementation of
 | `quip-core` | Wire message types, canonical CBOR, CIDs, DVVs, error codes, time |
 | `quip-net` | Framing, handshake, transport tiers, NAT traversal, Coral DHT, BFT consensus, range fetch |
 | `quip-storage` | Blob store, pin table, quarantine store, snapshots |
+| `quip-node` | A running node: endpoint, peer table, event stream, trust policy |
+| `quip-node-ffi` | Dart-facing FFI surface via `flutter_rust_bridge` |
 | `xtask` | Test-vector generator (`cargo xtask generate-vectors`) |
 
 ## Building
 
-Requires Rust 1.75 or newer.
+Requires Rust 1.75 or newer. The workspace pins Rust 1.99.0 via
+`rust-toolchain.toml`, and CI uses the pin.
 
 ```bash
 cargo build --workspace --all-features
@@ -34,6 +37,16 @@ cargo build --workspace --all-features
 The workspace is `no_std + alloc` by default for `quip-core` and
 `quip-net`. The `std` feature is enabled through the default feature
 set; `crypto` and `quic` are opt-in. `full` enables everything.
+
+For Android targets:
+
+```bash
+export ANDROID_NDK_HOME=/opt/android-sdk/ndk/26.1.10909125
+cargo ndk -t arm64-v8a -t armeabi-v7a -o ./jniLibs build --release
+```
+
+Requires `cargo-ndk` and the corresponding `rustup target add`
+invocations for the active toolchain (1.99.0, per the pin).
 
 ## Testing
 
@@ -51,9 +64,18 @@ regenerates `test-vectors/` and fails if the working tree changed. See
 
 ## Status
 
-Every code milestone is landed. §16 (connection establishment) runs
-end-to-end through step 8. See [ROADMAP.md](./ROADMAP.md) for the
-milestone plan, the tag index, and the small set of open items.
+The protocol layer (M1–M8) is complete: framing, handshake, transport
+tiers, NAT traversal, Coral DHT state, BFT consensus, range fetch, and
+the §16 establishment flow all run end-to-end through step 8. The
+application layer (M9.x) and interface layer (M10.x) are in progress:
+a running `Node` composes the protocol crates into a peer, and a Dart
+client can bind it, subscribe to its event stream, and make explicit
+trust decisions.
+
+See [CHANGELOG.md](./CHANGELOG.md) for the milestone history, the
+current state, and the outstanding work. The file was named
+`ROADMAP.md` through the M9 series; it was renamed when its shape
+changed from a forward-looking plan into a record of landed work.
 
 ## Feature flags
 
@@ -77,7 +99,7 @@ at your option.
 ## Contributing
 
 The draft and the code must not drift. When a milestone lands, update
-`ROADMAP.md` in the same commit: the status table, the milestone's
+`CHANGELOG.md` in the same commit: the status table, the milestone's
 section, and the tag index. Commit messages follow the form
 `<area>: <summary>` with the milestone tag in parentheses, e.g.
 `net: BFT view change (M4b.2)`.

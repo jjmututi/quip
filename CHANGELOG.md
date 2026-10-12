@@ -43,7 +43,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~657 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~673 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -85,10 +85,10 @@ Baseline on `main` after M9.5b-c (gates 5 and 6):
 quip-core      74 passed
 quip-net      473 passed
 quip-storage   57 passed
-quip-node      66 passed
+quip-node      69 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~657 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~673 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance

@@ -466,6 +466,21 @@ sources (`establishment.rs`, `cluster.rs`) before landing. The
 implementation of the shared types and the `ConnectionDriver::rtt()`
 accessor is M9.5b-b.
 
+**Post-M9.5b-b documentation correction.** After M9.5b-b landed the
+shared types and the RTT accessor, the design doc's status header
+and §7 gate list were updated in a follow-up `docs:` commit to
+match reality. The header now reads "Partially landed: gates 3, 4,
+and 7 closed by M9.5b-b; gates 5 and 6 open," gates 3, 4, and 7 in
+§7 are struck through with citations to the code that closed them,
+and §1, §2a, and §5 point at `quip-node/src/peer.rs` and
+`quip-net/src/transport.rs` as the normative source for the
+contracts the code now carries. Gates 5 and 6 remain open; §3, §4,
+§6, §8, and §9 are unchanged. Two forward-dependency notes were
+added: §1 references Spec item 14 (identity types), and §3
+references Spec item 12 (membership boundaries). The document
+remains the authoritative contract for M9.5b until the milestone
+completes.
+
 ### M9.5b-b — `quip-node` peer generation, lifecycle vocabulary, RTT accessor — LANDED
 
 The M9.5b-a contracts become code. This milestone introduces the

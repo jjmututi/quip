@@ -13,7 +13,7 @@
 //!
 //! # Scope
 //!
-//! This is the eighth cut. It does:
+//! This is the ninth cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
@@ -39,22 +39,25 @@
 //! - **M9.5b-b:** allocate a [`PeerSlot`] for every connection,
 //!   abort the previous generation's task on reconnect, and scope
 //!   the DHT routing table to the current generation.
+//! - **M9.5b-c (gates 5 and 6):** track [`PeerLifecycle`] per slot,
+//!   derive routing eligibility from it, and expose the derived set
+//!   through [`Node::routing_eligible_peers`]. The registry is the
+//!   authoritative owner; the DHT routing table mirrors the state so
+//!   routing decisions can consult it directly.
 //!
 //! It does not (yet):
 //!
 //! - Drive a real `NatDriver`. The flow's NAT phase still concludes
-//!   from the live transport; M9.5b-c replaces that with a real driver
-//!   per peer.
-//! - Wire [`PeerLifecycle`] into the flow as a state variable. The
-//!   type is defined and tested in this cut so M9.5b-c can consume it
-//!   without churn; the flow itself is unchanged.
+//!   from the live transport; M9.5b-c's integration work replaces
+//!   that with a real driver per peer.
+//! - Run cluster merge/split or XOR-distance routing. The routing
+//!   eligibility set is now defined and exposed; the consumer is
+//!   M9.5b-c's cluster integration.
 //! - Accumulate `WitnessStatement`s. The discovery client runs, but
 //!   the responder answers with no witnesses, so `Ready(Verified)`
 //!   is unreachable in a network smaller than five independent
 //!   peers. A later milestone wires witness accumulation and the
 //!   responder returns real rings.
-//! - Run cluster merge/split. The DHT's routing table records
-//!   observed `ClusterInfo` but nothing consumes it.
 //! - Auto-serve `register_tcid`, `delegation`, `derivative_link`,
 //!   `resource_announce`, or `query_resource`. Those carry signatures
 //!   the peer task cannot verify, or require a wire-to-storage type
@@ -84,6 +87,30 @@
 //! simultaneously. The task's own cleanup path (`unregister_peer`)
 //! only removes the DHT record and the task-map entry if the slot is
 //! still current, so a stale task cannot clobber its successor.
+//!
+//! # Peer lifecycle and routing eligibility (M9.5b-c gates 5 and 6)
+//!
+//! Every `PeerHandle` in the registry carries a [`PeerLifecycle`].
+//! The peer task is the single writer: it starts the handle at
+//! `Established` (a slot is only allocated after the §4 handshake,
+//! so `Connecting` is not observable), transitions to `NatDirect`
+//! when the flow's NAT phase concludes from the live transport,
+//! transitions to `Failed` on any establishment failure, and
+//! transitions to `Closing` when the steady loop exits.
+//!
+//! Every transition flows through `set_peer_lifecycle`, which
+//! updates both the registry (authoritative) and the DHT routing
+//! table (mirror). Both updates are slot-scoped: a stale generation's
+//! transition is a no-op against a live record.
+//!
+//! Routing eligibility is defined by
+//! [`PeerLifecycle::is_routing_eligible`]: a peer is a routing
+//! candidate iff it has reached `NatDirect` or `NatRelayed`. §3 of
+//! `docs/M9.5b-design.md` requires physical connection existence and
+//! routing eligibility to be distinct, and this is how the
+//! distinction is encoded — a peer in `Established` has a live
+//! connection but is not yet a routing candidate. [`Node::routing_eligible_peers`]
+//! and [`DhtHandle::routing_eligible_records`] expose the derived set.
 //!
 //! # Establishment
 //!
@@ -271,6 +298,8 @@ use tokio::task::JoinHandle;
 use dht::DhtHandle;
 use discovery::DiscoveryHandle;
 // M9.5b-b: peer-slot and lifecycle vocabulary.
+// M9.5b-c: `PeerLifecycle::is_routing_eligible` is the sole routing-
+// eligibility predicate.
 pub use peer::{PeerLifecycle, PeerSlot};
 // M10.3: the trust policy and the trust level that peer events carry.
 use trust::{PeerTrust, TrustPolicy};
@@ -537,6 +566,16 @@ struct PeerHandle {
     slot: PeerSlot,
     /// Outbound queue for the peer task driving this generation.
     outbound: mpsc::Sender<Message>,
+    /// Connection lifecycle for this generation.
+    ///
+    /// The peer task is the single writer; every transition flows
+    /// through `set_peer_lifecycle`, which validates the edge
+    /// against §2a via [`PeerLifecycle::transition_to`]. A new slot
+    /// starts at `Established`, because a [`PeerSlot`] is allocated
+    /// only after the §4 handshake completes — the peer's `NodeId`
+    /// is not known before then — so `Connecting` is not observable
+    /// at the slot level.
+    lifecycle: PeerLifecycle,
 }
 
 /// Per-node registry of active peer handles and generation counters.
@@ -571,6 +610,11 @@ impl Registry {
     /// Allocate a fresh slot for `peer`, replace any existing handle,
     /// and return the new slot plus the previous handle if any.
     ///
+    /// The new handle starts in [`PeerLifecycle::Established`]: a
+    /// [`PeerSlot`] is allocated only after the §4 handshake has
+    /// completed, so `Connecting` is not observable at the slot
+    /// level.
+    ///
     /// The generation counter uses `wrapping_add`: reaching
     /// `u64::MAX` connections for a single peer would require a
     /// connection rate no deployed node will ever see, and a panic
@@ -584,7 +628,14 @@ impl Registry {
         let counter = self.generations.entry(peer).or_insert(0);
         *counter = counter.wrapping_add(1);
         let slot = PeerSlot::new(peer, *counter);
-        let old = self.peers.insert(peer, PeerHandle { slot, outbound });
+        let old = self.peers.insert(
+            peer,
+            PeerHandle {
+                slot,
+                outbound,
+                lifecycle: PeerLifecycle::Established,
+            },
+        );
         (slot, old)
     }
 
@@ -594,6 +645,35 @@ impl Registry {
             .get(&slot.node_id)
             .map(|h| h.slot == *slot)
             .unwrap_or(false)
+    }
+
+    /// Apply a lifecycle transition for `slot` if it is still current.
+    ///
+    /// The edge is validated against §2a via
+    /// [`PeerLifecycle::transition_to`]. A rejected edge is a caller
+    /// bug and leaves the state unchanged; a stale slot is a silent
+    /// no-op. Returns `true` if the transition was applied.
+    fn set_lifecycle(&mut self, slot: &PeerSlot, to: PeerLifecycle) -> bool {
+        if let Some(h) = self.peers.get_mut(&slot.node_id) {
+            if h.slot == *slot && h.lifecycle.transition_to(to).is_ok() {
+                h.lifecycle = to;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Slots of peers that are currently routing-eligible.
+    ///
+    /// §3 of `docs/M9.5b-design.md`: physical connection existence and
+    /// routing eligibility are distinct. The predicate is
+    /// [`PeerLifecycle::is_routing_eligible`].
+    fn routing_eligible_slots(&self) -> Vec<PeerSlot> {
+        self.peers
+            .values()
+            .filter(|h| h.lifecycle.is_routing_eligible())
+            .map(|h| h.slot)
+            .collect()
     }
 
     /// Remove the entry for `slot` if it is current; return whether
@@ -672,6 +752,32 @@ async fn unregister_peer(
         if is_ours {
             tasks.remove(peer);
         }
+    }
+}
+
+/// Apply a lifecycle transition to both the registry and the DHT
+/// routing table.
+///
+/// The registry is the authoritative view: it validates the edge
+/// against §2a and rejects a transition from a stale slot. The DHT
+/// mirror is updated only if the registry accepted the transition, so
+/// the two cannot diverge. Both updates are slot-scoped, so a
+/// superseded generation cannot mutate the live record.
+///
+/// The peer task is the single writer of lifecycle transitions; this
+/// helper is the only path that mutates them.
+async fn set_peer_lifecycle(
+    peers: &PeerRegistry,
+    dht: &DhtHandle,
+    slot: &PeerSlot,
+    to: PeerLifecycle,
+) {
+    let applied = {
+        let mut reg = peers.lock().await;
+        reg.set_lifecycle(slot, to)
+    };
+    if applied {
+        dht.update_lifecycle(&slot.node_id, slot, to);
     }
 }
 
@@ -988,6 +1094,23 @@ where
         self.peers.lock().await.peers.keys().copied().collect()
     }
 
+    /// Slots of peers that are currently routing-eligible.
+    ///
+    /// §3 of `docs/M9.5b-design.md`: physical connection existence and
+    /// routing eligibility are distinct. A peer becomes routing-
+    /// eligible only after the §16 NAT phase reaches `NatDirect` or
+    /// `NatRelayed`, and loses eligibility on `Failed` or `Closing`.
+    /// The predicate is [`PeerLifecycle::is_routing_eligible`].
+    ///
+    /// The returned slots are the identity the cluster-membership
+    /// layer keys on: a peer that reconnects gets a new slot, so a
+    /// cluster record keyed by an old slot is stale by construction.
+    /// This is the "routing-table subset" part of §4; the §13.2
+    /// acceptance test is applied on top of it.
+    pub async fn routing_eligible_peers(&self) -> Vec<PeerSlot> {
+        self.peers.lock().await.routing_eligible_slots()
+    }
+
     /// The current connection generation for `peer`, if it is
     /// connected.
     ///
@@ -997,6 +1120,18 @@ where
     /// in between.
     pub async fn peer_slot(&self, peer: &NodeId) -> Option<PeerSlot> {
         self.peers.lock().await.peers.get(peer).map(|h| h.slot)
+    }
+
+    /// The current lifecycle state for `peer`, if it is connected.
+    ///
+    /// Read-only. The peer task is the single writer.
+    pub async fn peer_lifecycle(&self, peer: &NodeId) -> Option<PeerLifecycle> {
+        self.peers
+            .lock()
+            .await
+            .peers
+            .get(peer)
+            .map(|h| h.lifecycle)
     }
 
     /// Initiate a graceful close of the endpoint.
@@ -1557,6 +1692,21 @@ async fn current_trust(trust: &SharedTrust, peer: &NodeId) -> PeerTrust {
 /// event has already been emitted and the return is `false`. The
 /// caller should then emit `Disconnected` and stop.
 ///
+/// # Lifecycle (M9.5b-c gates 5 and 6)
+///
+/// Every terminal outcome of this function leaves the peer's lifecycle
+/// in the correct state:
+///
+/// - NAT phase concludes → `Established → NatDirect` (the transport
+///   being up is proof of direct connectivity; a future milestone
+///   replaces the *evidence* with a real `NatDriver`, not the
+///   transition).
+/// - Any failure before `Ready` → `Established | NatDirect → Failed`.
+///
+/// All transitions flow through `set_peer_lifecycle`, which updates
+/// the registry (authoritative) and the DHT routing table (mirror)
+/// under slot-scope.
+///
 /// # Scope
 ///
 /// The NAT phase concludes from the live transport: `ConnectionDriver`
@@ -1572,10 +1722,13 @@ async fn run_establishment(
     local_claim: &KeyClaim,
     peer_claim: &KeyClaim,
     peer: NodeId,
+    slot: PeerSlot,
     clock: &SharedClock,
     events_tx: &mpsc::Sender<NodeEvent>,
     discovery: &DiscoveryHandle,
     trust: &SharedTrust,
+    peers: &PeerRegistry,
+    dht: &DhtHandle,
 ) -> bool {
     let session_id = derive_session_id(&local_claim.node_id, &peer);
     let mut flow = ConnectionFlow::resume_from_key_claim(
@@ -1593,6 +1746,8 @@ async fn run_establishment(
         // overdue phase fails here rather than being advanced.
         for action in flow.poll(now) {
             if let FlowAction::Failed(failure) = action {
+                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed)
+                    .await;
                 let trust_level = current_trust(trust, &peer).await;
                 let _ = events_tx
                     .send(NodeEvent::EstablishmentFailed {
@@ -1612,6 +1767,8 @@ async fn run_establishment(
                 // `NatDriver` waiting for
                 // `NatEvent::DirectPathEstablished`.
                 let _ = flow.on_nat_complete(true, now);
+                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::NatDirect)
+                    .await;
             }
             FlowPhase::WitnessDiscovery => {
                 run_discovery_phase(driver, peer, clock, discovery, &mut flow)
@@ -1644,6 +1801,8 @@ async fn run_establishment(
             }
             FlowPhase::Failed(failure) => {
                 let failure = *failure;
+                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed)
+                    .await;
                 let trust_level = current_trust(trust, &peer).await;
                 let _ = events_tx
                     .send(NodeEvent::EstablishmentFailed {
@@ -1659,6 +1818,8 @@ async fn run_establishment(
                 // `NatTraversal`, so reaching these phases here is a
                 // bug, not a runtime condition. Emit a protocol error
                 // and give up.
+                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed)
+                    .await;
                 let error = Error::Transport(
                     "establishment flow in a pre-NAT phase".into(),
                 );
@@ -1688,6 +1849,14 @@ async fn run_establishment(
 /// takeover is the `abort()` performed by `register_peer`; these two
 /// checks are the cheap belt-and-braces for the window between this
 /// task's spawn and the first time it reads the registry.
+///
+/// # Lifecycle
+///
+/// `Established → NatDirect` and `Established | NatDirect → Failed`
+/// are applied inside [`run_establishment`]. This function applies
+/// the final `NatDirect → Closing` transition when the steady loop
+/// exits, so an application that observes [`Node::peer_lifecycle`]
+/// sees a coherent progression across the connection's lifetime.
 #[allow(clippy::too_many_arguments)]
 async fn peer_run<B>(
     mut driver: ConnectionDriver,
@@ -1720,6 +1889,8 @@ async fn peer_run<B>(
         None => {
             // Unreachable in practice; guard defensively in case the
             // transport's guarantees change.
+            set_peer_lifecycle(&peers, &dht, &slot, PeerLifecycle::Failed)
+                .await;
             let failure = FlowFailure::KeyClaimTimeout;
             let trust_level = current_trust(&trust, &peer).await;
             let _ = events_tx
@@ -1749,14 +1920,18 @@ async fn peer_run<B>(
         &local_claim,
         &peer_claim,
         peer,
+        slot,
         &clock,
         &events_tx,
         &discovery,
         &trust,
+        &peers,
+        &dht,
     )
     .await;
 
     if !ready {
+        // `run_establishment` already set the lifecycle to `Failed`.
         let _ = events_tx
             .send(NodeEvent::Disconnected {
                 peer,
@@ -1786,6 +1961,10 @@ async fn peer_run<B>(
         &discovery,
     )
     .await;
+
+    // The steady loop exited; the peer is closing. `NatDirect →
+    // Closing` is the correct transition.
+    set_peer_lifecycle(&peers, &dht, &slot, PeerLifecycle::Closing).await;
     let trust_level = current_trust(&trust, &peer).await;
     let _ = events_tx
         .send(NodeEvent::Disconnected {
@@ -2719,5 +2898,63 @@ mod tests {
         // The current generation can.
         dht.forget_peer(&peer, &current);
         assert!(!dht.table_contains(&peer));
+    }
+
+    // ---- M9.5b-c (gates 5 and 6): routing eligibility ----
+
+    /// A freshly-bound node has no routing-eligible peers.
+    #[tokio::test]
+    async fn routing_eligible_peers_starts_empty() {
+        let a = make_node(1).await;
+        assert!(a.routing_eligible_peers().await.is_empty());
+    }
+
+    /// A peer that has reached `Ready` is routing-eligible. The NAT
+    /// phase concludes before the `Ready` event fires, so by the time
+    /// the event surfaces the state should already be visible.
+    #[tokio::test]
+    async fn peer_becomes_routing_eligible_after_establishment() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        a.connect(b_addr, "localhost").await.unwrap();
+        let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
+
+        let eligible = a.routing_eligible_peers().await;
+        assert!(
+            eligible.iter().any(|s| s.node_id == b_node_id),
+            "peer {b_node_id:?} should be routing-eligible after establishment; \
+             got {eligible:?}",
+        );
+
+        // The peer's lifecycle should be `NatDirect`.
+        assert_eq!(
+            a.peer_lifecycle(&b_node_id).await,
+            Some(PeerLifecycle::NatDirect),
+        );
+    }
+
+    /// The DHT routing table mirrors the registry's lifecycle. After
+    /// establishment, the peer record for `b_node_id` is eligible.
+    #[tokio::test]
+    async fn dht_mirrors_routing_eligibility() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        a.connect(b_addr, "localhost").await.unwrap();
+        let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
+
+        let eligible = a.dht().routing_eligible_records();
+        assert!(
+            eligible.iter().any(|(id, _)| *id == b_node_id),
+            "DHT should record {b_node_id:?} as routing-eligible; \
+             got {eligible:?}",
+        );
     }
 }

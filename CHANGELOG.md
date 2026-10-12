@@ -15,13 +15,16 @@ not a status this file recognises.
 
 Every protocol-level milestone (M1–M8) is landed. The application
 layer (M9.x) is in progress: M9.1 through M9.5a are landed, plus the
-M9.5b-a design contracts and the M9.5b-b shared types. The interface
-layer (M10.x) has begun: M10.1 through M10.3 are landed. §16 runs
-end-to-end through step 8 across the protocol crates; the `Node` type
-composes them into a runnable peer; a Dart client can bind a node,
-subscribe to its event stream, and make explicit trust decisions about
-its peers; the node now allocates a distinct generation slot per
-connection so a reconnect cannot corrupt routing or cluster state.
+M9.5b-a design contracts and the M9.5b-b shared types; M9.5b-c gates
+5 and 6 are landed. The interface layer (M10.x) has begun: M10.1
+through M10.3 are landed. §16 runs end-to-end through step 8 across
+the protocol crates; the `Node` type composes them into a runnable
+peer; a Dart client can bind a node, subscribe to its event stream,
+and make explicit trust decisions about its peers; the node now
+allocates a distinct generation slot per connection so a reconnect
+cannot corrupt routing or cluster state, and it tracks a per-slot
+connection lifecycle whose `NatDirect` / `NatRelayed` states define
+routing eligibility.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -40,7 +43,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~651 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~657 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -76,16 +79,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main` after M9.5b-b:
+Baseline on `main` after M9.5b-c (gates 5 and 6):
 
 ```
 quip-core      74 passed
-quip-net      473 passed       <<< UPDATE to actual
+quip-net      473 passed
 quip-storage   57 passed
-quip-node      60 passed       <<< UPDATE to actual
+quip-node      66 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~651 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~657 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -110,7 +113,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: real `NatDriver`, cluster merge/split, XOR routing | not started |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, real `NatDriver`, cluster merge/split, XOR routing | in progress |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
@@ -481,6 +484,18 @@ references Spec item 12 (membership boundaries). The document
 remains the authoritative contract for M9.5b until the milestone
 completes.
 
+**Post-M9.5b-c documentation correction.** After M9.5b-c gates 5 and
+6 landed, the design doc's status header, §2a, §3, §4, and §7 were
+updated in the same commit. The header now reads "Gates 3–7 closed;
+the integration work those gates unblock … pending." §2a gains a
+"Landed (M9.5b-c gates 5 and 6)" note describing lifecycle as a live
+state variable. §3 gains a "Landed" note describing the
+routing-eligible set and the cluster-member identity. §4 gains a
+"Landed (partial)" note distinguishing identity (defined) from
+derivation (pending). §7 gates 5 and 6 are struck through with
+citations to the code that closed them; the "Remaining" paragraph is
+rewritten to name the M9.5b-c integration work.
+
 ### M9.5b-b — `quip-node` peer generation, lifecycle vocabulary, RTT accessor — LANDED
 
 The M9.5b-a contracts become code. This milestone introduces the
@@ -534,6 +549,68 @@ Tests: `peer_slot_increments_across_reconnects`,
 `dht_forget_peer_is_slot_scoped`, `rtt_is_none_before_handshake`,
 `rtt_is_absent_or_plausible_after_handshake`, plus the unit tests in
 `quip-node::peer` and `quip-node::dht`.
+
+### M9.5b-c (gates 5 and 6) — routing eligibility and cluster-member identity — LANDED
+
+Closes the two remaining integration gates from `docs/M9.5b-design.md`
+§7. The NAT and cluster integration tracks of M9.5b-c can now proceed
+in parallel against frozen contracts.
+
+- **`quip-node/src/peer.rs`.** `PeerLifecycle::is_routing_eligible()`
+  is the sole routing-eligibility predicate: a peer is eligible iff
+  it has reached `NatDirect` or `NatRelayed`. `Connecting`,
+  `Established`, `Failed`, and `Closing` are not eligible. Two tests
+  cover the predicate; the existing transition-table tests are
+  unchanged.
+- **`quip-node/src/dht.rs`.** `PeerRecord` gains a
+  `lifecycle: PeerLifecycle` field. `note_peer` initializes new
+  records (and resets slot-changed records) to `Established`, and
+  leaves lifecycle alone on a same-slot refresh — so the steady
+  loop's periodic `note_peer` on inbound §12 traffic cannot clobber
+  a transition. A new `DhtHandle::update_lifecycle(peer, slot,
+  lifecycle)` is slot-scoped: a stale generation's update is a
+  no-op against a live record. A new
+  `DhtHandle::routing_eligible_records()` filters the table by
+  `PeerLifecycle::is_routing_eligible`. Three new unit tests.
+- **`quip-node/src/lib.rs`.** `PeerHandle` gains a
+  `lifecycle: PeerLifecycle` field. A new `Registry::set_lifecycle`
+  validates the edge against §2a via
+  `PeerLifecycle::transition_to` and rejects a transition from a
+  stale slot. A new `Registry::routing_eligible_slots` derives the
+  eligibility set. A new free function `set_peer_lifecycle` is the
+  single writer path: it updates the registry first (authoritative)
+  and mirrors into the DHT only on acceptance, so the two cannot
+  diverge. `run_establishment` calls it on the NAT-phase conclusion
+  (`Established → NatDirect`), on every failure path
+  (`Established | NatDirect → Failed`), and `peer_run` calls it when
+  the steady loop exits (`NatDirect → Closing`). A new
+  `Node::routing_eligible_peers()` exposes the derived set; a new
+  `Node::peer_lifecycle()` exposes the current lifecycle for a peer.
+- **Cluster-member identity.** A cluster member is a `PeerSlot`, not
+  a bare `NodeId`: a reconnect allocates a fresh slot, so a member
+  record keyed by an old slot is stale by construction. The
+  derivation of the membership set — applying §13.2's
+  ninety-percentile acceptance test over RTT observations from the
+  routing-eligible set — remains M9.5b-c's cluster integration.
+
+**Deliberately not in this milestone.** The NAT phase still
+concludes from the live transport (`on_nat_complete(true, …)` after
+the §4 handshake) rather than from a real `NatDriver`'s
+`NatEvent::DirectPathEstablished`. The transition
+`Established → NatDirect` is correct either way; M9.5b-c replaces
+the *evidence*, not the transition. `NatRelayed` remains reachable
+only by the transition table, not by the current driver.
+
+Tests:
+`nat_states_are_routing_eligible`,
+`other_states_are_not_routing_eligible` (peer.rs);
+`update_lifecycle_is_slot_scoped`,
+`update_lifecycle_of_unknown_peer_is_a_noop`,
+`note_peer_same_slot_preserves_lifecycle`,
+`routing_eligible_records_filters_by_lifecycle` (dht.rs);
+`routing_eligible_peers_starts_empty`,
+`peer_becomes_routing_eligible_after_establishment`,
+`dht_mirrors_routing_eligibility` (lib.rs).
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
@@ -936,8 +1013,8 @@ M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### Housekeeping
 
-28. **Release tag.** `git tag v0.1.0-m9.5b-b && git push origin
-    v0.1.0-m9.5b-b`, then `v0.1.0` once S8 and BFT-A land.
+28. **Release tag.** `git tag v0.1.0-m9.5b-c && git push origin
+    v0.1.0-m9.5b-c`, then `v0.1.0` once S8 and BFT-A land.
 
 29. **GitHub metadata.** Repository description and topics. The
     README currently links to this file; the repo description is
@@ -1009,7 +1086,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/range.rs` (`split_range`) | M7 | client-side range splitting |
 | `quip-net/src/range.rs` (`RangeResponder`) | M7 | responder with cap + quarantine |
 | `quip-net/src/test_support.rs:1` | — | test-only `FakeSigner` |
-| `quip-node/src/lib.rs:1` | M9.1–M9.4a, M9.5b-b | `Node` type, store, clock, DHT routing, peer registry |
+| `quip-node/src/lib.rs:1` | M9.1–M9.4a, M9.5b-b, M9.5b-c | `Node` type, store, clock, DHT routing, peer registry, lifecycle |
 | `quip-node/src/lib.rs` (`NodeConfig`) | M9.1, M9.2, M9.4a | node configuration, clock, and capabilities |
 | `quip-node/src/lib.rs` (`Node::bind`) | M9.1 | server bind + accept loop |
 | `quip-node/src/lib.rs` (`Node::connect`) | M9.1, M9.4a, M9.5b-b | dial + inline handshake + slot registration |
@@ -1017,14 +1094,14 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`try_auto_serve_pins`) | M9.2 | pin/unpin/query_pins auto-serve |
 | `quip-node/src/lib.rs` (`dht_router_task`) | M9.4a | broadcast DHT outbound to peers |
 | `quip-node/src/lib.rs` (`run_peer_loop` DHT branch) | M9.4a | intercept §12 NAT verbs |
-| `quip-node/src/dht.rs:1` | M9.4a, M9.5b-b | live `DhtClient`, slot-aware routing table |
+| `quip-node/src/dht.rs:1` | M9.4a, M9.5b-b, M9.5b-c | live `DhtClient`, slot-aware routing table, lifecycle mirror |
 | `quip-node/src/dht.rs` (`LiveDht`) | M9.4a | DHT client implementation |
-| `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a, M9.5b-b | node-owned DHT handle |
-| `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a, M9.5b-b | routing-table entry shape with slot |
+| `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a, M9.5b-b, M9.5b-c | node-owned DHT handle |
+| `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a, M9.5b-b, M9.5b-c | routing-table entry shape with slot + lifecycle |
 | `quip-node/src/dht.rs` (`dht_result_from`) | M9.4a | §12 verb verification and conversion |
-| `quip-node/src/lib.rs` (`run_establishment`) | M9.4b | §16 flow driven per peer |
+| `quip-node/src/lib.rs` (`run_establishment`) | M9.4b, M9.5b-c | §16 flow driven per peer, lifecycle transitions |
 | `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
-| `quip-node/src/lib.rs` (`peer_run`) | M9.4b, M9.5b-b | establishment + steady-state entry point, slot-guarded |
+| `quip-node/src/lib.rs` (`peer_run`) | M9.4b, M9.5b-b, M9.5b-c | establishment + steady-state entry point, slot-guarded, closing transition |
 | `quip-node/src/dht.rs` (`DhtHandle` impl `DhtClient`) | M9.4b | shared handle as DhtClient |
 | `quip-node/src/discovery.rs:1` | M9.5a | shared Coral discovery client |
 | `quip-node/src/discovery.rs` (`DiscoveryHandle`) | M9.5a | shared handle |
@@ -1035,14 +1112,20 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 | `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
-| `quip-node/src/peer.rs:1` | M9.5b-b | peer slot and lifecycle vocabulary |
+| `quip-node/src/peer.rs:1` | M9.5b-b, M9.5b-c | peer slot and lifecycle vocabulary |
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |
+| `quip-node/src/peer.rs` (`PeerLifecycle::is_routing_eligible`) | M9.5b-c | routing-eligibility predicate |
 | `quip-node/src/peer.rs` (`TransitionError`) | M9.5b-b | rejected-transition error type |
-| `quip-node/src/lib.rs` (`Registry`) | M9.5b-b | peer handles + persistent generation counters |
+| `quip-node/src/lib.rs` (`Registry`) | M9.5b-b, M9.5b-c | peer handles + persistent generation counters + lifecycle |
 | `quip-node/src/lib.rs` (`register_peer`) | M9.5b-b | slot allocation and prior-task abort |
 | `quip-node/src/lib.rs` (`unregister_peer`) | M9.5b-b | slot-scoped cleanup |
+| `quip-node/src/lib.rs` (`Registry::set_lifecycle`) | M9.5b-c | authoritative transition |
+| `quip-node/src/lib.rs` (`Registry::routing_eligible_slots`) | M9.5b-c | derived slots |
+| `quip-node/src/lib.rs` (`set_peer_lifecycle`) | M9.5b-c | single-writer transition path |
 | `quip-node/src/lib.rs` (`Node::peer_slot`) | M9.5b-b | live generation query |
+| `quip-node/src/lib.rs` (`Node::peer_lifecycle`) | M9.5b-c | live lifecycle query |
+| `quip-node/src/lib.rs` (`Node::routing_eligible_peers`) | M9.5b-c | public derived eligibility set |
 | `quip-node/src/lib.rs` (`Node::take_events`) | M10.2 | receiver hand-off for the FFI layer |
 | `quip-node/src/trust.rs:1` | M10.3 | trust policy |
 | `quip-node/src/trust.rs` (`PeerTrust`) | M10.3 | five-level trust enum |
@@ -1070,3 +1153,7 @@ the source. `M3b.3` is retired — its only `TODO`
 consumed in M9.5b-c), `message.rs` BFT arms (M4), `bft.rs` (M4),
 `xtask/` (M6.2), `.github/workflows/ci.yml` (M6.3). Tagging on the
 next touch is cheap.
+
+**M9.5b-c note.** M9.5b-c now owns partial landed work (gates 5 and
+6). The remaining integration (real `NatDriver`, cluster merge/split,
+XOR routing) lands in a later commit under the same milestone label.

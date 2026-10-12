@@ -37,6 +37,14 @@
 //! simultaneously.
 //!
 //! See `docs/M9.5b-design.md` §1–§2 for the full contract.
+//!
+//! # Routing eligibility
+//!
+//! §3 of the design note keeps *physical connection existence* and
+//! *routing eligibility* distinct. [`PeerLifecycle::is_routing_eligible`]
+//! is the sole predicate: a peer is routing-eligible iff it has
+//! reached `NatDirect` or `NatRelayed`. A peer in `Connecting`,
+//! `Established`, `Failed`, or `Closing` is not.
 
 use quip_core::dvv::NodeId;
 
@@ -119,6 +127,21 @@ impl PeerLifecycle {
     /// True if no further transitions are allowed for this slot.
     pub const fn is_terminal(self) -> bool {
         matches!(self, Self::Failed | Self::Closing)
+    }
+
+    /// True if this state permits the peer to carry Coral routing.
+    ///
+    /// §3 of `docs/M9.5b-design.md`: physical connection existence and
+    /// routing eligibility are distinct. Only `NatDirect` and
+    /// `NatRelayed` satisfy the eligibility condition; `Connecting`,
+    /// `Established`, `Failed`, and `Closing` do not.
+    ///
+    /// This predicate is the sole definition of routing eligibility.
+    /// The registry that owns lifecycle state and the DHT routing
+    /// table that mirrors it both consult this method rather than
+    /// enumerating states inline.
+    pub const fn is_routing_eligible(self) -> bool {
+        matches!(self, Self::NatDirect | Self::NatRelayed)
     }
 
     /// True if the transition `self -> to` is permitted by §2a.
@@ -351,6 +374,33 @@ mod tests {
             PeerLifecycle::NatRelayed,
         ] {
             assert!(!s.is_terminal(), "{s:?} must not be terminal");
+        }
+    }
+
+    // ---- is_routing_eligible ----
+
+    #[test]
+    fn nat_states_are_routing_eligible() {
+        assert!(PeerLifecycle::NatDirect.is_routing_eligible());
+        assert!(PeerLifecycle::NatRelayed.is_routing_eligible());
+    }
+
+    #[test]
+    fn other_states_are_not_routing_eligible() {
+        // §3: physical connection existence ≠ routing eligibility.
+        // `Established` means we have a live connection but the NAT
+        // phase has not concluded, so the peer is not yet a routing
+        // candidate.
+        for s in [
+            PeerLifecycle::Connecting,
+            PeerLifecycle::Established,
+            PeerLifecycle::Failed,
+            PeerLifecycle::Closing,
+        ] {
+            assert!(
+                !s.is_routing_eligible(),
+                "{s:?} must not be routing-eligible"
+            );
         }
     }
 }

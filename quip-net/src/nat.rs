@@ -8,6 +8,26 @@
 //! feeds this state machine lives in `crate::nat_driver` (behind the
 //! `quic` feature).
 //!
+//! # Two NAT-phase outcomes
+//!
+//! A session concludes in one of two ways:
+//!
+//! - **Direct.** A probe against a remote candidate succeeded; the
+//!   state machine emits [`NatEvent::DirectPathEstablished`]. This is
+//!   the fast path — the two peers reach each other without help.
+//! - **Relayed.** No direct candidate worked, so the session fell
+//!   back to relay discovery. A relay response arrived, the
+//!   application attempted to use the relay, and
+//!   [`NatTraversal::on_relay_result`] reported success; the state
+//!   machine emits [`NatEvent::RelayedPathEstablished`].
+//!
+//! The two outcomes drive two different lifecycle states at the node
+//! layer (`PeerLifecycle::NatDirect` vs `NatRelayed`). The relay may
+//! be used for coordination only (hole-punch assistance) or for
+//! forwarding; the protocol does not distinguish at this layer, so
+//! `NatRelayed` means "the NAT phase concluded without a direct path,"
+//! not "traffic flows through the relay."
+//!
 //! # Legacy types removed in M3a
 //!
 //! `Candidate`, `CandidateKind`, `ConnectivityAnnounce`,
@@ -501,7 +521,7 @@ impl AddressState {
     pub fn observe(&mut self, observer: NodeId, observed: Address) {
         self.observe_at(observer, observed, Timestamp::from_millis(0));
     }
-    
+
     /// Record an observation with a timestamp, so churn can be measured.
     pub fn observe_at(&mut self, observer: NodeId, observed: Address, now: Timestamp) {
         self.observations.insert(observer, observed);
@@ -768,6 +788,13 @@ pub struct SessionState {
     pub relay_requested_at: Option<Timestamp>,
     /// Relay entries returned for this session's peer.
     pub relays: Vec<RelayEntry>,
+    /// Set once a relay has been confirmed as the session's path.
+    ///
+    /// Populated by [`NatTraversal::on_relay_result`] on success. A
+    /// session with `relay_outcome` set is concluded: [`NatTraversal::poll`]
+    /// skips it, and no further probes or relay requests are emitted
+    /// for it. The value is the relay's `NodeId`.
+    pub relay_outcome: Option<NodeId>,
 }
 
 /// A request the driver should fulfil.
@@ -857,7 +884,7 @@ pub enum NatEvent {
         /// Address of the working path.
         addr: Address,
     },
-    /// A session exhausted all candidates.
+    /// A session exhausted all candidates and no relay was available.
     SessionFailed {
         /// Peer.
         peer: NodeId,
@@ -895,15 +922,42 @@ pub enum NatEvent {
     },
     /// A relay is available for a session whose direct candidates failed.
     ///
-    /// The application is expected to call
-    /// [`NatTraversal::build_relay_chain`] with a [`RelayHopSealer`] and
-    /// then use the resulting chain to reach `peer` (M3.3).
+    /// The application is expected to attempt the relay path — either
+    /// use it directly, or (for a coordination-only relay) confirm it
+    /// through [`NatTraversal::on_relay_result`] — and report the
+    /// outcome. The session stays alive until either a relay succeeds
+    /// (see [`NatEvent::RelayedPathEstablished`]) or all relays are
+    /// exhausted.
     RelayPathAvailable {
         /// Session the relay belongs to.
         session_id: [u8; 16],
         /// The peer we were trying to reach.
         peer: NodeId,
         /// The relay chosen by the state machine.
+        relay: RelayEntry,
+    },
+    /// A relayed path was established for a session.
+    ///
+    /// Emitted by [`NatTraversal::on_relay_result`] when the caller
+    /// reports a successful use of a relay the state machine
+    /// previously surfaced via [`NatEvent::RelayPathAvailable`].
+    ///
+    /// The relay may be used for coordination only (hole-punch
+    /// assistance) or for forwarding; the protocol does not
+    /// distinguish at this layer. The lifecycle state this drives at
+    /// the node layer is `PeerLifecycle::NatRelayed`, which means
+    /// "the NAT phase concluded without a direct path," not "traffic
+    /// flows through the relay."
+    ///
+    /// `DirectPathEstablished` and `RelayedPathEstablished` are the
+    /// two terminal success outcomes of a session; a session emits
+    /// exactly one of them (or `SessionFailed`).
+    RelayedPathEstablished {
+        /// The peer.
+        peer: NodeId,
+        /// Session identifier.
+        session_id: [u8; 16],
+        /// The relay that concluded the session.
         relay: RelayEntry,
     },
 }
@@ -997,6 +1051,9 @@ impl NatTraversal {
         //      before falling back — the DHT may still be responding.
         //   3. Request relays once.
         //   4. Time out the session if relay discovery goes unanswered.
+        //
+        // A session that has already concluded — either direct or
+        // relayed — is skipped entirely.
         let ttl = self.config.candidate_ttl_s;
         let candidate_window_ms = self.config.candidate_phase_timeout_ms;
         let relay_timeout_ms = self.config.relay_discovery_timeout_ms;
@@ -1009,6 +1066,9 @@ impl NatTraversal {
             session.candidates.prune(now, ttl);
 
             if session.candidates.established().is_some() {
+                continue;
+            }
+            if session.relay_outcome.is_some() {
                 continue;
             }
 
@@ -1038,7 +1098,9 @@ impl NatTraversal {
                 continue;
             }
 
-            // 4. Relay discovery outstanding. Time it out.
+            // 4. Relay discovery outstanding. Time it out only if no
+            //    relay has come back; once relays are present the
+            //    session hangs waiting for `on_relay_result`.
             let requested_at = session
                 .relay_requested_at
                 .map(|t| t.as_millis())
@@ -1137,9 +1199,15 @@ impl NatTraversal {
     /// If the response answers an outstanding session discovery — matched
     /// by both `request_id` and `target` (§12.2) — the relays are recorded
     /// against that session and a [`NatEvent::RelayPathAvailable`] is
-    /// surfaced so the application can build a chain with a
-    /// [`RelayHopSealer`]. Relays are always offered to the manager too,
-    /// regardless of whether a session matched.
+    /// surfaced so the application can attempt to use one of them. Relays
+    /// are always offered to the manager too, regardless of whether a
+    /// session matched.
+    ///
+    /// A [`NatEvent::RelayedPathEstablished`] is **not** emitted here;
+    /// that requires the caller to report the outcome of attempting the
+    /// relay through [`Self::on_relay_result`]. This matches the
+    /// `ProbeRequested` → `on_probe_result` → `DirectPathEstablished`
+    /// shape used for direct candidates.
     pub fn on_relay_response(&mut self, response: RelayResponse, _now: Timestamp) {
         let target = response.target;
         let request_id = response.request_id;
@@ -1170,12 +1238,77 @@ impl NatTraversal {
         }
     }
 
+    /// Record the outcome of attempting to use a relay for a session.
+    ///
+    /// The caller learned about the relay through a
+    /// [`NatEvent::RelayPathAvailable`] event and has now either
+    /// succeeded in using it or failed. This is the relayed-path
+    /// counterpart of [`Self::on_probe_result`], and it is the sole
+    /// producer of [`NatEvent::RelayedPathEstablished`].
+    ///
+    /// On success the session is concluded: it is marked with
+    /// [`SessionState::relay_outcome`] and no longer processed by
+    /// [`Self::poll`], the relay manager records a success against
+    /// `relay_id`, and `RelayedPathEstablished` is queued. A
+    /// subsequent poll does not re-emit it.
+    ///
+    /// On failure the relay manager records a failure against
+    /// `relay_id` and the relay is removed from the session's candidate
+    /// list. The session stays alive: a later [`Self::poll`] may
+    /// surface a different relay (if the response carried more than
+    /// one) or, once the relay-discovery window has elapsed with no
+    /// relays left, fail the session.
+    ///
+    /// `relay_id` must match a relay the state machine previously
+    /// surfaced for this session. A mismatched call — unknown session,
+    /// unknown relay — is a silent no-op.
+    pub fn on_relay_result(
+        &mut self,
+        session_id: [u8; 16],
+        relay_id: NodeId,
+        success: bool,
+        _now: Timestamp,
+    ) {
+        let (peer, entry) = match self.sessions.get(&session_id) {
+            Some(s) => match s.relays.iter().find(|r| r.relay_id == relay_id) {
+                Some(e) => (s.peer, e.clone()),
+                None => return,
+            },
+            None => return,
+        };
+
+        if success {
+            self.relay_manager.record_success(&relay_id);
+            if let Some(s) = self.sessions.get_mut(&session_id) {
+                s.relay_outcome = Some(relay_id);
+            }
+            self.events.push_back(NatEvent::RelayedPathEstablished {
+                peer,
+                session_id,
+                relay: entry,
+            });
+        } else {
+            self.relay_manager.record_failure(&relay_id);
+            if let Some(s) = self.sessions.get_mut(&session_id) {
+                s.relays.retain(|r| r.relay_id != relay_id);
+            }
+        }
+    }
+
     /// Record a successful relay session.
+    ///
+    /// Distinct from [`Self::on_relay_result`]: this updates the relay
+    /// manager's track record only, without concluding any session.
+    /// Used when a relay was exercised outside a session (e.g. from a
+    /// previous session's cached relay).
     pub fn on_relay_success(&mut self, relay_id: NodeId) {
         self.relay_manager.record_success(&relay_id);
     }
 
     /// Record a failed relay session.
+    ///
+    /// See [`Self::on_relay_success`] for the distinction from
+    /// [`Self::on_relay_result`].
     pub fn on_relay_failure(&mut self, relay_id: NodeId) {
         self.relay_manager.record_failure(&relay_id);
     }
@@ -1255,6 +1388,7 @@ impl NatTraversal {
                 relay_request_id: None,
                 relay_requested_at: None,
                 relays: Vec::new(),
+                relay_outcome: None,
             },
         );
 
@@ -1729,17 +1863,17 @@ mod tests {
     }
 
     struct TagSealer;
-impl RelayHopSealer for TagSealer {
-    fn seal(&self, recipient: &NodeId, plaintext: &[u8]) -> Result<Vec<u8>> {
-        // Deterministic, non-cryptographic. First byte = recipient[0],
-        // rest = plaintext. Enough to prove build_relay_chain wires
-        // the sealer correctly and passes the traffic key through.
-        let mut out = Vec::with_capacity(1 + plaintext.len());
-        out.push(recipient[0]);
-        out.extend_from_slice(plaintext);
-        Ok(out)
+    impl RelayHopSealer for TagSealer {
+        fn seal(&self, recipient: &NodeId, plaintext: &[u8]) -> Result<Vec<u8>> {
+            // Deterministic, non-cryptographic. First byte = recipient[0],
+            // rest = plaintext. Enough to prove build_relay_chain wires
+            // the sealer correctly and passes the traffic key through.
+            let mut out = Vec::with_capacity(1 + plaintext.len());
+            out.push(recipient[0]);
+            out.extend_from_slice(plaintext);
+            Ok(out)
+        }
     }
-}
 
     #[test]
     fn build_relay_chain_two_hops_seals_recursively() {
@@ -1865,10 +1999,14 @@ impl RelayHopSealer for TagSealer {
         );
     }
 
-    #[test]
-    fn relay_response_completes_pending_session() {
+    /// Drive a session from `start_session` through to
+    /// `RelayPathAvailable`, returning the relay that was offered.
+    ///
+    /// Shared setup for the `on_relay_result` tests.
+    fn drive_to_relay_path_available(
+        n: &mut NatTraversal,
+    ) -> RelayEntry {
         use crate::nat_wire::{Candidate, RelayEntry, CANDIDATE_HOST};
-        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
         n.start_session(nid(2), [0u8; 16], now());
         let _ = n.poll(now());
 
@@ -1919,16 +2057,81 @@ impl RelayHopSealer for TagSealer {
             },
             now(),
         );
+        relay
+    }
+
+    #[test]
+    fn relay_response_completes_pending_session() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        let relay = drive_to_relay_path_available(&mut n);
 
         let events = n.drain_events();
         assert!(events.iter().any(|e| matches!(
             e,
             NatEvent::RelayPathAvailable { peer, relay: r, .. }
-                if peer == &nid(2) && r.relay_id == nid(10)
+                if peer == &nid(2) && r.relay_id == relay.relay_id
         )));
 
         // The relay is also registered in the manager for future use.
         assert!(n.relays().get(&nid(10)).is_some());
+    }
+
+    #[test]
+    fn on_relay_result_success_emits_relayed_path_established() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        let relay = drive_to_relay_path_available(&mut n);
+        let _ = n.drain_events(); // discard RelayPathAvailable
+
+        n.on_relay_result([0u8; 16], relay.relay_id, true, now());
+
+        let events = n.drain_events();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            NatEvent::RelayedPathEstablished { peer, relay: r, .. }
+                if peer == &nid(2) && r.relay_id == relay.relay_id
+        )));
+        let session = n.session(&[0u8; 16]).expect("session still alive");
+        assert_eq!(session.relay_outcome, Some(relay.relay_id));
+
+        // A subsequent poll leaves the session alone: no probe, no
+        // relay request.
+        let out = n.poll(now());
+        assert!(out.is_empty(), "concluded session should emit nothing: {out:?}");
+    }
+
+    #[test]
+    fn on_relay_result_failure_removes_relay_from_session() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        let relay = drive_to_relay_path_available(&mut n);
+        let _ = n.drain_events(); // discard RelayPathAvailable
+
+        n.on_relay_result([0u8; 16], relay.relay_id, false, now());
+
+        let events = n.drain_events();
+        assert!(
+            !events.iter().any(|e| matches!(e, NatEvent::RelayedPathEstablished { .. })),
+            "failure must not emit RelayedPathEstablished"
+        );
+        let session = n.session(&[0u8; 16]).expect("session still alive");
+        assert!(session.relays.is_empty(), "failed relay removed from session");
+        assert!(session.relay_outcome.is_none());
+    }
+
+    #[test]
+    fn on_relay_result_of_unknown_relay_is_noop() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        // No session at all: silent no-op.
+        n.on_relay_result([0xFF; 16], nid(10), true, now());
+        assert!(n.drain_events().is_empty());
+
+        // Session exists but the relay isn't in it: silent no-op.
+        n.start_session(nid(2), [0u8; 16], now());
+        let _ = n.poll(now());
+        n.on_relay_result([0u8; 16], nid(10), true, now());
+        let events = n.drain_events();
+        assert!(!events
+            .iter()
+            .any(|e| matches!(e, NatEvent::RelayedPathEstablished { .. })));
     }
 
     #[test]

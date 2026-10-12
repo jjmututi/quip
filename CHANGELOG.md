@@ -43,7 +43,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~673 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~678 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -79,16 +79,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main` after M9.5b-c (gates 5 and 6):
+Baseline on `main` after M9.5b-c (part 2):
 
 ```
 quip-core      74 passed
-quip-net      473 passed
+quip-net      478 passed
 quip-storage   57 passed
 quip-node      69 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~673 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~678 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -113,7 +113,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, real `NatDriver`, cluster merge/split, XOR routing | in progress |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, real `NatDriver`, cluster merge/split, XOR routing | in progress |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
@@ -611,6 +611,53 @@ Tests:
 `routing_eligible_peers_starts_empty`,
 `peer_becomes_routing_eligible_after_establishment`,
 `dht_mirrors_routing_eligibility` (lib.rs).
+
+### M9.5b-c (part 2) — `NatRelayed` outcome: `RelayedPathEstablished` — LANDED
+
+The design note's §2a table admits `PeerLifecycle::NatRelayed` as a
+transition from `Established`, but until this commit nothing
+produced it: the state machine had no event for "the NAT phase
+concluded without a direct path." This commit adds the producer.
+
+- **`quip-net/src/nat.rs`.** `NatEvent` gains a
+  `RelayedPathEstablished { peer, session_id, relay }` variant.
+  `NatTraversal::on_relay_result(session_id, relay_id, success, now)`
+  is the sole producer: on success it records the outcome on the
+  session, records a relay-manager success against the relay, and
+  queues `RelayedPathEstablished`; on failure it records a
+  relay-manager failure and removes the relay from the session's
+  candidate list. `SessionState` gains a
+  `relay_outcome: Option<NodeId>` field; a session with
+  `relay_outcome` set is skipped by `NatTraversal::poll`, so a
+  concluded relayed session cannot be re-processed.
+- **`quip-net/src/nat_driver.rs`.** `NatDriver::on_relay_result` is a
+  passthrough to the state machine. The application calls it after
+  receiving a `RelayPathAvailable` event and attempting to use the
+  relay.
+
+The two terminal success outcomes of a session are now symmetric:
+`DirectPathEstablished` for a successful candidate probe,
+`RelayedPathEstablished` for a successful relay attempt. A session
+emits exactly one of them, or `SessionFailed`.
+
+The relay may be used for coordination only (hole-punch assistance)
+or for forwarding; the protocol does not distinguish at this layer.
+`NatRelayed` therefore means "the NAT phase concluded without a
+direct path," not "traffic flows through the relay" — a distinction
+the M9.5b-a design note already draws.
+
+**Deliberately not in this commit.** The node's peer task does not
+yet drive a `NatDriver`: `quip-node`'s `run_establishment` still
+concludes the NAT phase from the transport being up, so it produces
+`NatDirect` for every peer. Wiring the driver into the peer task —
+and with it, the code path that produces `NatRelayed` from a real
+peer — is the next commit.
+
+Tests: `on_relay_result_success_emits_relayed_path_established`,
+`on_relay_result_failure_removes_relay_from_session`,
+`on_relay_result_of_unknown_relay_is_noop` (nat.rs);
+`dispatch_relayed_established_is_observation_only`,
+`on_relay_result_forwards_to_state_machine` (nat_driver.rs).
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
@@ -1116,6 +1163,10 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |
 | `quip-node/src/peer.rs` (`PeerLifecycle::is_routing_eligible`) | M9.5b-c | routing-eligibility predicate |
+| quip-net/src/nat.rs (NatEvent::RelayedPathEstablished) | M9.5b-c | relayed-path terminal outcome |
+| quip-net/src/nat.rs (NatTraversal::on_relay_result) | M9.5b-c | sole producer of RelayedPathEstablished |
+| quip-net/src/nat.rs (SessionState::relay_outcome) | M9.5b-c | concluded-relayed-session marker |
+| quip-net/src/nat_driver.rs (NatDriver::on_relay_result) | M9.5b-c | driver passthrough |
 | `quip-node/src/peer.rs` (`TransitionError`) | M9.5b-b | rejected-transition error type |
 | `quip-node/src/lib.rs` (`Registry`) | M9.5b-b, M9.5b-c | peer handles + persistent generation counters + lifecycle |
 | `quip-node/src/lib.rs` (`register_peer`) | M9.5b-b | slot allocation and prior-task abort |

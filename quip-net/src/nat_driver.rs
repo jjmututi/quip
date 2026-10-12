@@ -57,6 +57,13 @@ pub trait DhtClient {
 /// - [`NatEvent::RelayDiscoveryRequested`]: sign and send a
 ///   `relay_discovery` (§12.2). The driver builds the message for
 ///   you; see [`NatDriver::dispatch_event`].
+///
+/// A third event, [`NatEvent::RelayPathAvailable`], is informational
+/// but consequential: the application is expected to attempt the relay
+/// and report the outcome through [`NatDriver::on_relay_result`]. A
+/// successful attempt produces [`NatEvent::RelayedPathEstablished`],
+/// which is the relayed-path counterpart of
+/// [`NatEvent::DirectPathEstablished`].
 pub trait NatApplication {
     /// Dial `addr` on a fresh QUIC connection. Must eventually call
     /// `NatDriver::on_probe_result` with the outcome.
@@ -355,6 +362,30 @@ impl<D: DhtClient> NatDriver<D> {
             .on_probe_result(session_id, addr, success, now);
     }
 
+    /// Record the outcome of attempting to use a relay for a session.
+    ///
+    /// The application calls this after receiving a
+    /// [`NatEvent::RelayPathAvailable`] event and attempting the relay
+    /// path — either using the relay directly, or (for a
+    /// coordination-only relay) confirming that the hole-punch
+    /// coordination succeeded. On success the state machine concludes
+    /// the session with [`NatEvent::RelayedPathEstablished`], which
+    /// the driver's next [`Self::poll`] surfaces alongside the other
+    /// events.
+    ///
+    /// Passthrough to [`NatTraversal::on_relay_result`]; see that
+    /// method for the failure semantics.
+    pub fn on_relay_result(
+        &mut self,
+        session_id: [u8; 16],
+        relay_id: NodeId,
+        success: bool,
+        now: Timestamp,
+    ) {
+        self.state
+            .on_relay_result(session_id, relay_id, success, now);
+    }
+
     /// Consume the driver, returning the DHT client.
     pub fn into_dht(self) -> D {
         self.dht
@@ -392,6 +423,8 @@ mod tests {
                 NatEvent::RelayDiscoveryRequested { .. } => "relay",
                 NatEvent::SessionFailed { .. } => "failed",
                 NatEvent::DirectPathEstablished { .. } => "direct",
+                NatEvent::RelayedPathEstablished { .. } => "relayed",
+                NatEvent::RelayPathAvailable { .. } => "relay-available",
                 _ => "other",
             };
             self.observed.push(tag.into());
@@ -488,6 +521,44 @@ mod tests {
         assert!(app.probes.is_empty());
         assert!(app.relays.is_empty());
         assert_eq!(app.observed, alloc::vec!["failed".to_string()]);
+    }
+
+    /// `RelayedPathEstablished` is delivered to `on_nat_event`, but
+    /// does not trigger any application-side action — the state
+    /// machine has already concluded the session.
+    #[test]
+    fn dispatch_relayed_established_is_observation_only() {
+        use crate::nat_wire::RelayEntry;
+        let d = NatDriver::new(
+            nid(1),
+            addr(1),
+            NatConfig::default(),
+            RecordingDht::default(),
+        );
+        let signer = FakeSigner::new(1);
+        let mut app = RecordingApp::default();
+
+        d.dispatch_event(
+            NatEvent::RelayedPathEstablished {
+                peer: nid(2),
+                session_id: [0x22; 16],
+                relay: RelayEntry {
+                    relay_id: nid(10),
+                    external_addr: addr(10),
+                    capacity: 100,
+                    load: 0,
+                    cost: 0,
+                },
+            },
+            &signer,
+            &mut app,
+            now(),
+        )
+        .unwrap();
+
+        assert!(app.probes.is_empty());
+        assert!(app.relays.is_empty());
+        assert_eq!(app.observed, alloc::vec!["relayed".to_string()]);
     }
 
     fn nid(b: u8) -> NodeId {
@@ -641,5 +712,21 @@ mod tests {
             }
             _ => panic!("expected Relays"),
         }
+    }
+
+    /// `on_relay_result` is a passthrough to the state machine. With
+    /// no session, the call is a silent no-op; it must not panic and
+    /// must not emit any event.
+    #[test]
+    fn on_relay_result_forwards_to_state_machine() {
+        let mut d = NatDriver::new(
+            nid(1),
+            addr(1),
+            NatConfig::default(),
+            RecordingDht::default(),
+        );
+        d.on_relay_result([0xFF; 16], nid(10), true, now());
+        let events = d.state_mut().drain_events();
+        assert!(events.is_empty(), "no-op with no session: {events:?}");
     }
 }

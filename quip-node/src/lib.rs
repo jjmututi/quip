@@ -13,7 +13,7 @@
 //!
 //! # Scope
 //!
-//! This is the ninth cut. It does:
+//! This is the tenth cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
@@ -21,6 +21,9 @@
 //! - Dial outbound connections; drive the handshake inline.
 //! - Run a [`ConnectionFlow`] per peer, sequencing §16 establishment
 //!   from the point the transport's inline handshake leaves off.
+//! - Drive a per-peer [`NatDriver`] during the flow's NAT phase, so
+//!   the phase concludes from a `NatEvent` rather than from a
+//!   hardcoded reading of the transport.
 //! - Run Coral witness discovery for each peer during the flow's
 //!   witness phase, answering the peer's own lookups.
 //! - Record every peer's Key Claim and expose an explicit trust
@@ -44,14 +47,25 @@
 //!   through [`Node::routing_eligible_peers`]. The registry is the
 //!   authoritative owner; the DHT routing table mirrors the state so
 //!   routing decisions can consult it directly.
+//! - **M9.5b-c (part 3):** drive a `NatDriver` per peer during the
+//!   §16 NAT phase. The peer's current transport address is fed in as
+//!   a host candidate and reported as a successful probe; the driver
+//!   turns that into `NatEvent::DirectPathEstablished`, which the
+//!   flow loop translates into `PeerLifecycle::NatDirect`.
 //!
 //! It does not (yet):
 //!
-//! - Drive a real `NatDriver`. The flow's NAT phase still concludes
-//!   from the live transport; M9.5b-c's integration work replaces
-//!   that with a real driver per peer.
+//! - Exchange candidates over the DHT during the NAT phase. The
+//!   `DhtHandle`'s `lookup_candidates` is a no-op; the driver is
+//!   seeded with the address the transport already uses.
+//! - Dial candidate addresses. The NAT driver reports the transport's
+//!   current address as the successful probe; a follow-up commit
+//!   replaces that report with a fresh client endpoint per candidate.
+//! - Sign and send `relay_discovery` on T0. The state machine emits
+//!   `RelayDiscoveryRequested`, but the node's signer is not threaded
+//!   down to the peer task yet.
 //! - Run cluster merge/split or XOR-distance routing. The routing
-//!   eligibility set is now defined and exposed; the consumer is
+//!   eligibility set is defined and exposed; the consumer is
 //!   M9.5b-c's cluster integration.
 //! - Accumulate `WitnessStatement`s. The discovery client runs, but
 //!   the responder answers with no witnesses, so `Ready(Verified)`
@@ -93,10 +107,10 @@
 //! Every `PeerHandle` in the registry carries a [`PeerLifecycle`].
 //! The peer task is the single writer: it starts the handle at
 //! `Established` (a slot is only allocated after the §4 handshake,
-//! so `Connecting` is not observable), transitions to `NatDirect`
-//! when the flow's NAT phase concludes from the live transport,
-//! transitions to `Failed` on any establishment failure, and
-//! transitions to `Closing` when the steady loop exits.
+//! so `Connecting` is not observable), transitions to `NatDirect` or
+//! `NatRelayed` when the flow's NAT phase concludes, transitions to
+//! `Failed` on any establishment failure, and transitions to
+//! `Closing` when the steady loop exits.
 //!
 //! Every transition flows through `set_peer_lifecycle`, which
 //! updates both the registry (authoritative) and the DHT routing
@@ -112,14 +126,31 @@
 //! connection but is not yet a routing candidate. [`Node::routing_eligible_peers`]
 //! and [`DhtHandle::routing_eligible_records`] expose the derived set.
 //!
+//! # NAT phase (M9.5b-c part 3)
+//!
+//! The §16 NAT phase is driven by a per-peer [`NatDriver`]. The peer
+//! task seeds the driver with the peer's current transport address,
+//! reports a successful probe for it — the live QUIC connection is
+//! proof the address is reachable — and reads the terminal
+//! `NatEvent` the driver produces: `DirectPathEstablished`,
+//! `RelayedPathEstablished`, or `SessionFailed`. The first two
+//! conclude the phase with `PeerLifecycle::NatDirect` and
+//! `PeerLifecycle::NatRelayed` respectively; the third fails
+//! establishment.
+//!
+//! Candidate exchange over the DHT, real dialing of candidate
+//! addresses, and signing `relay_discovery` on T0 are not yet
+//! implemented. The driver pipeline they will feed is already the one
+//! above; only the evidence source changes when they land.
+//!
 //! # Establishment
 //!
 //! After the §4 handshake and §16 Key Claim exchange — both performed
 //! inline by `ConnectionDriver` — each peer task runs a
 //! [`ConnectionFlow`] resumed at `NatTraversal` via
-//! [`ConnectionFlow::resume_from_key_claim`]. The NAT phase concludes
-//! from the transport being up: direct connectivity is already proven
-//! by the handshake. The witness phase runs a real
+//! [`ConnectionFlow::resume_from_key_claim`]. The NAT phase runs
+//! through the per-peer `NatDriver` described above. The witness phase
+//! runs a real
 //! [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
 //! the peer: the flow sends a `coral_lookup`, ingests the response,
 //! and either completes with `Ready(KtStatus)` or falls back to
@@ -199,7 +230,8 @@
 //! One exception: the establishment-time discovery wait uses a
 //! wall-clock deadline (`std::time::Instant`), not the injected
 //! clock. The injected clock can be frozen — a stub discovery phase
-//! must not block forever on it.
+//! must not block forever on it. The NAT-phase loop uses the same
+//! wall-clock discipline.
 //!
 //! # Signer
 //!
@@ -281,6 +313,9 @@ use quip_net::establishment::{
 use quip_net::frame::Tier;
 use quip_net::handshake::Capabilities;
 use quip_net::message::{self, Message};
+use quip_net::nat::{NatConfig, NatEvent as DriverNatEvent};
+use quip_net::nat_driver::NatDriver;
+use quip_net::nat_wire::{Candidate, CandidateAnnounce, CANDIDATE_HOST};
 use quip_net::transport::{
     ClientConfig, ConnectionDriver, Endpoint, Event, ServerConfig,
 };
@@ -322,6 +357,13 @@ const POLL_TIMEOUT_MS: u64 = 50;
 /// loopback resolve in well under 100 ms; the deadline is only hit
 /// when a peer is unresponsive.
 const DISCOVERY_WAIT_MS: u64 = 5_000;
+
+/// Wall-clock bound on the NAT phase.
+///
+/// The flow's own NAT timeout is [`FlowConfig::nat_timeout_ms`]
+/// (30 s by default); this bounds the driver loop independently so a
+/// driver that never produces a terminal event cannot spin forever.
+const NAT_PHASE_TIMEOUT_MS: u64 = 30_000;
 
 /// A time source that can be moved across threads and shared.
 ///
@@ -1686,6 +1728,190 @@ async fn current_trust(trust: &SharedTrust, peer: &NodeId) -> PeerTrust {
     trust.lock().await.trust_of(peer)
 }
 
+// -------------------------------------------------------------------------
+// NAT phase (M9.5b-c part 3)
+// -------------------------------------------------------------------------
+
+/// The terminal outcome of the §16 NAT phase.
+///
+/// Mirrors the three success-or-failure modes of a NAT session: a
+/// direct path, a relayed path, or neither.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum NatPhaseOutcome {
+    /// A direct path to the peer was confirmed.
+    Direct,
+    /// The session concluded with a relay.
+    Relayed,
+    /// The session could not establish a path.
+    Failed,
+}
+
+/// Drive the NAT phase through a per-peer `NatDriver`.
+///
+/// Builds a `NatDriver<DhtHandle>` for `peer`, starts a session under
+/// `session_id`, feeds the peer's current transport address in as a
+/// host candidate, and reports a successful probe for it. The live
+/// QUIC connection is proof the address is reachable from this node;
+/// there is no need to dial a second one to confirm the same fact.
+///
+/// The driver then produces `NatEvent::DirectPathEstablished`, which
+/// this function maps to `NatPhaseOutcome::Direct`. The caller
+/// (`run_establishment`) uses that to set `PeerLifecycle::NatDirect`
+/// and complete the NAT phase.
+///
+/// # What is not yet here
+///
+/// - Candidate exchange over the DHT. The `DhtHandle`'s
+///   `lookup_candidates` is a no-op, so the driver's session has only
+///   the seeded address. A follow-up commit wires the exchange.
+/// - Real dialing of candidate addresses. When candidate exchange
+///   lands, the peer task spawns a fresh client endpoint per
+///   candidate and reports the actual dial outcome. The driver
+///   pipeline — candidate → probe → `DirectPathEstablished` — is
+///   unchanged.
+/// - Signing and sending `relay_discovery` on T0. The state machine
+///   emits `RelayDiscoveryRequested` when direct candidates are
+///   exhausted; the peer task ignores it for now, because signing
+///   requires the node's signer to be threaded down. On loopback the
+///   direct probe succeeds first, so this branch is not reached in
+///   the two-node tests.
+/// - `NatPhaseOutcome::Relayed` from a real path. Reachable only when
+///   the above land.
+async fn run_nat_phase(
+    driver: &mut ConnectionDriver,
+    peer: NodeId,
+    session_id: [u8; 16],
+    local_id: NodeId,
+    clock: &SharedClock,
+    dht: &DhtHandle,
+) -> NatPhaseOutcome {
+    let now = clock.now();
+
+    let local_addr = local_ip_address(driver);
+
+    let mut nat_driver = NatDriver::new(
+        local_id,
+        local_addr,
+        NatConfig::default(),
+        dht.clone(),
+    );
+
+    nat_driver.start_session(peer, session_id, now);
+
+    // Feed the peer's current transport address in as a host
+    // candidate. The transport is already using it; a follow-up commit
+    // that adds candidate exchange replaces this seeding with the
+    // remote's own `candidate_announce` messages.
+    let remote_addr = socket_to_address(driver.remote_addr());
+    let candidate = Candidate {
+        addr: remote_addr,
+        kind: CANDIDATE_HOST,
+        priority: 1000,
+        foundation: String::from("current"),
+        component: 0,
+    };
+    nat_driver.on_peer_message(
+        &Message::CandidateAnnounce(CandidateAnnounce {
+            node_id: peer,
+            candidates: vec![candidate],
+            session_id,
+            timestamp: now,
+            signature: [0u8; 64],
+        }),
+        now,
+    );
+
+    // Report the probe result. The transport is up, so the address is
+    // reachable from this node; the state machine turns this into
+    // `DirectPathEstablished`. A follow-up commit replaces this direct
+    // report with an actual dial of each candidate address; the
+    // pipeline below is unchanged.
+    nat_driver.on_probe_result(session_id, remote_addr, true, now);
+
+    let deadline =
+        std::time::Instant::now() + Duration::from_millis(NAT_PHASE_TIMEOUT_MS);
+
+    loop {
+        let now = clock.now();
+
+        let events = match nat_driver.poll(driver, now).await {
+            Ok(e) => e,
+            Err(_) => return NatPhaseOutcome::Failed,
+        };
+        for event in events {
+            match event {
+                DriverNatEvent::DirectPathEstablished { .. } => {
+                    return NatPhaseOutcome::Direct;
+                }
+                DriverNatEvent::RelayedPathEstablished { .. } => {
+                    return NatPhaseOutcome::Relayed;
+                }
+                DriverNatEvent::SessionFailed { .. } => {
+                    return NatPhaseOutcome::Failed;
+                }
+                _ => {}
+            }
+        }
+
+        if std::time::Instant::now() >= deadline {
+            return NatPhaseOutcome::Failed;
+        }
+
+        // Feed inbound §12 NAT verbs on T0 into the state machine.
+        let events = match driver.poll(now).await {
+            Ok(e) => e,
+            Err(_) => return NatPhaseOutcome::Failed,
+        };
+        for event in events {
+            if let Event::Frame { tier, msg, .. } = event {
+                if let Ok(m) = message::dispatch(&msg.raw, tier) {
+                    nat_driver.on_peer_message(&m, now);
+                }
+            }
+        }
+    }
+}
+
+/// Convert a socket address to the wire `Address` type.
+///
+/// Local import keeps `Address` out of the module's top-level scope;
+/// the test module imports the same type directly.
+fn socket_to_address(s: SocketAddr) -> quip_core::address::Address {
+    use quip_core::address::Address;
+    match s {
+        SocketAddr::V4(v4) => Address::V4 {
+            ip: v4.ip().octets(),
+            port: v4.port(),
+        },
+        SocketAddr::V6(v6) => Address::V6 {
+            ip: v6.ip().octets(),
+            port: v6.port(),
+        },
+    }
+}
+
+/// Best local address for the peer's `NatConfig`.
+///
+/// Only used for the connectivity announce, which the DHT no-ops
+/// today. When the announce lands, this becomes a real input.
+fn local_ip_address(driver: &ConnectionDriver) -> quip_core::address::Address {
+    use quip_core::address::Address;
+    match driver.local_ip() {
+        Some(std::net::IpAddr::V4(ip)) => Address::V4 {
+            ip: ip.octets(),
+            port: 0,
+        },
+        Some(std::net::IpAddr::V6(ip)) => Address::V6 {
+            ip: ip.octets(),
+            port: 0,
+        },
+        None => Address::V4 {
+            ip: [0, 0, 0, 0],
+            port: 0,
+        },
+    }
+}
+
 /// Drive the §16 connection flow to completion.
 ///
 /// Returns `true` on `Ready`. On any failure the `EstablishmentFailed`
@@ -1697,25 +1923,28 @@ async fn current_trust(trust: &SharedTrust, peer: &NodeId) -> PeerTrust {
 /// Every terminal outcome of this function leaves the peer's lifecycle
 /// in the correct state:
 ///
-/// - NAT phase concludes → `Established → NatDirect` (the transport
-///   being up is proof of direct connectivity; a future milestone
-///   replaces the *evidence* with a real `NatDriver`, not the
-///   transition).
-/// - Any failure before `Ready` → `Established | NatDirect → Failed`.
+/// - NAT phase concludes → `Established → NatDirect` on a direct path
+///   or `Established → NatRelayed` on a relayed one.
+/// - Any failure before `Ready` → `Established | NatDirect | NatRelayed
+///   → Failed`.
 ///
 /// All transitions flow through `set_peer_lifecycle`, which updates
 /// the registry (authoritative) and the DHT routing table (mirror)
 /// under slot-scope.
 ///
-/// # Scope
+/// # NAT phase
 ///
-/// The NAT phase concludes from the live transport: `ConnectionDriver`
-/// has already exchanged the §4 handshake and §16 Key Claims, which
-/// proves direct connectivity, so declaring `on_nat_complete(true)` is
-/// the truth, not a stub. The witness phase runs a real
+/// Runs through a per-peer `NatDriver` (see `run_nat_phase`). The
+/// driver's terminal event — `DirectPathEstablished`,
+/// `RelayedPathEstablished`, or `SessionFailed` — determines the
+/// lifecycle transition and whether the phase reports success.
+///
+/// # Witness phase
+///
+/// Runs a real
 /// [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
-/// the peer; a later milestone replaces the NAT phase with a real
-/// `NatDriver`.
+/// the peer; a later milestone wires witness accumulation so
+/// `Ready(Verified)` becomes reachable.
 #[allow(clippy::too_many_arguments)]
 async fn run_establishment(
     driver: &mut ConnectionDriver,
@@ -1762,13 +1991,40 @@ async fn run_establishment(
 
         match flow.phase() {
             FlowPhase::NatTraversal => {
-                // The transport is up; direct connectivity is proven.
-                // A later milestone replaces this with a real
-                // `NatDriver` waiting for
-                // `NatEvent::DirectPathEstablished`.
-                let _ = flow.on_nat_complete(true, now);
-                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::NatDirect)
-                    .await;
+                let outcome = run_nat_phase(
+                    driver,
+                    peer,
+                    session_id,
+                    local_claim.node_id,
+                    clock,
+                    dht,
+                )
+                .await;
+                match outcome {
+                    NatPhaseOutcome::Direct => {
+                        let _ = flow.on_nat_complete(true, now);
+                        set_peer_lifecycle(
+                            peers,
+                            dht,
+                            &slot,
+                            PeerLifecycle::NatDirect,
+                        )
+                        .await;
+                    }
+                    NatPhaseOutcome::Relayed => {
+                        let _ = flow.on_nat_complete(true, now);
+                        set_peer_lifecycle(
+                            peers,
+                            dht,
+                            &slot,
+                            PeerLifecycle::NatRelayed,
+                        )
+                        .await;
+                    }
+                    NatPhaseOutcome::Failed => {
+                        let _ = flow.on_nat_complete(false, now);
+                    }
+                }
             }
             FlowPhase::WitnessDiscovery => {
                 run_discovery_phase(driver, peer, clock, discovery, &mut flow)
@@ -1852,9 +2108,10 @@ async fn run_establishment(
 ///
 /// # Lifecycle
 ///
-/// `Established → NatDirect` and `Established | NatDirect → Failed`
-/// are applied inside [`run_establishment`]. This function applies
-/// the final `NatDirect → Closing` transition when the steady loop
+/// `Established → NatDirect | NatRelayed` and
+/// `Established | NatDirect | NatRelayed → Failed` are applied inside
+/// [`run_establishment`]. This function applies the final
+/// `NatDirect | NatRelayed → Closing` transition when the steady loop
 /// exits, so an application that observes [`Node::peer_lifecycle`]
 /// sees a coherent progression across the connection's lifetime.
 #[allow(clippy::too_many_arguments)]
@@ -1962,8 +2219,9 @@ async fn peer_run<B>(
     )
     .await;
 
-    // The steady loop exited; the peer is closing. `NatDirect →
-    // Closing` is the correct transition.
+    // The steady loop exited; the peer is closing. The lifecycle
+    // transition from `NatDirect` or `NatRelayed` to `Closing` is
+    // handled here.
     set_peer_lifecycle(&peers, &dht, &slot, PeerLifecycle::Closing).await;
     let trust_level = current_trust(&trust, &peer).await;
     let _ = events_tx

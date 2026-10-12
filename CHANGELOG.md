@@ -24,7 +24,12 @@ and make explicit trust decisions about its peers; the node now
 allocates a distinct generation slot per connection so a reconnect
 cannot corrupt routing or cluster state, and it tracks a per-slot
 connection lifecycle whose `NatDirect` / `NatRelayed` states define
-routing eligibility.
+routing eligibility. `NatRelayed` is producible at the state-machine
+level: a session whose direct candidates fail and whose relay use
+succeeds emits `RelayedPathEstablished`, the counterpart of
+`DirectPathEstablished`. The peer task now drives a per-peer
+`NatDriver`, so the §16 NAT phase concludes from a `NatEvent` the
+driver emitted rather than from a hardcoded reading of the transport.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -113,7 +118,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, real `NatDriver`, cluster merge/split, XOR routing | in progress |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, cluster merge/split, XOR routing | in progress |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
@@ -550,68 +555,6 @@ Tests: `peer_slot_increments_across_reconnects`,
 `rtt_is_absent_or_plausible_after_handshake`, plus the unit tests in
 `quip-node::peer` and `quip-node::dht`.
 
-### M9.5b-c (gates 5 and 6) — routing eligibility and cluster-member identity — LANDED
-
-Closes the two remaining integration gates from `docs/M9.5b-design.md`
-§7. The NAT and cluster integration tracks of M9.5b-c can now proceed
-in parallel against frozen contracts.
-
-- **`quip-node/src/peer.rs`.** `PeerLifecycle::is_routing_eligible()`
-  is the sole routing-eligibility predicate: a peer is eligible iff
-  it has reached `NatDirect` or `NatRelayed`. `Connecting`,
-  `Established`, `Failed`, and `Closing` are not eligible. Two tests
-  cover the predicate; the existing transition-table tests are
-  unchanged.
-- **`quip-node/src/dht.rs`.** `PeerRecord` gains a
-  `lifecycle: PeerLifecycle` field. `note_peer` initializes new
-  records (and resets slot-changed records) to `Established`, and
-  leaves lifecycle alone on a same-slot refresh — so the steady
-  loop's periodic `note_peer` on inbound §12 traffic cannot clobber
-  a transition. A new `DhtHandle::update_lifecycle(peer, slot,
-  lifecycle)` is slot-scoped: a stale generation's update is a
-  no-op against a live record. A new
-  `DhtHandle::routing_eligible_records()` filters the table by
-  `PeerLifecycle::is_routing_eligible`. Three new unit tests.
-- **`quip-node/src/lib.rs`.** `PeerHandle` gains a
-  `lifecycle: PeerLifecycle` field. A new `Registry::set_lifecycle`
-  validates the edge against §2a via
-  `PeerLifecycle::transition_to` and rejects a transition from a
-  stale slot. A new `Registry::routing_eligible_slots` derives the
-  eligibility set. A new free function `set_peer_lifecycle` is the
-  single writer path: it updates the registry first (authoritative)
-  and mirrors into the DHT only on acceptance, so the two cannot
-  diverge. `run_establishment` calls it on the NAT-phase conclusion
-  (`Established → NatDirect`), on every failure path
-  (`Established | NatDirect → Failed`), and `peer_run` calls it when
-  the steady loop exits (`NatDirect → Closing`). A new
-  `Node::routing_eligible_peers()` exposes the derived set; a new
-  `Node::peer_lifecycle()` exposes the current lifecycle for a peer.
-- **Cluster-member identity.** A cluster member is a `PeerSlot`, not
-  a bare `NodeId`: a reconnect allocates a fresh slot, so a member
-  record keyed by an old slot is stale by construction. The
-  derivation of the membership set — applying §13.2's
-  ninety-percentile acceptance test over RTT observations from the
-  routing-eligible set — remains M9.5b-c's cluster integration.
-
-**Deliberately not in this milestone.** The NAT phase still
-concludes from the live transport (`on_nat_complete(true, …)` after
-the §4 handshake) rather than from a real `NatDriver`'s
-`NatEvent::DirectPathEstablished`. The transition
-`Established → NatDirect` is correct either way; M9.5b-c replaces
-the *evidence*, not the transition. `NatRelayed` remains reachable
-only by the transition table, not by the current driver.
-
-Tests:
-`nat_states_are_routing_eligible`,
-`other_states_are_not_routing_eligible` (peer.rs);
-`update_lifecycle_is_slot_scoped`,
-`update_lifecycle_of_unknown_peer_is_a_noop`,
-`note_peer_same_slot_preserves_lifecycle`,
-`routing_eligible_records_filters_by_lifecycle` (dht.rs);
-`routing_eligible_peers_starts_empty`,
-`peer_becomes_routing_eligible_after_establishment`,
-`dht_mirrors_routing_eligibility` (lib.rs).
-
 ### M9.5b-c (part 2) — `NatRelayed` outcome: `RelayedPathEstablished` — LANDED
 
 The design note's §2a table admits `PeerLifecycle::NatRelayed` as a
@@ -658,6 +601,55 @@ Tests: `on_relay_result_success_emits_relayed_path_established`,
 `on_relay_result_of_unknown_relay_is_noop` (nat.rs);
 `dispatch_relayed_established_is_observation_only`,
 `on_relay_result_forwards_to_state_machine` (nat_driver.rs).
+
+### M9.5b-c (part 3) — `NatDriver` wired into the peer task — LANDED
+
+The §16 NAT phase no longer concludes from a hardcoded reading of the
+transport. Each peer task now builds a `NatDriver<DhtHandle>` when it
+enters `FlowPhase::NatTraversal`, drives it to a terminal event, and
+translates that event into the flow's NAT completion.
+
+- **`quip-node/src/lib.rs`.** A new `run_nat_phase` builds the driver,
+  seeds the peer's current transport address as a host candidate,
+  reports a successful probe for it, and drains the driver until it
+  produces `DirectPathEstablished`, `RelayedPathEstablished`, or
+  `SessionFailed`. `run_establishment`'s `FlowPhase::NatTraversal`
+  arm calls it and translates the outcome: `Direct` →
+  `on_nat_complete(true)` + `PeerLifecycle::NatDirect`; `Relayed` →
+  `on_nat_complete(true)` + `PeerLifecycle::NatRelayed`; `Failed` →
+  `on_nat_complete(false)` (the flow loop then emits
+  `EstablishmentFailed`).
+
+  **Evidence.** The transport is up, so the peer's current address is
+  reachable from this node. That is the same evidence M9.4b used, but
+  it now flows through the driver's candidate → probe →
+  `DirectPathEstablished` pipeline rather than being read as a
+  hardcoded boolean. When candidate exchange lands, only the evidence
+  source changes; the pipeline is unchanged.
+
+**Deliberately not in this commit.**
+
+- Candidate exchange over the DHT. `DhtHandle::lookup_candidates` is
+  still a no-op, so no `candidate_announce` exchange happens. The
+  candidate seeded is the address the transport already uses.
+- Real probing of candidate addresses. The probe is a direct report,
+  not a fresh dial.
+- Signing and sending `relay_discovery` on T0. The state machine
+  emits `RelayDiscoveryRequested` when direct candidates are
+  exhausted, but the peer task does not yet sign — the node's signer
+  is not threaded down to the peer task. On loopback the direct probe
+  succeeds first, so this branch is not reached by the two-node
+  tests.
+- `NatRelayed` from a real relayed path. The lifecycle state is
+  reachable through the driver's `RelayedPathEstablished`, but
+  producing it requires the above.
+
+Tests: no new tests. The existing integration tests —
+`ready_fires_after_connect`,
+`peer_becomes_routing_eligible_after_establishment`,
+`dht_mirrors_routing_eligibility` — now exercise the driver path
+end-to-end: the node cannot reach `PeerLifecycle::NatDirect` without
+the driver emitting `DirectPathEstablished`.
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
@@ -1098,6 +1090,13 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat.rs` (`AddressState::observe_at`) | M3.6 | timestamped observation, churn history |
 | `quip-net/src/nat.rs` (`current_reannounce_percent`) | M3.6 | churn-adaptive §12.1 percent |
 | `quip-net/src/nat.rs` (`RelayAnnounceWindow`) | M3.6 | per-peer §19.4 window |
+| `quip-net/src/nat.rs` (`NatEvent::RelayedPathEstablished`) | M9.5b-c | relayed-path terminal outcome |
+| `quip-net/src/nat.rs` (`NatTraversal::on_relay_result`) | M9.5b-c | sole producer of `RelayedPathEstablished` |
+| `quip-net/src/nat.rs` (`SessionState::relay_outcome`) | M9.5b-c | concluded-relayed-session marker |
+| `quip-net/src/nat_driver.rs` (`NatDriver::on_relay_result`) | M9.5b-c | driver passthrough |
+| `quip-node/src/lib.rs` (`run_nat_phase`) | M9.5b-c | NAT phase driven through `NatDriver` |
+| `quip-node/src/lib.rs` (`NatPhaseOutcome`) | M9.5b-c | NAT phase terminal outcome |
+| `quip-node/src/lib.rs` (`socket_to_address`, `local_ip_address`) | M9.5b-c | socket/address conversion |
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
 | `quip-net/src/establishment.rs:1` | M3.5 | §16 connection flow |
@@ -1146,7 +1145,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a, M9.5b-b, M9.5b-c | node-owned DHT handle |
 | `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a, M9.5b-b, M9.5b-c | routing-table entry shape with slot + lifecycle |
 | `quip-node/src/dht.rs` (`dht_result_from`) | M9.4a | §12 verb verification and conversion |
-| `quip-node/src/lib.rs` (`run_establishment`) | M9.4b, M9.5b-c | §16 flow driven per peer, lifecycle transitions |
+| `quip-node/src/lib.rs` (`run_establishment`) | M9.4b, M9.5b-c | §16 flow driven per peer, lifecycle transitions, NAT via `NatDriver` |
 | `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
 | `quip-node/src/lib.rs` (`peer_run`) | M9.4b, M9.5b-b, M9.5b-c | establishment + steady-state entry point, slot-guarded, closing transition |
 | `quip-node/src/dht.rs` (`DhtHandle` impl `DhtClient`) | M9.4b | shared handle as DhtClient |

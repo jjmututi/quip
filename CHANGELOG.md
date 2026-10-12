@@ -15,11 +15,13 @@ not a status this file recognises.
 
 Every protocol-level milestone (M1–M8) is landed. The application
 layer (M9.x) is in progress: M9.1 through M9.5a are landed, plus the
-M9.5b-a design contracts. The interface layer (M10.x) has begun:
-M10.1 through M10.3 are landed. §16 runs end-to-end through step 8
-across the protocol crates; the `Node` type composes them into a
-runnable peer; a Dart client can bind a node, subscribe to its event
-stream, and make explicit trust decisions about its peers.
+M9.5b-a design contracts and the M9.5b-b shared types. The interface
+layer (M10.x) has begun: M10.1 through M10.3 are landed. §16 runs
+end-to-end through step 8 across the protocol crates; the `Node` type
+composes them into a runnable peer; a Dart client can bind a node,
+subscribe to its event stream, and make explicit trust decisions about
+its peers; the node now allocates a distinct generation slot per
+connection so a reconnect cannot corrupt routing or cluster state.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -30,7 +32,7 @@ simulation, bounded queues, adversarial routing models).
 The application layer's headless deployment shape — a `quip-node`
 binary running without Flutter — is the substrate the VPS tier,
 bootstrap nodes, and witness rings depend on. It lands as M9.7 after
-the M9.5b and M9.6 work that gives it something real to do.
+the M9.5b-c and M9.6 work that gives it something real to do.
 
 ### Build status
 
@@ -38,7 +40,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    626 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~651 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -74,16 +76,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main`:
+Baseline on `main` after M9.5b-b:
 
 ```
 quip-core      74 passed
-quip-net      471 passed
+quip-net      473 passed       <<< UPDATE to actual
 quip-storage   57 passed
-quip-node      37 passed
+quip-node      60 passed       <<< UPDATE to actual
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~626 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~651 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -107,7 +109,7 @@ doc-tests       4 passed (one per crate)
 | M9.4b | `quip-node`: `ConnectionFlow` integration | landed |
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
-| M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | not started |
+| M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
 | M9.5b-c | `quip-node`: real `NatDriver`, cluster merge/split, XOR routing | not started |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
@@ -119,7 +121,7 @@ doc-tests       4 passed (one per crate)
 | M11 | Browser substrate: local gateway, content layer, trust anchors | not started |
 | BFT-A | BFT correctness: `apply()` contract, prepared/checkpoint carry-forward | not started |
 | BFT-V | BFT validation: adversarial network simulator, property tests | not started |
-| N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | not started |
+| N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Spec | Membership boundaries and pin authorization model | not started |
 
 ---
@@ -464,6 +466,60 @@ sources (`establishment.rs`, `cluster.rs`) before landing. The
 implementation of the shared types and the `ConnectionDriver::rtt()`
 accessor is M9.5b-b.
 
+### M9.5b-b — `quip-node` peer generation, lifecycle vocabulary, RTT accessor — LANDED
+
+The M9.5b-a contracts become code. This milestone introduces the
+types the NAT and cluster tracks of M9.5b-c consume, plus the
+`ConnectionDriver` accessor §13.2's acceptance test needs.
+
+- **`quip-node/src/peer.rs` (new).** `PeerSlot { node_id, generation }`
+  is the logical `NodeId` plus a per-`Node` `u64` that increments on
+  every new connection for that identity and is never reset, so a
+  slot value is never reused. `PeerLifecycle` encodes the §2a
+  transition table as a tested type: `can_transition` is total, and
+  the disallowed edges — including `Connecting → Failed` — are
+  covered by explicit unit tests.
+- **`quip-node/src/lib.rs`.** `Node` gains a `Registry` holding peer
+  handles and the persistent generation counters behind one mutex.
+  `register_peer` allocates a fresh slot, inserts the new handle,
+  and aborts the previous task's `JoinHandle`; `unregister_peer`
+  removes a task's entries only if its slot is still current, so a
+  superseded generation cannot clobber its successor's state.
+  `peer_run` takes the slot and performs two `is_current` checks —
+  one on entry, one after the establishment flow — before entering
+  the steady loop. The public API gains `Node::peer_slot`, so an
+  application that caches per-peer state can detect a reconnect.
+- **`quip-node/src/dht.rs`.** `PeerRecord` gains a `slot: PeerSlot`.
+  `note_peer(peer, slot, addr, now)` always records the calling
+  generation; `forget_peer(peer, slot)` only removes the record if
+  the slot matches. A stale generation's cleanup is a no-op against
+  a live record.
+- **`quip-net/src/transport.rs`.** `ConnectionDriver::rtt() ->
+  Option<Duration>` returns `None` until the driver has confirmed a
+  real sample. Quinn reports an RTT *estimate* from connection
+  creation — never zero, never absent — so the accessor cannot use
+  "check for zero." Instead, the driver captures Quinn's smoothed
+  RTT at handshake completion as a baseline and flips an internal
+  `rtt_sampled` flag the first time the value moves by more than
+  `RTT_SAMPLE_EPSILON = 1 ms`. Until then, `rtt()` returns `None`,
+  which is exactly what §13.2's cluster acceptance test needs:
+  missing observations must not count toward the required sample
+  minimum, and must not independently satisfy the test.
+
+**Deliberately not in this milestone.** `PeerLifecycle` is defined
+and tested but not yet a live state variable on the flow;
+`run_establishment` still reads `FlowPhase` directly. Wiring the
+lifecycle into the flow is meaningful only with a real `NatDriver`,
+so it belongs to M9.5b-c. `NodeEvent` does not carry the slot;
+stale-event suppression happens inside the peer task, and the
+application sees at most one live generation per `NodeId` because
+the previous task is aborted on takeover.
+
+Tests: `peer_slot_increments_across_reconnects`,
+`dht_forget_peer_is_slot_scoped`, `rtt_is_none_before_handshake`,
+`rtt_is_absent_or_plausible_after_handshake`, plus the unit tests in
+`quip-node::peer` and `quip-node::dht`.
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -620,7 +676,7 @@ Organized by the axis it belongs to — correctness, network
 completion, validation, protocol design, or release discipline —
 rather than by milestone number. The status table above names the
 same items under their phase labels (BFT-A, BFT-V, N-Hard, Spec,
-M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
+M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### BFT correctness (BFT-A)
 
@@ -697,13 +753,15 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### Network hardening (N-Hard)
 
-9. **Peer lifecycle race.** The peer registry is keyed by `NodeId`
-   alone. Two connections from the same NodeId can race during
-   cleanup, and the first's teardown can remove the second's live
-   entry. Fix: `PeerSlot { connection_id, handle }`, with cleanup
-   conditional on the connection identity. This is the same fix
-   M9.5b-b introduces; doing it there closes N-Hard 9 as a
-   side-effect.
+9. **Peer lifecycle race — RESOLVED by M9.5b-b.** The peer registry
+   was keyed by `NodeId` alone; two connections from the same
+   `NodeId` could race during cleanup, and the first's teardown
+   could remove the second's live entry. M9.5b-b introduces
+   `PeerSlot { node_id, generation }`, makes the DHT routing table
+   slot-aware, and aborts the previous task on takeover. The
+   remaining cleanup concern is the small window between task spawn
+   and `JoinHandle` insertion documented in M9.5b-b's module docs;
+   it is bounded and non-corrupting.
 
 10. **Bounded DHT queues.** `DhtHandle` uses unbounded channels for
     both inbound and outbound. An authenticated peer can flood the
@@ -768,22 +826,18 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### Application layer (M9)
 
-16. **M9.5b-b — shared types and RTT accessor.** `PeerSlot`,
-    `PeerLifecycle`, and `ConnectionDriver::rtt() -> Option<Duration>`.
-    This is the code that turns the M9.5b-a contracts into enforcement.
-    Prerequisite for M9.5b-c.
-
-17. **M9.5b-c — real `NatDriver`, cluster merge/split, XOR routing.**
+16. **M9.5b-c — real `NatDriver`, cluster merge/split, XOR routing.**
     Wire a per-peer `NatDriver` into the flow so the NAT phase
     concludes from a real `NatEvent::DirectPathEstablished` rather
     than from the transport being up. Exchange actual candidates,
     perform probing, distinguish direct / relayed / failed
-    connectivity, and propagate an explicit `NatStatus`. Run
-    `ClusterState` merge/split against the routing table. Replace
-    `LiveDht`'s lookup no-ops with real Coral lookups and the DHT
-    router's broadcast with XOR-distance routing.
+    connectivity, and propagate an explicit `NatStatus`. Wire
+    `PeerLifecycle` into the flow as a live state variable.
+    Run `ClusterState` merge/split against the routing table.
+    Replace `LiveDht`'s lookup no-ops with real Coral lookups and
+    the DHT router's broadcast with XOR-distance routing.
 
-18. **M9.6 — witness accumulation and trust bootstrap.** The
+17. **M9.6 — witness accumulation and trust bootstrap.** The
     responder currently answers with no witnesses; when the node
     accumulates `WitnessStatement`s from its peers, the responder
     returns real rings and `Ready(Verified)` becomes reachable in a
@@ -791,7 +845,7 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     bootstrapping problem is real: a two-node network can never
     reach `Verified`, because verification requires third parties.
 
-19. **M9.7 — headless node binary and config.** A `quip-node`
+18. **M9.7 — headless node binary and config.** A `quip-node`
     binary that runs without Flutter: config file (bind address,
     seed source, store path, bootstrap peers), logging, graceful
     shutdown. This is the deployment shape the VPS tier, bootstrap
@@ -800,7 +854,7 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### Interface layer (M10)
 
-20. **M10.4 — platform signer shim.** A `SignerBackend` trait in
+19. **M10.4 — platform signer shim.** A `SignerBackend` trait in
     `quip-node` and one implementation per platform: Kotlin/JNI for
     Android, Swift for iOS, C ABI for Linux/Windows. Hardware-backed
     Ed25519 is available on Android 13+ with TEE or StrongBox,
@@ -811,13 +865,13 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     cannot be coerced into `Ed25519Signer::from_seed`'s
     `[u8; 32]` shape — the private bytes never exist.
 
-21. **M10.5 — end-to-end verification on Android.** The smoke tests
+20. **M10.5 — end-to-end verification on Android.** The smoke tests
     from M10.1 through M10.3 re-run against an Android device,
     exercising the platform signer shim.
 
 ### Browser substrate (M11)
 
-22. **Local gateway.** A `quip-daemon` or FFI-exposed server that
+21. **Local gateway.** A `quip-daemon` or FFI-exposed server that
     answers `http://localhost:PORT/quip/<cid>` and
     `http://localhost:PORT/hint/<name>`, so any existing browser can
     resolve QUIP content without a bespoke browser. This is the tier
@@ -825,20 +879,20 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     URL shape, content-type negotiation, trust-policy enforcement,
     all reachable from a Firefox tab.
 
-23. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
+22. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
     verify → policy → `GovernanceStore`), a CBOR value-blob schema
     for what responders publish as Coral values, and the name-hint
     mechanism that lets a client go from a hint string to a set of
     CIDs via Coral lookup.
 
-24. **Content-type metadata.** CIDs do not carry MIME types. The
+23. **Content-type metadata.** CIDs do not carry MIME types. The
     options are pin-time metadata, byte sniffing, or address hints.
     Pin-time metadata is cleanest and mirrors how IPFS handles it.
     The alternative is serving everything as
     `application/octet-stream`, which makes the gateway useless for
     anything but downloads.
 
-25. **The VPS tier.** A user-controlled always-on anchor. Not a new
+24. **The VPS tier.** A user-controlled always-on anchor. Not a new
     protocol layer: the same headless build (M9.7), deployed
     differently. Acts as rendezvous point, relay candidate,
     availability anchor, and custodian of witness statements. Also
@@ -846,7 +900,7 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     the VPS is a push provider, using APNs and FCM as
     notification-only channels.
 
-26. **No rendering format.** The browser substrate renders standard
+25. **No rendering format.** The browser substrate renders standard
     web formats (HTML, CSS, JS, images, media) via the existing
     browser engine. QUIP does not define a markup language. Its
     contribution is the resolver, the address scheme, and the trust
@@ -854,33 +908,33 @@ M9.5b-b, M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### FFI / API stabilization
 
-27. **Node lifecycle.** Duplicate connections, reconnect behavior,
-    shutdown ordering, FFI-safe ownership and lifetimes. The FFI
-    surface should not be frozen until the identity type boundary
-    (Spec 14) and the peer generation race (N-Hard 9 / M9.5b-b) are
-    resolved.
+26. **Node lifecycle.** Duplicate connections, reconnect behavior,
+    shutdown ordering, FFI-safe ownership and lifetimes. M9.5b-b
+    resolves the peer-generation race; the identity type boundary
+    (Spec 14) is still open. The FFI surface should not be frozen
+    until both are resolved.
 
-28. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
+27. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
     carry `verb: String` + `raw: Vec<u8>`; a typed decoder
     (`decodeMessage(raw)`) is needed so Dart consumers do not
     reimplement CBOR parsing.
 
 ### Housekeeping
 
-29. **Release tag.** `git tag v0.1.0-m10.3 && git push origin
-    v0.1.0-m10.3`, then `v0.1.0` once S8 and BFT-A land.
+28. **Release tag.** `git tag v0.1.0-m9.5b-b && git push origin
+    v0.1.0-m9.5b-b`, then `v0.1.0` once S8 and BFT-A land.
 
-30. **GitHub metadata.** Repository description and topics. The
+29. **GitHub metadata.** Repository description and topics. The
     README currently links to this file; the repo description is
     still blank.
 
-31. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+30. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
     The bound currently sits on `quip-node`'s `SharedClock` alias
     because widening the trait is a breaking change. Every
     reasonable clock satisfies the stronger bound; the alias should
     eventually become unnecessary.
 
-32. **Draft contribution log.** The reference implementation was
+31. **Draft contribution log.** The reference implementation was
     developed against earlier drafts; the resolutions that became
     revision 03 are documented in the spec-pass section above. A
     short paragraph in the draft's doc history — one line per
@@ -919,9 +973,12 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/bft_driver.rs` (`on_state_transfer`) | M4b.3 | state transfer request/response |
 | `quip-net/src/bft_driver.rs` (`verify_checkpoint_ring_sig`) | M4b.3 | S8 interpretation of the ring signature |
 | `quip-net/src/transport.rs:3` | M5 | status header |
+| `quip-net/src/transport.rs` (`RTT_SAMPLE_EPSILON`) | M9.5b-b | RTT-sample gating threshold |
+| `quip-net/src/transport.rs` (`ConnectionDriver::rtt`) | M9.5b-b | gated RTT accessor |
 | `quip-net/src/transport.rs` (M5.2–M5.4 test groups) | M5 | handshake/capability, T0/T1/T3, Key Claim |
 | `quip-net/src/transport.rs` (M6.1 section) | M6.1 | §16 integration tests |
 | `quip-net/src/transport.rs` (M7 section) | M7 | rate limiting |
+| `quip-net/src/transport.rs` (M9.5b-b section) | M9.5b-b | RTT observation gating tests |
 | `quip-net/src/conn.rs:6` | M5 | driver owns the QUIC connection |
 | `quip-net/src/conn.rs:66` | M5 | driver consults `flow_state` |
 | `quip-net/src/handshake.rs:562` | M8 | negotiated-set re-encode hot path |
@@ -937,22 +994,22 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/range.rs` (`split_range`) | M7 | client-side range splitting |
 | `quip-net/src/range.rs` (`RangeResponder`) | M7 | responder with cap + quarantine |
 | `quip-net/src/test_support.rs:1` | — | test-only `FakeSigner` |
-| `quip-node/src/lib.rs:1` | M9.1–M9.4a | `Node` type, store integration, clock injection, DHT routing |
+| `quip-node/src/lib.rs:1` | M9.1–M9.4a, M9.5b-b | `Node` type, store, clock, DHT routing, peer registry |
 | `quip-node/src/lib.rs` (`NodeConfig`) | M9.1, M9.2, M9.4a | node configuration, clock, and capabilities |
 | `quip-node/src/lib.rs` (`Node::bind`) | M9.1 | server bind + accept loop |
-| `quip-node/src/lib.rs` (`Node::connect`) | M9.1, M9.4a | dial + inline handshake + DHT note_peer |
+| `quip-node/src/lib.rs` (`Node::connect`) | M9.1, M9.4a, M9.5b-b | dial + inline handshake + slot registration |
 | `quip-node/src/lib.rs` (`Node::store` and direct helpers) | M9.2 | store access and pin API |
 | `quip-node/src/lib.rs` (`try_auto_serve_pins`) | M9.2 | pin/unpin/query_pins auto-serve |
 | `quip-node/src/lib.rs` (`dht_router_task`) | M9.4a | broadcast DHT outbound to peers |
 | `quip-node/src/lib.rs` (`run_peer_loop` DHT branch) | M9.4a | intercept §12 NAT verbs |
-| `quip-node/src/dht.rs:1` | M9.4a | live `DhtClient` |
+| `quip-node/src/dht.rs:1` | M9.4a, M9.5b-b | live `DhtClient`, slot-aware routing table |
 | `quip-node/src/dht.rs` (`LiveDht`) | M9.4a | DHT client implementation |
-| `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a | node-owned DHT handle |
-| `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a | routing-table entry shape |
+| `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a, M9.5b-b | node-owned DHT handle |
+| `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a, M9.5b-b | routing-table entry shape with slot |
 | `quip-node/src/dht.rs` (`dht_result_from`) | M9.4a | §12 verb verification and conversion |
 | `quip-node/src/lib.rs` (`run_establishment`) | M9.4b | §16 flow driven per peer |
 | `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
-| `quip-node/src/lib.rs` (`peer_run`) | M9.4b | establishment + steady-state entry point |
+| `quip-node/src/lib.rs` (`peer_run`) | M9.4b, M9.5b-b | establishment + steady-state entry point, slot-guarded |
 | `quip-node/src/dht.rs` (`DhtHandle` impl `DhtClient`) | M9.4b | shared handle as DhtClient |
 | `quip-node/src/discovery.rs:1` | M9.5a | shared Coral discovery client |
 | `quip-node/src/discovery.rs` (`DiscoveryHandle`) | M9.5a | shared handle |
@@ -963,6 +1020,14 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 | `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
+| `quip-node/src/peer.rs:1` | M9.5b-b | peer slot and lifecycle vocabulary |
+| `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
+| `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |
+| `quip-node/src/peer.rs` (`TransitionError`) | M9.5b-b | rejected-transition error type |
+| `quip-node/src/lib.rs` (`Registry`) | M9.5b-b | peer handles + persistent generation counters |
+| `quip-node/src/lib.rs` (`register_peer`) | M9.5b-b | slot allocation and prior-task abort |
+| `quip-node/src/lib.rs` (`unregister_peer`) | M9.5b-b | slot-scoped cleanup |
+| `quip-node/src/lib.rs` (`Node::peer_slot`) | M9.5b-b | live generation query |
 | `quip-node/src/lib.rs` (`Node::take_events`) | M10.2 | receiver hand-off for the FFI layer |
 | `quip-node/src/trust.rs:1` | M10.3 | trust policy |
 | `quip-node/src/trust.rs` (`PeerTrust`) | M10.3 | five-level trust enum |

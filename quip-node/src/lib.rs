@@ -13,7 +13,7 @@
 //!
 //! # Scope
 //!
-//! This is the seventh cut. It does:
+//! This is the eighth cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
@@ -36,12 +36,18 @@
 //!   `pin`, `unpin`, `query_pins`, and a raw `store()` accessor.
 //! - Read the wall clock through a [`Clock`], so tests can inject a
 //!   deterministic time source.
+//! - **M9.5b-b:** allocate a [`PeerSlot`] for every connection,
+//!   abort the previous generation's task on reconnect, and scope
+//!   the DHT routing table to the current generation.
 //!
 //! It does not (yet):
 //!
 //! - Drive a real `NatDriver`. The flow's NAT phase still concludes
-//!   from the live transport; M9.5b replaces that with a real driver
+//!   from the live transport; M9.5b-c replaces that with a real driver
 //!   per peer.
+//! - Wire [`PeerLifecycle`] into the flow as a state variable. The
+//!   type is defined and tested in this cut so M9.5b-c can consume it
+//!   without churn; the flow itself is unchanged.
 //! - Accumulate `WitnessStatement`s. The discovery client runs, but
 //!   the responder answers with no witnesses, so `Ready(Verified)`
 //!   is unreachable in a network smaller than five independent
@@ -56,6 +62,28 @@
 //! - Auto-serve `get`, `set`, `sync`, or `rbsr_sync`: they are
 //!   DVV-shaped and need DVV state that `Node` does not own yet.
 //! - Run a `BftDriver`.
+//!
+//! # Peer generation (M9.5b-b)
+//!
+//! Every connection gets a [`PeerSlot`]: the peer's logical `NodeId`
+//! plus a per-node generation counter that increments on each new
+//! connection for that `NodeId`. The counter is persistent — it is
+//! never reset when a peer disconnects — so slot values are never
+//! reused.
+//!
+//! When a second connection arrives for an already-connected peer,
+//! the newer slot wins. The node:
+//!
+//! 1. Allocates the new slot under the peer-registry lock.
+//! 2. Aborts the previous task's `JoinHandle` (taken from the task
+//!    map).
+//! 3. Spawns the new peer task with the new slot.
+//!
+//! The aborted task cannot emit further events, so the application
+//! never observes two live generations for the same `NodeId`
+//! simultaneously. The task's own cleanup path (`unregister_peer`)
+//! only removes the DHT record and the task-map entry if the slot is
+//! still current, so a stale task cannot clobber its successor.
 //!
 //! # Establishment
 //!
@@ -208,6 +236,7 @@
 
 pub mod dht;
 pub mod discovery;
+pub mod peer;
 pub mod trust;
 
 use quip_core::cid::{CidOrV1, HashAlgo};
@@ -241,6 +270,8 @@ use tokio::task::JoinHandle;
 
 use dht::DhtHandle;
 use discovery::DiscoveryHandle;
+// M9.5b-b: peer-slot and lifecycle vocabulary.
+pub use peer::{PeerLifecycle, PeerSlot};
 // M10.3: the trust policy and the trust level that peer events carry.
 use trust::{PeerTrust, TrustPolicy};
 
@@ -396,6 +427,13 @@ pub fn make_key_claim(signer: &impl Signer, now: Timestamp) -> Result<KeyClaim> 
 // -------------------------------------------------------------------------
 
 /// An event surfaced to the application.
+///
+/// Events are generation-scoped internally: a task whose slot has been
+/// superseded by a newer connection for the same `NodeId` is aborted
+/// before it can emit, so the application never observes two live
+/// generations for one peer. `NodeEvent` does not carry the
+/// [`PeerSlot`] on the wire; applications that need the current
+/// generation for a peer can call [`Node::peer_slot`].
 #[derive(Debug)]
 pub enum NodeEvent {
     /// A peer completed the §4 handshake and §16 Key Claim exchange.
@@ -490,19 +528,156 @@ pub enum NodeEvent {
 }
 
 // -------------------------------------------------------------------------
-// Node
+// Peer registry
 // -------------------------------------------------------------------------
 
-/// Peer table entry: outbound sender for one connected peer.
+/// A registered peer connection.
 struct PeerHandle {
+    /// The current connection generation for this peer.
+    slot: PeerSlot,
+    /// Outbound queue for the peer task driving this generation.
     outbound: mpsc::Sender<Message>,
 }
 
-/// Shared maps. Both are behind an `Arc<Mutex<…>>` because the accept
-/// loop, the connect path, and the per-peer tasks all need to update
-/// them.
-type PeerMap = Arc<Mutex<BTreeMap<NodeId, PeerHandle>>>;
-type TaskMap = Arc<Mutex<BTreeMap<NodeId, JoinHandle<()>>>>;
+/// Per-node registry of active peer handles and generation counters.
+///
+/// The two maps live behind one lock so that "allocate a new slot,
+/// replace the handle" is a single atomic step with respect to any
+/// other `register` call for the same `NodeId`. This is what makes a
+/// concurrent reconnect deterministic: whoever takes the lock second
+/// wins, and the first task's slot is no longer current.
+///
+/// The generation counter is **persistent**. It is never reset when a
+/// peer disconnects, because resetting would allow a slot value to be
+/// reused and break the "stale slot cannot match" invariant.
+struct Registry {
+    /// Active peer handles, keyed by logical NodeId.
+    peers: BTreeMap<NodeId, PeerHandle>,
+    /// Persistent per-NodeId generation counter. Incremented every
+    /// time a new `PeerSlot` is allocated for the NodeId. Never
+    /// reset, so a slot value is never reused within a `Node`'s
+    /// lifetime.
+    generations: BTreeMap<NodeId, u64>,
+}
+
+impl Registry {
+    fn new() -> Self {
+        Self {
+            peers: BTreeMap::new(),
+            generations: BTreeMap::new(),
+        }
+    }
+
+    /// Allocate a fresh slot for `peer`, replace any existing handle,
+    /// and return the new slot plus the previous handle if any.
+    ///
+    /// The generation counter uses `wrapping_add`: reaching
+    /// `u64::MAX` connections for a single peer would require a
+    /// connection rate no deployed node will ever see, and a panic
+    /// in the accept loop is worse than an astronomically unlikely
+    /// reuse.
+    fn register(
+        &mut self,
+        peer: NodeId,
+        outbound: mpsc::Sender<Message>,
+    ) -> (PeerSlot, Option<PeerHandle>) {
+        let counter = self.generations.entry(peer).or_insert(0);
+        *counter = counter.wrapping_add(1);
+        let slot = PeerSlot::new(peer, *counter);
+        let old = self.peers.insert(peer, PeerHandle { slot, outbound });
+        (slot, old)
+    }
+
+    /// True if `slot` is the currently-registered slot for its peer.
+    fn is_current(&self, slot: &PeerSlot) -> bool {
+        self.peers
+            .get(&slot.node_id)
+            .map(|h| h.slot == *slot)
+            .unwrap_or(false)
+    }
+
+    /// Remove the entry for `slot` if it is current; return whether
+    /// anything was removed.
+    fn remove_if_current(&mut self, slot: &PeerSlot) -> bool {
+        if self.is_current(slot) {
+            self.peers.remove(&slot.node_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Clone the outbound sender for `peer`, if it is registered.
+    fn outbound_of(&self, peer: &NodeId) -> Option<mpsc::Sender<Message>> {
+        self.peers.get(peer).map(|h| h.outbound.clone())
+    }
+}
+
+/// Shared registry behind the same lock the node's `peers` handle
+/// uses.
+type PeerRegistry = Arc<Mutex<Registry>>;
+
+/// Peer tasks keyed by logical NodeId. The slot is stored alongside
+/// the handle so a task's cleanup path can verify that the entry it
+/// sees is its own before removing it.
+type TaskMap = Arc<Mutex<BTreeMap<NodeId, (PeerSlot, JoinHandle<()>)>>>;
+
+/// Allocate a slot for a new connection and abort any previous task
+/// for the same `NodeId`.
+///
+/// Returns the new slot. The caller must insert the returned
+/// `JoinHandle` into the task map once it has spawned its task.
+async fn register_peer(
+    peers: &PeerRegistry,
+    peer_tasks: &TaskMap,
+    peer: NodeId,
+    outbound: mpsc::Sender<Message>,
+) -> PeerSlot {
+    let slot = {
+        let mut reg = peers.lock().await;
+        let (slot, _old) = reg.register(peer, outbound);
+        slot
+    };
+    // Abort the previous task if there is one. We take the entry
+    // out of the map first so that a subsequent insert by the caller
+    // replaces it deterministically.
+    if let Some((_old_slot, old_task)) = peer_tasks.lock().await.remove(&peer) {
+        old_task.abort();
+    }
+    slot
+}
+
+/// Remove a peer task's registry entries on exit.
+///
+/// The peer handle and the task-map entry are both removed only if
+/// `slot` is still the current generation for its peer. A stale task
+/// — whose slot was superseded by a newer connection before it
+/// finished — leaves the newer task's state alone.
+async fn unregister_peer(
+    peers: &PeerRegistry,
+    peer_tasks: &TaskMap,
+    peer: &NodeId,
+    slot: &PeerSlot,
+) {
+    let removed = {
+        let mut reg = peers.lock().await;
+        reg.remove_if_current(slot)
+    };
+    if removed {
+        let mut tasks = peer_tasks.lock().await;
+        let is_ours = tasks
+            .get(peer)
+            .map(|(s, _)| s == slot)
+            .unwrap_or(false);
+        if is_ours {
+            tasks.remove(peer);
+        }
+    }
+}
+
+// -------------------------------------------------------------------------
+// Node
+// -------------------------------------------------------------------------
 
 /// A running QUIP node.
 ///
@@ -512,7 +687,7 @@ type TaskMap = Arc<Mutex<BTreeMap<NodeId, JoinHandle<()>>>>;
 pub struct Node<B = MemoryBlobStore> {
     endpoint: Arc<Endpoint>,
     local_claim: KeyClaim,
-    peers: PeerMap,
+    peers: PeerRegistry,
     /// Peer tasks spawned by `connect` or the accept loop, keyed by
     /// peer NodeId. Aborted on `Drop`, so a dropped `Node` cannot leak
     /// tasks into the runtime.
@@ -571,7 +746,7 @@ where
         let endpoint = Arc::new(Endpoint::server(server_config)?);
 
         let (events_tx, events_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
-        let peers: PeerMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let peers: PeerRegistry = Arc::new(Mutex::new(Registry::new()));
         let peer_tasks: TaskMap = Arc::new(Mutex::new(BTreeMap::new()));
         let store = Arc::new(Mutex::new(store));
         let clock = Arc::clone(&config.clock);
@@ -642,6 +817,11 @@ where
     /// The returned `NodeId` is available as soon as the transport
     /// handshake completes. `NodeEvent::Ready` fires later, after the
     /// establishment flow completes.
+    ///
+    /// If a connection to the same peer is already registered, the
+    /// previous task is aborted and this connection becomes the
+    /// current generation. See the module docs under "Peer
+    /// generation."
     pub async fn connect(
         &mut self,
         addr: SocketAddr,
@@ -659,11 +839,9 @@ where
         let peer = drive_handshake(&mut driver, &clock).await?;
 
         let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAPACITY);
-        self.peers
-            .lock()
-            .await
-            .insert(peer, PeerHandle { outbound: out_tx });
-        self.dht.note_peer(peer, Some(addr), clock.now());
+        let slot =
+            register_peer(&self.peers, &self.peer_tasks, peer, out_tx).await;
+        self.dht.note_peer(peer, slot, Some(addr), clock.now());
 
         // M10.3: record the peer's claim before emitting Connected.
         // A first-seen peer lands as `Unknown`; a reconnect to a peer
@@ -671,9 +849,12 @@ where
         let peer_claim = match driver.peer_key_claim().cloned() {
             Some(c) => c,
             None => {
+                unregister_peer(&self.peers, &self.peer_tasks, &peer, &slot)
+                    .await;
+                self.dht.forget_peer(&peer, &slot);
                 return Err(Error::Transport(
                     "peer claim missing after handshake".into(),
-                ))
+                ));
             }
         };
         let trust_level = {
@@ -696,20 +877,31 @@ where
         let dht = self.dht.clone();
         let discovery = self.discovery.clone();
         let trust = Arc::clone(&self.trust);
+        let task_peers = Arc::clone(&peers);
         let handle = tokio::spawn(async move {
             // The client endpoint must outlive the connection, so it
             // is moved into the peer task and dropped when the loop
             // exits.
             let _keep_endpoint = client_endpoint;
             peer_run(
-                driver, peer, store, clock, auto_serve, events_tx, out_rx,
-                dht, discovery, trust,
+                driver,
+                peer,
+                slot,
+                store,
+                clock,
+                auto_serve,
+                events_tx,
+                out_rx,
+                dht.clone(),
+                discovery,
+                trust,
+                task_peers,
             )
             .await;
-            peers.lock().await.remove(&peer);
-            peer_tasks.lock().await.remove(&peer);
+            unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
+            dht.forget_peer(&peer, &slot);
         });
-        self.peer_tasks.lock().await.insert(peer, handle);
+        self.peer_tasks.lock().await.insert(peer, (slot, handle));
 
         Ok(peer)
     }
@@ -766,13 +958,10 @@ where
     /// peer's task; the caller observes them through `poll`.
     pub async fn send_to(&self, peer: &NodeId, msg: Message) -> Result<()> {
         let tx = {
-            let peers = self.peers.lock().await;
-            peers
-                .get(peer)
-                .map(|h| h.outbound.clone())
-                .ok_or_else(|| {
-                    Error::Transport(format!("unknown peer {peer:?}"))
-                })?
+            let reg = self.peers.lock().await;
+            reg.outbound_of(peer).ok_or_else(|| {
+                Error::Transport(format!("unknown peer {peer:?}"))
+            })?
         };
         tx.send(msg)
             .await
@@ -796,7 +985,18 @@ where
 
     /// Snapshot of currently connected peers.
     pub async fn peers(&self) -> Vec<NodeId> {
-        self.peers.lock().await.keys().copied().collect()
+        self.peers.lock().await.peers.keys().copied().collect()
+    }
+
+    /// The current connection generation for `peer`, if it is
+    /// connected.
+    ///
+    /// Useful to applications that cache per-peer state and need to
+    /// invalidate it when the peer reconnects. Two calls that return
+    /// different slots for the same `NodeId` mean a reconnect happened
+    /// in between.
+    pub async fn peer_slot(&self, peer: &NodeId) -> Option<PeerSlot> {
+        self.peers.lock().await.peers.get(peer).map(|h| h.slot)
     }
 
     /// Initiate a graceful close of the endpoint.
@@ -989,7 +1189,7 @@ impl<B> Drop for Node<B> {
         // above already caused every peer task to exit at its next
         // poll, so the tasks terminate regardless.
         if let Ok(mut tasks) = self.peer_tasks.try_lock() {
-            while let Some((_, handle)) = tasks.pop_first() {
+            while let Some((_, (_, handle))) = tasks.pop_first() {
                 handle.abort();
             }
         }
@@ -1008,14 +1208,14 @@ impl<B> Drop for Node<B> {
 /// broadcast is correct and cheap.
 async fn dht_router_task(
     mut rx: mpsc::UnboundedReceiver<Message>,
-    peers: PeerMap,
+    peers: PeerRegistry,
 ) {
     while let Some(msg) = rx.recv().await {
         // Copy the senders out of the map before awaiting on any of
         // them, so a slow or stalled peer cannot hold the peer-map lock.
         let senders: Vec<mpsc::Sender<Message>> = {
-            let map = peers.lock().await;
-            map.values().map(|h| h.outbound.clone()).collect()
+            let reg = peers.lock().await;
+            reg.peers.values().map(|h| h.outbound.clone()).collect()
         };
         for tx in senders {
             let _ = tx.send(msg.clone()).await;
@@ -1027,7 +1227,7 @@ async fn dht_router_task(
 #[allow(clippy::too_many_arguments)]
 async fn accept_loop<B>(
     endpoint: Arc<Endpoint>,
-    peers: PeerMap,
+    peers: PeerRegistry,
     peer_tasks: TaskMap,
     store: Arc<Mutex<QuipStore<B>>>,
     clock: SharedClock,
@@ -1076,11 +1276,9 @@ async fn accept_loop<B>(
                 }
             };
             let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAPACITY);
-            peers
-                .lock()
-                .await
-                .insert(peer, PeerHandle { outbound: out_tx });
-            dht.note_peer(peer, None, clock.now());
+            let slot =
+                register_peer(&peers, &peer_tasks, peer, out_tx).await;
+            dht.note_peer(peer, slot, None, clock.now());
 
             // M10.3: same as Node::connect — record the claim, then
             // emit Connected with the resulting trust.
@@ -1095,6 +1293,8 @@ async fn accept_loop<B>(
                             ),
                         })
                         .await;
+                    unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
+                    dht.forget_peer(&peer, &slot);
                     return;
                 }
             };
@@ -1109,9 +1309,11 @@ async fn accept_loop<B>(
                 })
                 .await;
 
+            let task_peers = Arc::clone(&peers);
             peer_run(
                 driver,
                 peer,
+                slot,
                 store,
                 clock,
                 auto_serve_pins,
@@ -1120,11 +1322,11 @@ async fn accept_loop<B>(
                 dht.clone(),
                 discovery,
                 trust,
+                task_peers,
             )
             .await;
-            peers.lock().await.remove(&peer);
-            peer_tasks.lock().await.remove(&peer);
-            dht.forget_peer(&peer);
+            unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
+            dht.forget_peer(&peer, &slot);
         });
     }
 }
@@ -1475,10 +1677,22 @@ async fn run_establishment(
 /// Run the establishment flow, then hand off to the steady-state loop.
 ///
 /// Shared by the accept loop and `Node::connect`.
+///
+/// # Generation guard
+///
+/// Before doing anything, and again after the establishment flow
+/// completes, this function confirms that `slot` is still the
+/// currently-registered generation for `peer`. If a newer connection
+/// has already registered in the meantime, the task returns without
+/// touching any node state. The actual protection against a *later*
+/// takeover is the `abort()` performed by `register_peer`; these two
+/// checks are the cheap belt-and-braces for the window between this
+/// task's spawn and the first time it reads the registry.
 #[allow(clippy::too_many_arguments)]
 async fn peer_run<B>(
     mut driver: ConnectionDriver,
     peer: NodeId,
+    slot: PeerSlot,
     store: Arc<Mutex<QuipStore<B>>>,
     clock: SharedClock,
     auto_serve_pins: bool,
@@ -1487,9 +1701,16 @@ async fn peer_run<B>(
     dht: DhtHandle,
     discovery: DiscoveryHandle,
     trust: SharedTrust,
+    peers: PeerRegistry,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
+    // Generation guard #1: are we still the current generation for
+    // this peer?
+    if !peers.lock().await.is_current(&slot) {
+        return;
+    }
+
     // `drive_handshake` returns only after the §16 Key Claim exchange,
     // so both claims are populated. Clone them out before the flow
     // borrows anything; the driver then goes to the steady loop.
@@ -1545,9 +1766,17 @@ async fn peer_run<B>(
         return;
     }
 
+    // Generation guard #2: a newer connection may have registered
+    // while we were running the establishment flow. If so, do not
+    // enter the steady loop — the newer task owns the peer now.
+    if !peers.lock().await.is_current(&slot) {
+        return;
+    }
+
     run_peer_loop(
         &mut driver,
         peer,
+        slot,
         &store,
         &clock,
         auto_serve_pins,
@@ -1570,6 +1799,7 @@ async fn peer_run<B>(
 async fn run_peer_loop<B>(
     driver: &mut ConnectionDriver,
     peer: NodeId,
+    slot: PeerSlot,
     store: &Mutex<QuipStore<B>>,
     clock: &SharedClock,
     auto_serve_pins: bool,
@@ -1628,7 +1858,7 @@ async fn run_peer_loop<B>(
                             // and the claimed NodeId before returning
                             // a result.
                             if let Some(result) = dht::dht_result_from(&m, &peer) {
-                                dht.note_peer(peer, None, now);
+                                dht.note_peer(peer, slot, None, now);
                                 dht.enqueue(result);
                                 continue;
                             }
@@ -2273,7 +2503,8 @@ mod tests {
         let h1 = a.dht();
         let h2 = a.dht();
         let peer: NodeId = [0x42; 32];
-        h1.note_peer(peer, None, a.now());
+        let slot = PeerSlot::new(peer, 1);
+        h1.note_peer(peer, slot, None, a.now());
         assert!(h2.table_contains(&peer));
     }
 
@@ -2436,5 +2667,57 @@ mod tests {
         // Attempting to re-trust does not lift revocation.
         assert!(a.trust_peer(&b_node_id, PeerTrust::Trusted).await);
         assert_eq!(a.peer_trust(&b_node_id).await, PeerTrust::Revoked);
+    }
+
+    // ---- M9.5b-b: peer slots ----
+
+    /// A `NodeId` gets a monotonically-increasing slot across
+    /// reconnects, and `Node::peer_slot` reports the live one.
+    #[tokio::test]
+    async fn peer_slot_increments_across_reconnects() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+        let b_addr = b.local_addr().unwrap();
+        let b_node_id = b.local_node_id();
+
+        // No connection yet.
+        assert!(a.peer_slot(&b_node_id).await.is_none());
+
+        // First connection: generation 1.
+        a.connect(b_addr, "localhost").await.unwrap();
+        let first = a.peer_slot(&b_node_id).await.expect("connected");
+        assert_eq!(first.node_id, b_node_id);
+        assert_eq!(first.generation, 1);
+
+        // Second connection to the same peer: generation 2, and the
+        // first task has been aborted.
+        a.connect(b_addr, "localhost").await.unwrap();
+        let second = a.peer_slot(&b_node_id).await.expect("reconnected");
+        assert_eq!(second.node_id, b_node_id);
+        assert_eq!(second.generation, 2);
+        assert_ne!(first, second);
+    }
+
+    /// `DhtHandle::forget_peer` refuses to remove a record whose slot
+    /// does not match. This is the invariant M9.5b-c relies on for
+    /// routing eligibility cleanup.
+    #[tokio::test]
+    async fn dht_forget_peer_is_slot_scoped() {
+        let a = make_node(1).await;
+        let dht = a.dht();
+        let peer: NodeId = [0x99; 32];
+        let current = PeerSlot::new(peer, 2);
+        let stale = PeerSlot::new(peer, 1);
+
+        dht.note_peer(peer, current, None, a.now());
+        // A stale generation tries to clean up.
+        dht.forget_peer(&peer, &stale);
+        assert!(
+            dht.table_contains(&peer),
+            "stale slot must not remove a live record"
+        );
+        // The current generation can.
+        dht.forget_peer(&peer, &current);
+        assert!(!dht.table_contains(&peer));
     }
 }

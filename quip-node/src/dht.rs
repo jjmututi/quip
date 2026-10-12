@@ -29,13 +29,22 @@
 //! operation the handle performs is synchronous; nothing holds a guard
 //! across an `await`.
 //!
+//! # Generation scoping (M9.5b-b)
+//!
+//! The routing table records a [`PeerSlot`] alongside each peer's
+//! address and last-seen time. This makes `note_peer` idempotent
+//! under re-connections and makes `forget_peer` safe against a stale
+//! generation: a task holding an old slot cannot remove a live
+//! record, because the slot check fails.
+//!
 //! # Scope
 //!
 //! What this module does:
 //!
 //! - Publishes reach every connected peer.
 //! - Inbound §12 verbs are routed into the DHT queue.
-//! - A routing table records connected peers and their last-seen time.
+//! - A routing table records connected peers, their slot, and their
+//!   last-seen time.
 //! - Signature and NodeId checks reject forged or mis-attributed NAT
 //!   verbs.
 //!
@@ -67,9 +76,17 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
+use crate::peer::PeerSlot;
+
 /// What the DHT knows about one peer.
 #[derive(Clone, Debug)]
 pub struct PeerRecord {
+    /// The connection generation this record describes.
+    ///
+    /// Set by [`DhtHandle::note_peer`] from the peer task's slot;
+    /// checked by [`DhtHandle::forget_peer`] so a stale generation
+    /// cannot remove a live record.
+    pub slot: PeerSlot,
     /// The peer's last known address, if any.
     pub addr: Option<SocketAddr>,
     /// RTT class observed for the peer.
@@ -130,10 +147,16 @@ impl DhtHandle {
         self.inner.local_id
     }
 
-    /// Record that `peer` is reachable, updating an existing record.
+    /// Record that `slot`'s connection makes `peer` reachable.
+    ///
+    /// The slot is recorded alongside the peer's address and
+    /// last-seen time. A later call from a newer generation replaces
+    /// the record; [`Self::forget_peer`] refuses to remove a record
+    /// whose slot does not match.
     pub fn note_peer(
         &self,
         peer: NodeId,
+        slot: PeerSlot,
         addr: Option<SocketAddr>,
         now: Timestamp,
     ) {
@@ -141,12 +164,14 @@ impl DhtHandle {
             table
                 .entry(peer)
                 .and_modify(|r| {
+                    r.slot = slot;
                     r.last_seen = now;
                     if addr.is_some() {
                         r.addr = addr;
                     }
                 })
                 .or_insert(PeerRecord {
+                    slot,
                     addr,
                     rtt: RttClass::Local,
                     last_seen: now,
@@ -155,10 +180,22 @@ impl DhtHandle {
         }
     }
 
-    /// Drop `peer` from the routing table.
-    pub fn forget_peer(&self, peer: &NodeId) {
+    /// Drop `peer` from the routing table, but only if the record's
+    /// slot matches `slot`.
+    ///
+    /// A stale generation cannot remove a live record: the check
+    /// `record.slot == *slot` fails and the call is a no-op. This is
+    /// what makes the cleanup path safe against a peer task whose
+    /// slot has already been superseded.
+    pub fn forget_peer(&self, peer: &NodeId, slot: &PeerSlot) {
         if let Ok(mut table) = self.inner.table.lock() {
-            table.remove(peer);
+            let matches = table
+                .get(peer)
+                .map(|r| r.slot == *slot)
+                .unwrap_or(false);
+            if matches {
+                table.remove(peer);
+            }
         }
     }
 
@@ -269,5 +306,80 @@ pub(crate) fn dht_result_from(msg: &Message, peer: &NodeId) -> Option<DhtResult>
             .filter(|ok| *ok)
             .map(|_| DhtResult::Relays(vec![r.clone()])),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quip_core::time::Timestamp;
+
+    fn nid(b: u8) -> NodeId {
+        [b; 32]
+    }
+
+    fn slot(b: u8, g: u64) -> PeerSlot {
+        PeerSlot::new(nid(b), g)
+    }
+
+    fn t(ms: u64) -> Timestamp {
+        Timestamp::from_millis(ms)
+    }
+
+    #[test]
+    fn note_peer_records_slot_and_address() {
+        let (h, _rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        let addr: SocketAddr = "127.0.0.1:4433".parse().unwrap();
+        h.note_peer(peer, slot(2, 1), Some(addr), t(0));
+
+        let snap = h.table_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].0, peer);
+        assert_eq!(snap[0].1.slot, slot(2, 1));
+        assert_eq!(snap[0].1.addr, Some(addr));
+        assert_eq!(snap[0].1.last_seen, t(0));
+    }
+
+    #[test]
+    fn note_peer_replaces_slot_on_new_generation() {
+        let (h, _rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        h.note_peer(peer, slot(2, 1), None, t(0));
+        h.note_peer(peer, slot(2, 2), None, t(10));
+
+        let snap = h.table_snapshot();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].1.slot, slot(2, 2));
+        assert_eq!(snap[0].1.last_seen, t(10));
+    }
+
+    #[test]
+    fn forget_peer_with_current_slot_removes_the_record() {
+        let (h, _rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        h.note_peer(peer, slot(2, 1), None, t(0));
+        h.forget_peer(&peer, &slot(2, 1));
+        assert!(h.table_is_empty());
+    }
+
+    #[test]
+    fn forget_peer_with_stale_slot_is_a_noop() {
+        let (h, _rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        h.note_peer(peer, slot(2, 2), None, t(0));
+        // A task holding generation 1 tries to clean up; the
+        // generation 2 record must survive.
+        h.forget_peer(&peer, &slot(2, 1));
+        assert!(h.table_contains(&peer), "stale slot removed a live record");
+        let snap = h.table_snapshot();
+        assert_eq!(snap[0].1.slot, slot(2, 2));
+    }
+
+    #[test]
+    fn forget_peer_of_unknown_peer_is_a_noop() {
+        let (h, _rx) = DhtHandle::new(nid(1));
+        h.forget_peer(&nid(9), &slot(9, 1));
+        assert!(h.table_is_empty());
     }
 }

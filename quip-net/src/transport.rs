@@ -122,6 +122,21 @@
 //! than the cap gets backpressure from QUIC until an existing stream
 //! closes. This bounds the driver's per-connection stream bookkeeping.
 //!
+//! # RTT observations
+//!
+//! [`ConnectionDriver::rtt`] exposes Quinn's smoothed RTT for the
+//! active path, but only once the driver has confirmed that Quinn has
+//! produced a *real* sample rather than its initial estimate. Quinn
+//! reports an estimate from the moment a connection exists — it is
+//! never zero, and it is never `None`. To distinguish "a real sample
+//! has been measured" from "Quinn is still showing its guess," the
+//! driver records the estimate at handshake completion and flips an
+//! internal `rtt_sampled` flag the first time the value moves by more
+//! than `RTT_SAMPLE_EPSILON`. Until that flip,
+//! [`ConnectionDriver::rtt`] returns `None`. This is the contract
+//! M9.5b's cluster acceptance test depends on: a peer with no confirmed
+//! RTT cannot satisfy §13.2.
+//!
 //! # Certificate handling
 //!
 //! QUIP has no WebPKI (§5). TLS is a confidentiality layer, and identity
@@ -168,6 +183,19 @@ const POLL_TIMEOUT_MS: u64 = 50;
 
 /// Capacity of the per-connection event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 64;
+
+/// Minimum change in Quinn's smoothed RTT that counts as a real sample.
+///
+/// Quinn reports an RTT *estimate* from the moment a connection exists;
+/// it is never zero and never absent. To distinguish "a real sample has
+/// been measured" from "Quinn is still showing its initial guess," the
+/// driver records the estimate at handshake completion and flips
+/// `rtt_sampled` the first time the value moves by more than this much.
+///
+/// 1 ms is deliberately conservative: it is larger than the jitter you
+/// see on a healthy loopback path (which is sub-100 µs), and smaller
+/// than the smallest cross-host RTT we would ever want to accept.
+const RTT_SAMPLE_EPSILON: Duration = Duration::from_millis(1);
 
 // -------------------------------------------------------------------------
 // TLS verifier — skips certificate validation, as required by §5
@@ -558,6 +586,19 @@ pub struct ConnectionDriver {
     /// the retry policy belongs to whichever layer dials the connection.
     backoff: BackoffTracker<NodeId>,
 
+    /// Quinn's smoothed RTT estimate at the moment the handshake
+    /// completed. `None` before the handshake, `Some` afterwards.
+    ///
+    /// Used only to distinguish a real RTT sample from Quinn's initial
+    /// guess. See the module docs and `rtt_sampled`.
+    rtt_baseline: Option<Duration>,
+    /// True once the driver has observed a real RTT sample.
+    ///
+    /// Set the first time Quinn's smoothed RTT moves away from
+    /// `rtt_baseline` by more than `RTT_SAMPLE_EPSILON`. Until then,
+    /// [`Self::rtt`] returns `None` even though Quinn reports a value.
+    rtt_sampled: bool,
+
     // ---- T0 ----
     /// T0 send half, held for the connection's lifetime.
     control_send: Option<quinn::SendStream>,
@@ -606,6 +647,7 @@ impl core::fmt::Debug for ConnectionDriver {
             .field("phase", &self.phase)
             .field("handshake_done", &self.handshake_done)
             .field("key_claim_received", &self.key_claim_received)
+            .field("rtt_sampled", &self.rtt_sampled)
             .finish()
     }
 }
@@ -644,6 +686,8 @@ impl ConnectionDriver {
             rate_limiter: RateLimiter::new(),
             sync_stream: SyncStream::new(),
             backoff: BackoffTracker::new(),
+            rtt_baseline: None,
+            rtt_sampled: false,
             control_send: None,
             control_recv: None,
             sync_send: None,
@@ -765,6 +809,59 @@ impl ConnectionDriver {
         self.handshake_done && self.key_claim_received
     }
 
+    /// Current RTT of the active path, if a real sample has been
+    /// observed.
+    ///
+    /// Returns `None` until Quinn has produced an RTT measurement that
+    /// differs from the estimate it reported at handshake completion.
+    /// See the module docs under "RTT observations" for the reasoning.
+    ///
+    /// A `None` return does not mean the connection is unhealthy — it
+    /// means no *confirmed* observation has been made yet. §13.2's
+    /// cluster acceptance test treats `None` as "no valid sample"; it
+    /// does not substitute zero.
+    pub fn rtt(&self) -> Option<Duration> {
+        if self.rtt_sampled {
+            Some(self.conn.stats().path.rtt)
+        } else {
+            None
+        }
+    }
+
+    /// Update the RTT bookkeeping from Quinn's current statistics.
+    ///
+    /// Called at the top of every [`Self::poll`], and again
+    /// immediately after `poll_handshake` transitions the driver to
+    /// `Established` so the baseline is captured on the same tick the
+    /// handshake completes. No-op while the driver is not yet
+    /// `Established`.
+    fn observe_rtt(&mut self) {
+        if self.phase != DriverPhase::Established {
+            return;
+        }
+        let current = self.conn.stats().path.rtt;
+        match self.rtt_baseline {
+            None => {
+                // First observation after the handshake: record
+                // Quinn's current estimate as the baseline. This is
+                // what we will compare future samples against.
+                self.rtt_baseline = Some(current);
+            }
+            Some(baseline) => {
+                if !self.rtt_sampled {
+                    let diff = if current > baseline {
+                        current - baseline
+                    } else {
+                        baseline - current
+                    };
+                    if diff > RTT_SAMPLE_EPSILON {
+                        self.rtt_sampled = true;
+                    }
+                }
+            }
+        }
+    }
+
     // ---------------------------------------------------------------------
     // Poll — handshake, Key Claim exchange, event drain
     // ---------------------------------------------------------------------
@@ -794,11 +891,18 @@ impl ConnectionDriver {
             return Err(Error::Transport(format!("connection closed: {err}")));
         }
 
+        // Sample RTT first so subsequent paths see the freshest value.
+        // No-op until `Established`.
+        self.observe_rtt();
+
         // ---- Handshake + Key Claim path ----
         if self.phase != DriverPhase::Established {
             let events = self.poll_handshake(now).await?;
             let events = self.apply_rate_limits(events, now);
             self.note_events(&events, now);
+            // The handshake just completed; capture the baseline now
+            // so the next poll can compare against it.
+            self.observe_rtt();
             return Ok(events);
         }
 
@@ -2477,5 +2581,45 @@ mod tests {
         })
         .await;
         assert!(seen.is_some(), "server did not see cross_path_validation");
+    }
+
+    // =====================================================================
+    // M9.5b-b — RTT observation gating
+    // =====================================================================
+
+    /// `rtt()` is `None` before the handshake completes: the driver
+    /// has no baseline yet and no way to distinguish a sample from
+    /// Quinn's initial estimate.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rtt_is_none_before_handshake() {
+        let (server, addr) = server_endpoint(1);
+        let server_task = tokio::spawn(async move {
+            server.accept().await.unwrap().unwrap()
+        });
+        let client = client_endpoint(2);
+        let client_driver = client.connect(addr, "localhost").await.unwrap();
+        assert_eq!(
+            client_driver.rtt(),
+            None,
+            "rtt must be None before the handshake completes"
+        );
+        drop(client_driver);
+        let _ = server_task.await;
+    }
+
+    /// After the handshake completes, `rtt()` returns either `None`
+    /// (no confirmed sample yet) or a plausible duration. On loopback
+    /// the driver may or may not have flipped `rtt_sampled` by the
+    /// time the caller looks; the contract is only that the value is
+    /// either absent or real.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn rtt_is_absent_or_plausible_after_handshake() {
+        let (_server, client) = handshake_pair(1, 2).await;
+        if let Some(rtt) = client.rtt() {
+            assert!(
+                rtt < Duration::from_secs(10),
+                "rtt {rtt:?} is not plausible for a fresh connection"
+            );
+        }
     }
 }

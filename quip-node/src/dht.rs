@@ -98,6 +98,7 @@
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
 use quip_net::cluster::ClusterInfo;
+use quip_net::coral::select_witness_ring;
 use quip_net::crypto::Ed25519Verifier;
 use quip_net::dht::RttClass;
 use quip_net::message::Message;
@@ -106,7 +107,7 @@ use quip_net::nat_wire::{
     CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery,
 };
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -127,9 +128,15 @@ pub struct PeerRecord {
     pub addr: Option<SocketAddr>,
     /// RTT class observed for the peer.
     ///
-    /// Defaults to `Local` and is not updated until M9.5 measures RTTs;
-    /// recorded here so the shape is stable across milestones.
+    /// Defaults to `Local` and is updated by [`DhtHandle::note_rtt`]
+    /// when a raw sample is recorded.
     pub rtt: RttClass,
+    /// The peer's most recent raw RTT sample, in milliseconds.
+    ///
+    /// `None` until a real sample is recorded. §5 of the design note:
+    /// a peer with no confirmed RTT cannot contribute a valid §13.2
+    /// sample, so `None` is never treated as zero. Added in M9.5b-c.
+    pub rtt_ms: Option<u64>,
     /// When the record was last refreshed.
     pub last_seen: Timestamp,
     /// Cluster info the peer has announced, if any.
@@ -148,15 +155,19 @@ pub struct PeerRecord {
 
 /// One outbound message with an optional specific destination.
 ///
-/// Mesh-shaped verbs carry `target: None` and are forwarded to every
-/// connected peer; peer-scoped verbs carry `Some(peer)` and are
-/// forwarded only to that peer's sender. When the target peer is
-/// unknown, the message is dropped — a candidate announcement sent to
-/// the wrong peer would be a protocol violation, and there is no
-/// fallback route.
+/// Mesh-shaped verbs carry `target: None` and a `key` naming the
+/// Coral routing key; the router forwards them to the `k` closest
+/// routing-eligible peers rather than broadcasting. Peer-scoped verbs
+/// carry `Some(peer)` and `key: None`, and are forwarded only to that
+/// peer's sender. When the target peer is unknown, the message is
+/// dropped — a candidate announcement sent to the wrong peer would be
+/// a protocol violation, and there is no fallback route.
 pub(crate) struct Outbound {
-    /// Destination peer, or `None` to broadcast.
+    /// Destination peer, or `None` for a mesh verb.
     pub(crate) target: Option<NodeId>,
+    /// Coral routing key for a mesh verb, or `None` for peer-scoped
+    /// verbs.
+    pub(crate) key: Option<NodeId>,
     /// The wire message.
     pub(crate) msg: Message,
 }
@@ -274,6 +285,7 @@ impl DhtHandle {
                     slot,
                     addr,
                     rtt: RttClass::Local,
+                    rtt_ms: None,
                     last_seen: now,
                     cluster: None,
                     lifecycle: PeerLifecycle::Established,
@@ -325,6 +337,46 @@ impl DhtHandle {
                 }
             }
         }
+    }
+
+    /// Record a raw RTT sample for `peer`, slot-scoped.
+    ///
+    /// §5 of `docs/M9.5b-design.md`: a peer with no confirmed RTT
+    /// cannot contribute a valid §13.2 sample, and missing samples are
+    /// not represented as zero. `PeerRecord::rtt_ms == None` is the
+    /// "no valid sample" state; this method records a concrete value.
+    /// Like [`Self::update_lifecycle`], a stale generation's sample is
+    /// a no-op against a live record.
+    ///
+    /// Added in M9.5b-c part 7.
+    pub fn note_rtt(&self, peer: &NodeId, slot: &PeerSlot, rtt_ms: u64) {
+        if let Ok(mut table) = self.inner.table.lock() {
+            if let Some(r) = table.get_mut(peer) {
+                if r.slot == *slot {
+                    r.rtt_ms = Some(rtt_ms);
+                    r.rtt = RttClass::classify(rtt_ms);
+                }
+            }
+        }
+    }
+
+    /// The `k` routing-eligible peers closest (by XOR distance) to
+    /// `key`.
+    ///
+    /// Coral routing consults this to forward a mesh verb toward the
+    /// peers most responsible for `key` instead of broadcasting to
+    /// every connected peer. When fewer than `k` peers are eligible,
+    /// all of them are returned.
+    ///
+    /// Added in M9.5b-c part 7.
+    pub fn closest_to(&self, key: &NodeId, k: usize) -> Vec<NodeId> {
+        let candidates: Vec<NodeId> = self
+            .routing_eligible_records()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let reachable: BTreeSet<NodeId> = candidates.iter().copied().collect();
+        select_witness_ring(key, &candidates, &reachable, k)
     }
 
     /// Enqueue an inbound result for the next [`DhtClient::poll`].
@@ -392,8 +444,10 @@ impl DhtHandle {
 
 impl DhtClient for DhtHandle {
     fn publish_connectivity(&mut self, announce: ConnectivityAnnounce) {
+        let key = announce.node_id;
         let _ = self.inner.outbound_tx.send(Outbound {
             target: None,
+            key: Some(key),
             msg: Message::ConnectivityAnnounce(announce),
         });
     }
@@ -420,6 +474,7 @@ impl DhtClient for DhtHandle {
         if let Some(target) = target {
             let _ = self.inner.outbound_tx.send(Outbound {
                 target: Some(target),
+                key: None,
                 msg: Message::CandidateAnnounce(announce),
             });
         }
@@ -452,13 +507,16 @@ impl DhtClient for DhtHandle {
         };
         let _ = self.inner.outbound_tx.send(Outbound {
             target: Some(target),
+            key: None,
             msg: Message::CandidateAnnounce(announce),
         });
     }
 
     fn discover_relays(&mut self, discovery: RelayDiscovery) {
+        let key = discovery.target;
         let _ = self.inner.outbound_tx.send(Outbound {
             target: None,
+            key: Some(key),
             msg: Message::RelayDiscovery(discovery),
         });
     }
@@ -764,5 +822,55 @@ mod tests {
         h.publish_connectivity(announce);
         let out = rx.try_recv().expect("an outbound");
         assert_eq!(out.target, None);
+    }
+
+    // ---- M9.5b-c part 7: RTT sampling and XOR routing ----
+
+    /// `note_rtt` records the raw sample and derives the RTT class.
+    #[test]
+    fn note_rtt_records_sample_and_class() {
+        let (h, _rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        let s = slot(2, 1);
+        h.note_peer(peer, s, None, t(0));
+
+        h.note_rtt(&peer, &s, 20);
+        let snap = h.table_snapshot();
+        assert_eq!(snap[0].1.rtt_ms, Some(20));
+        assert_eq!(snap[0].1.rtt, RttClass::Local);
+
+        h.note_rtt(&peer, &s, 50);
+        let snap = h.table_snapshot();
+        assert_eq!(snap[0].1.rtt_ms, Some(50));
+        assert_eq!(snap[0].1.rtt, RttClass::Regional);
+    }
+
+    /// `note_rtt` from a stale generation is a no-op against a live
+    /// record.
+    #[test]
+    fn note_rtt_stale_slot_is_noop() {
+        let (h, _rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        h.note_peer(peer, slot(2, 2), None, t(0));
+
+        h.note_rtt(&peer, &slot(2, 1), 20);
+        let snap = h.table_snapshot();
+        assert_eq!(snap[0].1.rtt_ms, None);
+    }
+
+    /// `closest_to` returns only routing-eligible peers, ordered by
+    /// XOR distance from the key.
+    #[test]
+    fn closest_to_orders_by_xor_distance_and_filters_ineligible() {
+        let (h, _rx) = DhtHandle::new(nid(0));
+        h.note_peer(nid(1), slot(1, 1), None, t(0));
+        h.note_peer(nid(2), slot(2, 1), None, t(0));
+        h.note_peer(nid(3), slot(3, 1), None, t(0));
+        h.update_lifecycle(&nid(1), &slot(1, 1), PeerLifecycle::NatDirect);
+        h.update_lifecycle(&nid(2), &slot(2, 1), PeerLifecycle::NatDirect);
+        // nid(3) stays Established → ineligible.
+
+        let closest = h.closest_to(&nid(0), 2);
+        assert_eq!(closest, vec![nid(1), nid(2)]);
     }
 }

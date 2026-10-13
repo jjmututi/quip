@@ -471,14 +471,17 @@ fn log2_diff_exceeds(a: u64, b: u64, delta: u64) -> bool {
     }
 }
 
-/// True if the `percentile`-th percentile of `values` is at most
-/// `max_value`.
+/// The `percentile`-th percentile of `values`, or `None` if empty.
 ///
 /// Uses the nearest-rank method: sort ascending, then take the element
 /// at index `ceil(percentile/100 * N) - 1`, clamped to `N - 1`.
-fn percentile_at_or_below(values: &[u64], percentile: u8, max_value: u64) -> bool {
+///
+/// Exposed for the node layer, which needs the raw percentile value to
+/// feed [`ClusterState::note_rtt_observation`]; the boolean threshold
+/// check [`ClusterState::is_acceptable`] performs is derived from it.
+pub fn percentile(values: &[u64], percentile: u8) -> Option<u64> {
     if values.is_empty() {
-        return false;
+        return None;
     }
     let n = values.len() as u64;
     let p = percentile.min(100) as u64;
@@ -487,7 +490,15 @@ fn percentile_at_or_below(values: &[u64], percentile: u8, max_value: u64) -> boo
         .min(n - 1) as usize;
     let mut sorted: Vec<u64> = values.to_vec();
     sorted.sort_unstable();
-    sorted[idx] <= max_value
+    Some(sorted[idx])
+}
+
+/// True if the `percentile`-th percentile of `values` is at most
+/// `max_value`.
+fn percentile_at_or_below(values: &[u64], percentile: u8, max_value: u64) -> bool {
+    self::percentile(values, percentile)
+        .map(|v| v <= max_value)
+        .unwrap_or(false)
 }
 
 // -------------------------------------------------------------------------

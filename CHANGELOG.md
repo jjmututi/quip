@@ -41,6 +41,11 @@ a signed `relay_discovery`, a `relay_capable` peer answers with a
 signed `relay_response`, and the requester's lifecycle concludes
 `PeerLifecycle::NatRelayed`. Inbound §12 verbs during the NAT phase
 are verified by `dht_result_from` before reaching the state machine.
+The node now samples each peer connection's RTT into its routing
+table and derives a cluster member set from the routing-eligible
+peers that fall within the cluster's §13.2 threshold. Mesh verbs are
+routed by XOR distance to the `GATEWAY_ROUTER_COUNT` closest
+eligible peers rather than broadcast to every connected peer.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -129,7 +134,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster merge/split, XOR routing | in progress |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster membership and XOR routing; cluster split execution deferred to M9.6 | in progress |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
@@ -821,6 +826,54 @@ Tests: `relay_path_produces_nat_relayed` (lib.rs);
 `force_relay_for_overrides_config`,
 `force_relay_for_unknown_session_is_noop` (nat.rs).
 
+### M9.5b-c (part 7) — cluster membership and XOR routing — LANDED
+
+The node now runs the Coral cluster machine against its
+routing-eligible peers and routes mesh verbs by XOR distance.
+
+`quip-net/src/cluster.rs`. `percentile` is a public nearest-rank
+helper factored out of `percentile_at_or_below`; the node layer needs
+the raw percentile, not the boolean threshold check.
+
+`quip-node/src/dht.rs`. `PeerRecord` gains `rtt_ms: Option<u64>` —
+`None` is "no valid sample" and never counts as zero (§5 of the
+design note). `DhtHandle::note_rtt` records a slot-scoped sample and
+derives the `RttClass`. `DhtHandle::closest_to(key, k)` returns the k
+closest routing-eligible peers by XOR distance. `Outbound` gains a
+`key` field: mesh verbs carry their Coral routing key, peer-scoped
+verbs carry `None`.
+
+`quip-node/src/cluster.rs` (new). `ClusterHandle` owns a
+`ClusterState` and `ClusterConfig`. `recompute` derives members
+(routing-eligible peers within the level's RTT threshold), applies
+the §13.2 acceptance test, updates the §13.6 size estimate, and
+returns a `ClusterView { id, level, size, members, acceptable,
+split_due }`.
+
+`quip-node/src/lib.rs`. `Node` gains a `ClusterHandle` at the `Local`
+tier (id derived from its `NodeId`). `run_peer_loop` samples
+`driver.rtt()` into `note_rtt`. `dht_router_task` forwards mesh verbs
+to the `GATEWAY_ROUTER_COUNT` closest eligible peers.
+`Node::cluster()` and `Node::cluster_view()` expose the handle and the
+snapshot.
+
+Deliberately not in this commit. Merge/split execution — choosing a
+split target and migrating the cluster id — needs neighbour
+`ClusterInfo`, which no peer yet reports; it lands with the
+multi-cluster state M9.6 introduces. `acceptable` and `split_due` are
+computed independently: acceptance is instantaneous, while a split
+fires only after a sustained over-threshold period (§13.5), so the
+two can disagree. That is the intended reading, but it is not yet
+documented in code.
+
+Tests: `note_rtt_records_sample_and_class`,
+`note_rtt_stale_slot_is_noop`,
+`closest_to_orders_by_xor_distance_and_filters_ineligible` (dht.rs);
+`fresh_cluster_has_no_members_and_fails_acceptance`,
+`members_are_eligible_peers_within_threshold`,
+`missing_rtt_samples_are_not_members` (cluster.rs);
+`cluster_starts_local_and_routes_to_eligible_peer` (lib.rs).
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -1270,6 +1323,16 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`try_serve_relay_discovery`) | M9.5b-c | signed relay_response for inbound discovery |
 | `quip-node/src/lib.rs` (`NodeConfig::force_relay`) | M9.5b-c | force sessions onto the relay branch |
 | `quip-node/src/lib.rs` (`NodeConfig::relay_capable`) | M9.5b-c | opt-in relay responder |
+| `quip-net/src/cluster.rs` (`percentile`) | M9.5b-c | nearest-rank percentile helper |
+| `quip-net/src/cluster.rs` (`ClusterState::update_size`) | M2, M9.5b-c | §13.6 size-estimate input |
+| `quip-net/src/cluster.rs` (`ClusterState::note_rtt_observation`) | M2, M9.5b-c | split-timer input |
+| `quip-node/src/dht.rs` (`PeerRecord::rtt_ms`) | M9.5b-c | raw RTT sample field |
+| `quip-node/src/dht.rs` (`DhtHandle::note_rtt`) | M9.5b-c | slot-scoped RTT sample |
+| `quip-node/src/dht.rs` (`DhtHandle::closest_to`) | M9.5b-c | XOR-distance routing selection |
+| `quip-node/src/dht.rs` (`Outbound::key`) | M9.5b-c | mesh-verb routing key |
+| `quip-node/src/cluster.rs` (`ClusterHandle`) | M9.5b-c | node-level cluster state |
+| `quip-node/src/cluster.rs` (`ClusterView`) | M9.5b-c | derived membership snapshot |
+| `quip-node/src/lib.rs` (`Node::cluster`, `Node::cluster_view`) | M9.5b-c | cluster accessors |
 | `quip-node/src/lib.rs` (`run_nat_phase`) | M9.5b-c | NAT phase driven through `NatDriver` |
 | `quip-node/src/lib.rs` (`NatPhaseOutcome`) | M9.5b-c | NAT phase terminal outcome |
 | `quip-node/src/lib.rs` (`socket_to_address`, `local_ip_address`) | M9.5b-c | socket/address conversion |
@@ -1316,7 +1379,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`Node::connect`) | M9.1, M9.4a, M9.5b-b | dial + inline handshake + slot registration |
 | `quip-node/src/lib.rs` (`Node::store` and direct helpers) | M9.2 | store access and pin API |
 | `quip-node/src/lib.rs` (`try_auto_serve_pins`) | M9.2 | pin/unpin/query_pins auto-serve |
-| `quip-node/src/lib.rs` (`dht_router_task`) | M9.4a, M9.5b-c | peer-scoped and mesh routing |
+| `quip-node/src/lib.rs` (`dht_router_task`) | M9.4a, M9.5b-c | peer-scoped and XOR mesh routing |
 | `quip-node/src/lib.rs` (`run_peer_loop` DHT branch) | M9.4a | intercept §12 NAT verbs |
 | `quip-node/src/dht.rs:1` | M9.4a, M9.5b-b, M9.5b-c | live `DhtClient`, slot-aware routing table, lifecycle mirror |
 | `quip-node/src/dht.rs` (`LiveDht`) | M9.4a | DHT client implementation |
@@ -1381,6 +1444,8 @@ consumed in M9.5b-c), `message.rs` BFT arms (M4), `bft.rs` (M4),
 next touch is cheap.
 
 **M9.5b-c note.** M9.5b-c now owns partial landed work (gates 5 and
-6, plus parts 2–6). The remaining integration (cluster merge/split
-against the routing-eligible set, XOR-distance routing) lands in a
-later commit under the same milestone label.
+6, plus parts 2–7). Membership derivation and XOR-distance routing
+are landed; cluster merge/split *execution* — choosing a split target
+and migrating the cluster id — is deferred to M9.6, which is where
+neighbour `ClusterInfo` exchange lands. The milestone row stays `in
+progress` until that migration lands.

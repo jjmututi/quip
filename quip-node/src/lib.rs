@@ -329,6 +329,7 @@
 //! # }
 //! ```
 
+pub mod cluster;
 pub mod dht;
 pub mod discovery;
 pub mod peer;
@@ -338,6 +339,7 @@ use quip_core::cid::{CidOrV1, HashAlgo};
 use quip_core::dvv::NodeId;
 use quip_core::messages::{KeyClaim, PinEntry, Signer};
 use quip_core::time::{Clock, SystemClock, Timestamp};
+use quip_net::cluster::ClusterLevel;
 use quip_net::coral::LookupPath;
 use quip_net::crypto::{Ed25519Signer, Ed25519Verifier};
 use quip_net::discovery::{
@@ -357,7 +359,7 @@ use quip_net::nat_wire::{
 use quip_net::transport::{
     ClientConfig, ConnectionDriver, Endpoint, Event, ServerConfig,
 };
-use quip_net::{Error, Result};
+use quip_net::{Error, GATEWAY_ROUTER_COUNT, Result};
 use quip_storage::blob::{BlobStore, BlobStoreMut};
 use quip_storage::{CidTagging, ContentHasher, MemoryBlobStore, QuipStore};
 
@@ -376,6 +378,8 @@ use discovery::DiscoveryHandle;
 pub use peer::{PeerLifecycle, PeerSlot};
 // M10.3: the trust policy and the trust level that peer events carry.
 use trust::{PeerTrust, TrustPolicy};
+// M9.5b-c part 7: cluster membership over the routing-eligible set.
+use cluster::{ClusterHandle, ClusterView};
 
 /// Capacity of the node's event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
@@ -958,6 +962,9 @@ pub struct Node<B = MemoryBlobStore> {
     /// The node's trust policy. Shared with every peer task and with
     /// the application through [`Node::trust_peer`].
     trust: SharedTrust,
+    /// The node's cluster state, driving membership derivation and
+    /// the §13.2 acceptance test over the routing-eligible set.
+    cluster: ClusterHandle,
 }
 
 impl Node<MemoryBlobStore> {
@@ -1006,9 +1013,18 @@ where
         let dht_task = tokio::spawn(dht_router_task(
             dht_outbound_rx,
             Arc::clone(&peers),
+            dht.clone(),
         ));
 
         let discovery = DiscoveryHandle::new(Arc::clone(&config.signer));
+
+        // A fresh node is its own cluster: the cluster id is derived
+        // from its own NodeId, at the innermost (Local) tier. Merging
+        // and splitting move it up and down the hierarchy as RTT
+        // observations accumulate.
+        let mut cluster_id = [0u8; 16];
+        cluster_id.copy_from_slice(&local_id[..16]);
+        let cluster = ClusterHandle::new(cluster_id, ClusterLevel::Local, clock.now());
 
         let accept_endpoint = Arc::clone(&endpoint);
         let accept_peers = Arc::clone(&peers);
@@ -1060,6 +1076,7 @@ where
             dht_task: Some(dht_task),
             discovery,
             trust,
+            cluster,
         })
     }
 
@@ -1335,6 +1352,24 @@ where
         self.dht.clone()
     }
 
+    /// A clone of the node's cluster handle.
+    ///
+    /// Clones share the underlying cluster state. The application
+    /// derives a fresh membership snapshot with [`Node::cluster_view`],
+    /// or recomputes manually via `cluster.recompute(&node.dht(), now)`.
+    pub fn cluster(&self) -> ClusterHandle {
+        self.cluster.clone()
+    }
+
+    /// Derive and return the node's current cluster membership.
+    ///
+    /// Reads the routing-eligible set and RTT samples from the DHT
+    /// table, advances the cluster state machine, and returns the
+    /// resulting snapshot.
+    pub fn cluster_view(&self) -> ClusterView {
+        self.cluster.recompute(&self.dht, self.clock.now())
+    }
+
     /// A clone of the node's Coral discovery handle.
     ///
     /// Clones share the ring and spillover caches and the in-flight
@@ -1503,6 +1538,7 @@ impl<B> Drop for Node<B> {
 async fn dht_router_task(
     mut rx: mpsc::UnboundedReceiver<dht::Outbound>,
     peers: PeerRegistry,
+    dht: DhtHandle,
 ) {
     while let Some(out) = rx.recv().await {
         let senders: Vec<mpsc::Sender<Message>> = {
@@ -1512,7 +1548,20 @@ async fn dht_router_task(
                     .outbound_of(&peer)
                     .into_iter()
                     .collect(),
-                None => reg.peers.values().map(|h| h.outbound.clone()).collect(),
+                None => {
+                    // Mesh verb: forward to the k closest routing-eligible
+                    // peers by XOR distance, not the whole mesh. A mesh verb
+                    // always carries a key; if it does not, fall back to
+                    // broadcast.
+                    let targets: Vec<NodeId> = match out.key {
+                        Some(key) => dht.closest_to(&key, GATEWAY_ROUTER_COUNT),
+                        None => reg.peers.keys().copied().collect(),
+                    };
+                    targets
+                        .into_iter()
+                        .filter_map(|p| reg.outbound_of(&p))
+                        .collect()
+                }
             }
         };
         for tx in senders {
@@ -2732,6 +2781,15 @@ async fn run_peer_loop<B>(
             }
         }
 
+        // M9.5b-c part 7: sample RTT for cluster membership. A peer
+        // is routing-eligible only after NatDirect/NatRelayed, so the
+        // steady loop is where a confirmed sample first becomes
+        // available.
+        if let Some(rtt) = driver.rtt() {
+            let ms = rtt.as_millis() as u64;
+            dht.note_rtt(&peer, &slot, ms);
+        }
+
         // Poll inbound; `driver.poll` blocks up to POLL_TIMEOUT_MS
         // internally, which yields this task to the runtime on every
         // iteration.
@@ -3845,6 +3903,36 @@ mod tests {
             eligible.iter().any(|s| s.node_id == b_node_id),
             "B should be routing-eligible for A after a relayed path; \
              got {eligible:?}",
+        );
+    }
+
+    // ---- M9.5b-c (part 7): cluster membership and XOR routing ----
+
+    /// A node's cluster starts as its own `Local` cluster, id derived
+    /// from its NodeId; after a peer becomes routing-eligible, XOR
+    /// routing can reach it.
+    #[tokio::test]
+    async fn cluster_starts_local_and_routes_to_eligible_peer() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (b, _) = make_node_with_clock(2).await;
+
+        let a_node_id = a.local_node_id();
+        let b_node_id = b.local_node_id();
+        let b_addr = b.local_addr().unwrap();
+
+        let view = a.cluster_view();
+        assert_eq!(view.level, ClusterLevel::Local);
+        assert_eq!(&view.id[..], &a_node_id[..16]);
+        assert!(view.members.is_empty());
+
+        a.connect(b_addr, "localhost").await.unwrap();
+        let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
+
+        // B is routing-eligible, so XOR routing can find it.
+        let closest = a.dht().closest_to(&b_node_id, GATEWAY_ROUTER_COUNT);
+        assert!(
+            closest.contains(&b_node_id),
+            "XOR routing should reach B: {closest:?}",
         );
     }
 }

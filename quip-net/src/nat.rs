@@ -28,6 +28,22 @@
 //! `NatRelayed` means "the NAT phase concluded without a direct path,"
 //! not "traffic flows through the relay."
 //!
+//! # Forced relay
+//!
+//! A session can be told to skip the direct-candidate ladder entirely,
+//! via [`NatConfig::force_relay`] (per-node default) or
+//! [`NatTraversal::force_relay_for`] (per-session override). A forced
+//! session goes straight to `RequestRelays` on the first poll; it
+//! never probes an inbound candidate.
+//!
+//! Forced relay is a policy decision, not a failure: a node behind a
+//! symmetric NAT can know a priori that direct candidates will fail
+//! and skip the probe ladder. The terminal event is the same
+//! [`NatEvent::RelayedPathEstablished`], and the `NatRelayed` semantics
+//! the design note assigns to it apply unchanged. A forced session
+//! still publishes its *own* candidates — only the inbound direct path
+//! is refused.
+//!
 //! # Legacy types removed in M3a
 //!
 //! `Candidate`, `CandidateKind`, `ConnectivityAnnounce`,
@@ -450,6 +466,18 @@ pub struct NatConfig {
     ///
     /// The spec recommends 90% for stable networks.
     pub max_reannounce_percent: u64,
+    /// Force every session started by this traversal onto the relay
+    /// branch.
+    ///
+    /// A node behind a symmetric NAT can know a priori that direct
+    /// candidates will fail, and skip the probe ladder. The default
+    /// (`false`) leaves the four-phase ladder unchanged. Individual
+    /// sessions can be forced after the fact via
+    /// [`NatTraversal::force_relay_for`], which overrides this default
+    /// upward (there is no way to un-force a forced session).
+    ///
+    /// Added in M9.5b-c part 6.
+    pub force_relay: bool,
 }
 
 impl Default for NatConfig {
@@ -465,6 +493,7 @@ impl Default for NatConfig {
             relay_discovery_timeout_ms: 30_000,
             min_reannounce_percent: 50,
             max_reannounce_percent: 90,
+            force_relay: false,
         }
     }
 }
@@ -795,6 +824,17 @@ pub struct SessionState {
     /// skips it, and no further probes or relay requests are emitted
     /// for it. The value is the relay's `NodeId`.
     pub relay_outcome: Option<NodeId>,
+    /// True when this session must use the relay branch.
+    ///
+    /// Set from [`NatConfig::force_relay`] at `start_session`, or
+    /// explicitly via [`NatTraversal::force_relay_for`]. A forced
+    /// session skips the direct-candidate ladder in
+    /// [`NatTraversal::poll`] entirely and goes straight to
+    /// `RequestRelays`. It still publishes its own candidates; only
+    /// the inbound direct path is refused.
+    ///
+    /// Added in M9.5b-c part 6.
+    pub force_relay: bool,
 }
 
 /// A request the driver should fulfil.
@@ -1046,6 +1086,7 @@ impl NatTraversal {
         }
 
         // Per-session maintenance. The ordering is:
+        //   0. A forced session skips 1 and 2 entirely and falls to 3.
         //   1. Try any unprobed direct candidate.
         //   2. If candidates are exhausted, wait out the collection window
         //      before falling back — the DHT may still be responding.
@@ -1072,24 +1113,38 @@ impl NatTraversal {
                 continue;
             }
 
-            // 1. Direct candidates always take priority.
-            if let Some(c) = session.candidates.next_to_probe(now, ttl) {
-                probes.push(Outbound::ProbeCandidate {
-                    session_id: *sid,
-                    peer: session.peer,
-                    candidate: c,
-                });
-                continue;
-            }
+            // 0. Forced-relay sessions skip the direct ladder entirely.
+            //    The relay request fires on the first poll after the
+            //    session starts; no candidates are probed and the
+            //    candidate-collection window does not apply.
+            if session.force_relay {
+                if session.relay_request_id.is_none() {
+                    relay_requests.push((*sid, session.peer));
+                    continue;
+                }
+                // Fall through to the relay timeout check below.
+            } else {
+                // 1. Direct candidates always take priority.
+                if let Some(c) = session.candidates.next_to_probe(now, ttl) {
+                    probes.push(Outbound::ProbeCandidate {
+                        session_id: *sid,
+                        peer: session.peer,
+                        candidate: c,
+                    });
+                    continue;
+                }
 
-            // 2. Nothing to probe yet. Wait for the collection window if
-            //    we have not seen a single candidate.
-            let candidate_deadline = session
-                .started_at
-                .as_millis()
-                .saturating_add(candidate_window_ms);
-            if now.as_millis() < candidate_deadline && session.candidates.remote_len() == 0 {
-                continue;
+                // 2. Nothing to probe yet. Wait for the collection window
+                //    if we have not seen a single candidate.
+                let candidate_deadline = session
+                    .started_at
+                    .as_millis()
+                    .saturating_add(candidate_window_ms);
+                if now.as_millis() < candidate_deadline
+                    && session.candidates.remote_len() == 0
+                {
+                    continue;
+                }
             }
 
             // 3. Fall back to relay discovery, exactly once per session.
@@ -1389,6 +1444,9 @@ impl NatTraversal {
                 relay_requested_at: None,
                 relays: Vec::new(),
                 relay_outcome: None,
+                // The per-node default; `force_relay_for` can raise this
+                // to `true` for a specific session afterwards.
+                force_relay: self.config.force_relay,
             },
         );
 
@@ -1412,6 +1470,28 @@ impl NatTraversal {
             peer,
             session_id,
         });
+    }
+
+    /// Force `session_id` onto the relay branch.
+    ///
+    /// After this call, [`Self::poll`] skips the direct-candidate
+    /// ladder for the session and goes straight to `RequestRelays`. The
+    /// session's own candidates are still published; only the *inbound*
+    /// direct path is refused.
+    ///
+    /// There is no un-force: a session that has been forced stays
+    /// forced. Forcing is a policy decision ("this session cannot go
+    /// direct"), and un-deciding it mid-session has no sensible
+    /// semantics. The only caller that would want to is a test, and a
+    /// test can start a fresh session instead.
+    ///
+    /// Idempotent; a no-op for an unknown session.
+    ///
+    /// Added in M9.5b-c part 6.
+    pub fn force_relay_for(&mut self, session_id: &[u8; 16]) {
+        if let Some(s) = self.sessions.get_mut(session_id) {
+            s.force_relay = true;
+        }
     }
 
     /// Record a probe result for a session.
@@ -2194,5 +2274,82 @@ mod tests {
 
         s.observe(nid(3), Address::V4 { ip: [127, 0, 0, 20], port: 9999 });
         assert!(!s.port_preservation());
+    }
+
+    // ---- M9.5b-c part 6: forced relay ----
+
+    /// A traversal with `NatConfig::force_relay = true` skips the direct
+    /// ladder: on the first poll, the session emits `RequestRelays`
+    /// rather than `ProbeCandidate`, even though it has never received a
+    /// candidate.
+    #[test]
+    fn force_relay_from_config_skips_direct_candidates() {
+        use crate::nat_wire::{Candidate, CANDIDATE_HOST};
+        let config = NatConfig {
+            force_relay: true,
+            ..NatConfig::default()
+        };
+        let mut n = NatTraversal::new(nid(1), addr(1), config);
+
+        n.start_session(nid(2), [0u8; 16], now());
+        // A remote candidate arrives; the forced session must ignore it.
+        n.on_candidate_announce(
+            CandidateAnnounce {
+                node_id: nid(2),
+                candidates: vec![Candidate {
+                    addr: addr(10),
+                    kind: CANDIDATE_HOST,
+                    priority: 100,
+                    foundation: "f".into(),
+                    component: 0,
+                }],
+                session_id: [0u8; 16],
+                timestamp: now(),
+                signature: [0u8; 64],
+            },
+            now(),
+        );
+
+        let out = n.poll(now());
+        assert!(
+            !out.iter().any(|o| matches!(o, Outbound::ProbeCandidate { .. })),
+            "forced session must not probe: {out:?}",
+        );
+        assert!(
+            out.iter().any(|o| matches!(
+                o,
+                Outbound::RequestRelays { target, .. } if target == &nid(2)
+            )),
+            "forced session must request relays on the first poll: {out:?}",
+        );
+        let session = n.session(&[0u8; 16]).expect("session");
+        assert!(session.force_relay);
+    }
+
+    /// `force_relay_for` raises the per-session flag even when the
+    /// config default is `false`. The session behaves identically to a
+    /// config-forced one.
+    #[test]
+    fn force_relay_for_overrides_config() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        n.start_session(nid(2), [0u8; 16], now());
+        n.force_relay_for(&[0u8; 16]);
+
+        let session = n.session(&[0u8; 16]).expect("session");
+        assert!(session.force_relay);
+
+        let out = n.poll(now());
+        assert!(
+            out.iter().any(|o| matches!(o, Outbound::RequestRelays { .. })),
+            "expected RequestRelays after force_relay_for: {out:?}",
+        );
+    }
+
+    /// `force_relay_for` on an unknown session is a silent no-op.
+    #[test]
+    fn force_relay_for_unknown_session_is_noop() {
+        let mut n = NatTraversal::new(nid(1), addr(1), NatConfig::default());
+        n.force_relay_for(&[0xFF; 16]);
+        assert_eq!(n.session_count(), 0);
     }
 }

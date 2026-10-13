@@ -404,11 +404,13 @@ impl Endpoint {
                 let conn = incoming
                     .await
                     .map_err(|e| Error::Transport(format!("accept: {e}")))?;
+                let local_addr = self.inner.local_addr().ok();
                 Ok(Some(ConnectionDriver::from_connection(
                     conn,
                     self.config,
                     Role::Responder,
                     self.key_claim.clone(),
+                    local_addr,
                 )))
             }
         }
@@ -430,11 +432,13 @@ impl Endpoint {
         let conn = connecting
             .await
             .map_err(|e| Error::Transport(format!("connect {addr}: {e}")))?;
+        let local_addr = self.inner.local_addr().ok();
         Ok(ConnectionDriver::from_connection(
             conn,
             self.config,
             Role::Initiator,
             self.key_claim.clone(),
+            local_addr,
         ))
     }
 
@@ -560,6 +564,16 @@ pub struct ConnectionDriver {
     /// established.
     peer_key_claim: Option<KeyClaim>,
 
+    /// The local address the enclosing endpoint is bound to.
+    ///
+    /// Captured at construction because the endpoint's bound address is
+    /// not otherwise reachable from the driver. `None` only if the
+    /// endpoint had already closed when the driver was built — which
+    /// cannot happen for a driver produced by `Endpoint::accept` or
+    /// `Endpoint::connect`, both of which fail before reaching
+    /// `from_connection` if the endpoint is closed.
+    local_addr: Option<SocketAddr>,
+
     /// Receive-side rate limiter, keyed by the peer's NodeId once the
     /// Key Claim exchange completes.
     ///
@@ -643,6 +657,7 @@ impl core::fmt::Debug for ConnectionDriver {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("ConnectionDriver")
             .field("remote", &self.conn.remote_address())
+            .field("local_addr", &self.local_addr)
             .field("role", &self.role)
             .field("phase", &self.phase)
             .field("handshake_done", &self.handshake_done)
@@ -665,12 +680,15 @@ impl ConnectionDriver {
     ///
     /// `local_key_claim` is the identity this endpoint will announce on
     /// the connection; typically it is the same claim the enclosing
-    /// [`Endpoint`] holds.
+    /// [`Endpoint`] holds. `local_addr` is the address the enclosing
+    /// endpoint is bound to; see [`Self::local_addr`] for the reason it
+    /// is captured here rather than read from the connection.
     pub fn from_connection(
         conn: quinn::Connection,
         config: QuipNetConfig,
         role: Role,
         local_key_claim: KeyClaim,
+        local_addr: Option<SocketAddr>,
     ) -> Self {
         let transport = match role {
             Role::Initiator => QuipConnection::new_initiator(config),
@@ -683,6 +701,7 @@ impl ConnectionDriver {
             phase: DriverPhase::Connecting,
             local_key_claim,
             peer_key_claim: None,
+            local_addr,
             rate_limiter: RateLimiter::new(),
             sync_stream: SyncStream::new(),
             backoff: BackoffTracker::new(),
@@ -791,6 +810,21 @@ impl ConnectionDriver {
     /// it yet.
     pub fn local_ip(&self) -> Option<std::net::IpAddr> {
         self.conn.local_ip()
+    }
+
+    /// The socket address the enclosing endpoint is bound to.
+    ///
+    /// This is the address a peer would dial to reach this node, and it
+    /// is what a `RelayEntry::external_addr` should carry when the node
+    /// answers a `relay_discovery` (§12.2). It is captured at
+    /// construction from the endpoint, because `quinn::Connection` does
+    /// not expose the endpoint's bound port.
+    ///
+    /// Returns `None` only if the endpoint was closed when the driver
+    /// was built, which cannot happen for a driver produced by
+    /// [`Endpoint::accept`] or [`Endpoint::connect`].
+    pub fn local_addr(&self) -> Option<SocketAddr> {
+        self.local_addr
     }
 
     /// Remote UDP address of this connection.

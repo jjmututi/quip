@@ -13,7 +13,7 @@
 //!
 //! # Scope
 //!
-//! This is the tenth cut. It does:
+//! This is the eleventh cut. It does:
 //!
 //! - Bind a server endpoint with a self-signed cert (rcgen).
 //! - Accept inbound connections; drive the §4/§16 handshake to
@@ -52,18 +52,29 @@
 //!   a host candidate and reported as a successful probe; the driver
 //!   turns that into `NatEvent::DirectPathEstablished`, which the
 //!   flow loop translates into `PeerLifecycle::NatDirect`.
+//! - **M9.5b-c (part 5):** sign outbound §12 verbs with the node's
+//!   key and probe candidate addresses by dialing them.
+//! - **M9.5b-c (part 6):** route inbound §12 verbs through
+//!   `dht_result_from` during the NAT phase, answer an inbound
+//!   `relay_discovery` with a signed `relay_response` when
+//!   [`NodeConfig::relay_capable`] is set, and provide
+//!   [`NodeConfig::force_relay`] to put a node's sessions onto the
+//!   relay branch by policy. `PeerLifecycle::NatRelayed` is now
+//!   reachable end-to-end.
 //!
 //! It does not (yet):
 //!
-//! - Exchange candidates over the DHT during the NAT phase. The
-//!   `DhtHandle`'s `lookup_candidates` is a no-op; the driver is
-//!   seeded with the address the transport already uses.
-//! - Dial candidate addresses. The NAT driver reports the transport's
-//!   current address as the successful probe; a follow-up commit
-//!   replaces that report with a fresh client endpoint per candidate.
-//! - Sign and send `relay_discovery` on T0. The state machine emits
-//!   `RelayDiscoveryRequested`, but the node's signer is not threaded
-//!   down to the peer task yet.
+//! - Exchange candidates over the DHT via Coral lookup. The
+//!   `DhtHandle`'s `lookup_candidates` emits a peer-scoped empty
+//!   announce, not a `coral_lookup`.
+//! - Prevent a `probe_candidate` connection from being registered as
+//!   a peer on the receiving side. A probe carries no identity (per
+//!   §12.3, path validation does not authenticate the prober), but
+//!   the receiving node's accept loop cannot tell a probe from a
+//!   real connection. The probe uses a fresh per-call seed so it is
+//!   not a fixed identity, but the accept loop still allocates a
+//!   slot for it. Marking probe connections and skipping the peer
+//!   task for them is a later milestone.
 //! - Run cluster merge/split or XOR-distance routing. The routing
 //!   eligibility set is defined and exposed; the consumer is
 //!   M9.5b-c's cluster integration.
@@ -126,7 +137,7 @@
 //! connection but is not yet a routing candidate. [`Node::routing_eligible_peers`]
 //! and [`DhtHandle::routing_eligible_records`] expose the derived set.
 //!
-//! # NAT phase (M9.5b-c part 3)
+//! # NAT phase (M9.5b-c parts 3, 5, and 6)
 //!
 //! The §16 NAT phase is driven by a per-peer [`NatDriver`]. The peer
 //! task seeds the driver with the peer's current transport address,
@@ -138,10 +149,35 @@
 //! `PeerLifecycle::NatRelayed` respectively; the third fails
 //! establishment.
 //!
-//! Candidate exchange over the DHT, real dialing of candidate
-//! addresses, and signing `relay_discovery` on T0 are not yet
-//! implemented. The driver pipeline they will feed is already the one
-//! above; only the evidence source changes when they land.
+//! Part 5 signs every outbound §12 verb with the node's key, so a
+//! peer's `dht_result_from` accepts our candidate announces rather
+//! than rejecting them for a zero signature. Part 6 does the same on
+//! the receiving side: inbound §12 verbs during the NAT phase are
+//! verified by `dht_result_from` before they reach the state machine,
+//! and a node with `relay_capable` set answers an inbound
+//! `relay_discovery` with a signed `relay_response`.
+//!
+//! # Relay path (M9.5b-c part 6)
+//!
+//! On loopback the direct candidates always succeed, so the driver
+//! never emits `RelayDiscoveryRequested` and `NatRelayed` is
+//! unreachable by probe failure alone. Two `NodeConfig` knobs make
+//! the relay branch reachable:
+//!
+//! - [`NodeConfig::force_relay`] tells the node to put every session
+//!   it starts onto the relay branch by policy, skipping the direct
+//!   probe ladder entirely. A node behind a symmetric NAT knows a
+//!   priori that its direct candidates will fail; this is the honest
+//!   way to express that, and it is what makes the relay path
+//!   reachable end-to-end in a test.
+//! - [`NodeConfig::relay_capable`] makes the node answer an inbound
+//!   `relay_discovery` with a signed `relay_response` naming itself
+//!   as the relay. Default is `false`: a node that has not opted in
+//!   does not relay.
+//!
+//! Both are legitimate production knobs. `relay_capable` is what
+//! M9.7's headless deployment will set on a VPS that acts as a
+//! rendezvous point.
 //!
 //! # Establishment
 //!
@@ -236,7 +272,7 @@
 //! # Signer
 //!
 //! The node signs wire messages — §16 Key Claims, §13 Coral lookups
-//! and responses — with the [`Ed25519Signer`] held in
+//! and responses, §12 NAT verbs — with the [`Ed25519Signer`] held in
 //! [`NodeConfig::signer`]. It is `Arc<Ed25519Signer>` rather than
 //! `Arc<dyn Signer>`: every verifier in the workspace is
 //! `Ed25519Verifier`, so a `dyn` would be strictly less safe with no
@@ -303,7 +339,7 @@ use quip_core::dvv::NodeId;
 use quip_core::messages::{KeyClaim, PinEntry, Signer};
 use quip_core::time::{Clock, SystemClock, Timestamp};
 use quip_net::coral::LookupPath;
-use quip_net::crypto::Ed25519Signer;
+use quip_net::crypto::{Ed25519Signer, Ed25519Verifier};
 use quip_net::discovery::{
     DiscoveryPhaseKind, Outbound as DiscoveryOutbound, StartOutcome,
 };
@@ -315,7 +351,9 @@ use quip_net::handshake::Capabilities;
 use quip_net::message::{self, Message};
 use quip_net::nat::{NatConfig, NatEvent as DriverNatEvent};
 use quip_net::nat_driver::NatDriver;
-use quip_net::nat_wire::{Candidate, CandidateAnnounce, CANDIDATE_HOST};
+use quip_net::nat_wire::{
+    Candidate, CandidateAnnounce, RelayEntry, RelayResponse, CANDIDATE_HOST,
+};
 use quip_net::transport::{
     ClientConfig, ConnectionDriver, Endpoint, Event, ServerConfig,
 };
@@ -365,6 +403,9 @@ const DISCOVERY_WAIT_MS: u64 = 5_000;
 /// driver that never produces a terminal event cannot spin forever.
 const NAT_PHASE_TIMEOUT_MS: u64 = 30_000;
 
+/// Priority assigned to the node's own host candidate.
+const LOCAL_CANDIDATE_PRIORITY: u64 = 1000;
+
 /// A time source that can be moved across threads and shared.
 ///
 /// `quip_core::time::Clock` does not itself require `Send + Sync`,
@@ -410,6 +451,32 @@ pub struct NodeConfig {
     /// client, so every signature the node produces traces to one
     /// key.
     pub signer: SharedSigner,
+    /// Force every NAT session this node starts onto the relay
+    /// branch.
+    ///
+    /// A node behind a symmetric NAT knows a priori that its direct
+    /// candidates will fail. Setting this to `true` tells the NAT
+    /// state machine to skip the direct-candidate probe ladder and go
+    /// straight to relay discovery. The default (`false`) leaves the
+    /// four-phase ladder unchanged.
+    ///
+    /// The session's own candidates are still published; only the
+    /// *inbound* direct path is refused. The terminal event is the
+    /// same `NatEvent::RelayedPathEstablished` as a relay-by-probe-
+    /// failure, and the resulting lifecycle is
+    /// [`PeerLifecycle::NatRelayed`] either way.
+    ///
+    /// Added in M9.5b-c part 6.
+    pub force_relay: bool,
+    /// Whether the node answers an inbound `relay_discovery`.
+    ///
+    /// Default `false`: a node that has not opted in does not relay
+    /// for others. A VPS acting as a rendezvous point sets this to
+    /// `true` (M9.7). The answer is a signed `relay_response` naming
+    /// this node as the relay, sent on T0 to the peer that asked.
+    ///
+    /// Added in M9.5b-c part 6.
+    pub relay_capable: bool,
 }
 
 impl core::fmt::Debug for NodeConfig {
@@ -421,6 +488,8 @@ impl core::fmt::Debug for NodeConfig {
             .field("auto_serve_pins", &self.auto_serve_pins)
             .field("clock", &"<dyn Clock>")
             .field("signer", &"<Ed25519Signer>")
+            .field("force_relay", &self.force_relay)
+            .field("relay_capable", &self.relay_capable)
             .finish()
     }
 }
@@ -428,7 +497,7 @@ impl core::fmt::Debug for NodeConfig {
 impl NodeConfig {
     /// Build a config with baseline capabilities plus NAT traversal
     /// and DHT discovery, a claim derived from `signer`, auto-serving
-    /// enabled, and the system clock.
+    /// enabled, the system clock, and relaying disabled.
     ///
     /// `NAT_TRAVERSAL` is what allows a peer to send and receive §12
     /// verbs; without it the transport's capability gate rejects them.
@@ -449,6 +518,8 @@ impl NodeConfig {
             auto_serve_pins: true,
             clock: Arc::new(SystemClock),
             signer,
+            force_relay: false,
+            relay_capable: false,
         })
     }
 
@@ -472,6 +543,24 @@ impl NodeConfig {
     /// deterministic.
     pub fn with_clock(mut self, clock: SharedClock) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// Force every session this node starts onto the relay branch.
+    ///
+    /// See [`Self::force_relay`] for the semantics. The default
+    /// (`false`) preserves the four-phase direct-first ladder.
+    pub fn with_force_relay(mut self, on: bool) -> Self {
+        self.force_relay = on;
+        self
+    }
+
+    /// Enable or disable answering inbound `relay_discovery`.
+    ///
+    /// See [`Self::relay_capable`] for the semantics. The default
+    /// (`false`) leaves the responder inert.
+    pub fn with_relay_capable(mut self, on: bool) -> Self {
+        self.relay_capable = on;
         self
     }
 }
@@ -838,9 +927,8 @@ pub struct Node<B = MemoryBlobStore> {
     /// The node's signer.
     ///
     /// Cloned into every peer task so §12 NAT verbs the peer sends —
-    /// candidate announces, relay discoveries — carry real signatures.
-    /// The application holds its own signer; this field exists so the
-    /// node can hand a clone to each spawned task.
+    /// candidate announces, relay discoveries, relay responses —
+    /// carry real signatures.
     signer: SharedSigner,
     peers: PeerRegistry,
     /// Peer tasks spawned by `connect` or the accept loop, keyed by
@@ -851,6 +939,10 @@ pub struct Node<B = MemoryBlobStore> {
     store: Arc<Mutex<QuipStore<B>>>,
     /// Whether peer tasks auto-serve pin/unpin/query_pins.
     auto_serve_pins: bool,
+    /// Whether peer tasks answer inbound `relay_discovery`.
+    relay_capable: bool,
+    /// Whether every NAT session is forced onto the relay branch.
+    force_relay: bool,
     /// Time source handed to peer tasks.
     clock: SharedClock,
     events_rx: Option<mpsc::Receiver<NodeEvent>>,
@@ -929,6 +1021,8 @@ where
         let accept_trust = Arc::clone(&trust);
         let accept_signer = Arc::clone(&signer);
         let auto_serve = config.auto_serve_pins;
+        let relay_capable = config.relay_capable;
+        let force_relay = config.force_relay;
         let accept_task = tokio::spawn(async move {
             accept_loop(
                 accept_endpoint,
@@ -937,6 +1031,8 @@ where
                 accept_store,
                 accept_clock,
                 auto_serve,
+                relay_capable,
+                force_relay,
                 accept_tx,
                 accept_dht,
                 accept_discovery,
@@ -954,6 +1050,8 @@ where
             peer_tasks,
             store,
             auto_serve_pins: config.auto_serve_pins,
+            relay_capable: config.relay_capable,
+            force_relay: config.force_relay,
             clock,
             events_rx: Some(events_rx),
             events_tx,
@@ -1033,11 +1131,14 @@ where
         let peer_tasks = Arc::clone(&self.peer_tasks);
         let store = Arc::clone(&self.store);
         let auto_serve = self.auto_serve_pins;
+        let relay_capable = self.relay_capable;
+        let force_relay = self.force_relay;
         let dht = self.dht.clone();
         let discovery = self.discovery.clone();
         let trust = Arc::clone(&self.trust);
         let task_peers = Arc::clone(&peers);
         let signer = Arc::clone(&self.signer);
+        let local_id = self.local_claim.node_id;
         let handle = tokio::spawn(async move {
             // The client endpoint must outlive the connection, so it
             // is moved into the peer task and dropped when the loop
@@ -1047,9 +1148,12 @@ where
                 driver,
                 peer,
                 slot,
+                local_id,
                 store,
                 clock,
                 auto_serve,
+                relay_capable,
+                force_relay,
                 events_tx,
                 out_rx,
                 dht.clone(),
@@ -1426,6 +1530,8 @@ async fn accept_loop<B>(
     store: Arc<Mutex<QuipStore<B>>>,
     clock: SharedClock,
     auto_serve_pins: bool,
+    relay_capable: bool,
+    force_relay: bool,
     events_tx: mpsc::Sender<NodeEvent>,
     dht: DhtHandle,
     discovery: DiscoveryHandle,
@@ -1505,14 +1611,22 @@ async fn accept_loop<B>(
                 })
                 .await;
 
+            // On the accept side, our own NodeId comes from the
+            // driver's local Key Claim — the server config baked it
+            // in at bind time.
+            let local_id = driver.local_key_claim().node_id;
+
             let task_peers = Arc::clone(&peers);
             peer_run(
                 driver,
                 peer,
                 slot,
+                local_id,
                 store,
                 clock,
                 auto_serve_pins,
+                relay_capable,
+                force_relay,
                 events_tx,
                 out_rx,
                 dht.clone(),
@@ -1749,7 +1863,7 @@ async fn current_trust(trust: &SharedTrust, peer: &NodeId) -> PeerTrust {
 }
 
 // -------------------------------------------------------------------------
-// NAT phase (M9.5b-c part 3)
+// NAT phase (M9.5b-c parts 3, 5, and 6)
 // -------------------------------------------------------------------------
 
 /// The terminal outcome of the §16 NAT phase.
@@ -1770,27 +1884,30 @@ enum NatPhaseOutcome {
 ///
 /// Builds a `NatDriver<DhtHandle>` for `peer`, starts a session under
 /// `session_id`, seeds the peer's current transport address as if the
-/// peer had announced it, sends our own signed candidate to the peer,
-/// and drives the state machine to a terminal event.
+/// peer had announced it, announces our own host candidate, and drives
+/// the state machine to a terminal event.
 ///
 /// # Why the peer's transport address is seeded
 ///
-/// Until the peer's steady loop is running, inbound §12 verbs on T0
-/// are not dispatched to the state machine — that path exists in
-/// `run_peer_loop`, which the NAT phase precedes. The transport is up
-/// and the address it is using is the peer's address; seeding it
-/// gives the state machine a candidate to probe immediately, and the
-/// probe's outcome is known without a wire round trip. When the
-/// steady loop's inbound path is wired to feed §12 verbs during the
-/// NAT phase, this seed becomes unnecessary.
+/// The transport is up and the address it is using is the peer's
+/// address, so it is known-reachable without a wire round trip.
+/// Seeding it gives the state machine a candidate to probe
+/// immediately, before the peer's own signed `candidate_announce`
+/// arrives on the inbound path.
+///
+/// When `force_relay` is set, the session is put onto the relay branch
+/// by policy and the seed is irrelevant — a forced session ignores
+/// every inbound candidate, including the seeded one. The seed is
+/// still applied so that the wire-visible announce is identical in
+/// both modes; only the state machine's handling of the inbound
+/// candidate differs.
 ///
 /// # Signer
 ///
 /// Outbound §12 verbs — candidate announces and relay discoveries —
 /// are signed with `signer`. The peer's `dht_result_from` rejects
 /// unsigned announces, so the signing is what makes *our* candidate
-/// reach the peer's state machine. The peer's reciprocal announce is
-/// what would feed our state machine in a full implementation.
+/// reach the peer's state machine.
 ///
 /// # Probes
 ///
@@ -1804,6 +1921,21 @@ enum NatPhaseOutcome {
 ///
 /// A `RelayDiscoveryRequested` event is answered by building a signed
 /// `relay_discovery` and sending it on T0.
+///
+/// # Inbound
+///
+/// Inbound §12 verbs on T0 are verified by `dht::dht_result_from`
+/// before reaching the state machine. That is the same check the
+/// steady loop applies; the alternative — pushing the raw message
+/// into `NatDriver::on_peer_message` — does not verify, so it would
+/// accept a forged `relay_response`.
+///
+/// An inbound `relay_discovery` is answered here as well, via
+/// `try_serve_relay_discovery`, when `relay_capable` is set. The
+/// steady loop answers it identically; handling it here too keeps a
+/// discovery that arrives while this peer is still establishing from
+/// being consumed and dropped by `driver.poll`.
+#[allow(clippy::too_many_arguments)]
 async fn run_nat_phase(
     driver: &mut ConnectionDriver,
     peer: NodeId,
@@ -1812,6 +1944,8 @@ async fn run_nat_phase(
     clock: &SharedClock,
     dht: &DhtHandle,
     signer: &SharedSigner,
+    relay_capable: bool,
+    force_relay: bool,
 ) -> NatPhaseOutcome {
     use quip_net::nat_driver::DhtClient;
 
@@ -1820,10 +1954,18 @@ async fn run_nat_phase(
     let local_addr = local_ip_address(driver);
     let transport_addr = socket_to_address(driver.remote_addr());
 
+    // Build a per-peer NatConfig. `force_relay` is the only deviation
+    // from `NatConfig::default`; every session this driver starts is
+    // put onto the relay branch if the node is configured for it.
+    let nat_config = NatConfig {
+        force_relay,
+        ..NatConfig::default()
+    };
+
     let mut nat_driver = NatDriver::new(
         local_id,
         local_addr,
-        NatConfig::default(),
+        nat_config,
         dht.clone(),
     );
 
@@ -1832,13 +1974,22 @@ async fn run_nat_phase(
 
     nat_driver.start_session(peer, session_id, now);
 
+    // Belt-and-braces: the config above already forces every session,
+    // but calling `force_relay_for` makes the intent explicit at the
+    // call site and covers a driver that changed its config between
+    // construction and start.
+    if force_relay {
+        nat_driver.force_relay_for(&session_id);
+    }
+
     // Seed the peer's current transport address into our state
-    // machine, as if the peer had announced it. This is the address
-    // we are already connected to, so we know it is reachable.
+    // machine, as if the peer had announced it. A forced session will
+    // ignore it; an unforced one probes it and short-circuits to
+    // success below.
     let seeded_candidate = Candidate {
         addr: transport_addr,
         kind: CANDIDATE_HOST,
-        priority: 1000,
+        priority: LOCAL_CANDIDATE_PRIORITY,
         foundation: String::from("seeded"),
         component: 0,
     };
@@ -1857,7 +2008,7 @@ async fn run_nat_phase(
     let our_candidate = Candidate {
         addr: local_addr,
         kind: CANDIDATE_HOST,
-        priority: 1000,
+        priority: LOCAL_CANDIDATE_PRIORITY,
         foundation: String::from("local"),
         component: 0,
     };
@@ -1906,7 +2057,7 @@ async fn run_nat_phase(
                         // The live connection is the proof.
                         true
                     } else {
-                        probe_candidate(addr, Duration::from_secs(5)).await
+                        probe_candidate(addr, Duration::from_secs(5), now).await
                     };
                     nat_driver.on_probe_result(session_id, addr, success, now);
                 }
@@ -1929,6 +2080,23 @@ async fn run_nat_phase(
                         .send(&Message::RelayDiscovery(msg), now)
                         .await;
                 }
+                DriverNatEvent::RelayPathAvailable {
+                    session_id,
+                    relay,
+                    ..
+                } => {
+                    // The state machine surfaced a relay; attempt it.
+                    // On loopback the relay is the peer itself, which
+                    // the transport already proves reachable, so the
+                    // attempt trivially succeeds. A real network would
+                    // route through the relay and report the outcome.
+                    nat_driver.on_relay_result(
+                        session_id,
+                        relay.relay_id,
+                        true,
+                        now,
+                    );
+                }
                 _ => {}
             }
         }
@@ -1938,6 +2106,13 @@ async fn run_nat_phase(
         }
 
         // Feed inbound §12 NAT verbs on T0 into the state machine.
+        //
+        // The verbs are verified with `dht::dht_result_from`, which
+        // checks the signature and the claimed sender, before they
+        // reach the state machine. This mirrors the steady loop's
+        // inbound path; the alternative — `on_peer_message` — does
+        // not verify, and a forged `relay_response` would conclude a
+        // session that never should have.
         let events = match driver.poll(now).await {
             Ok(e) => e,
             Err(_) => break 'outer NatPhaseOutcome::Failed,
@@ -1945,7 +2120,28 @@ async fn run_nat_phase(
         for event in events {
             if let Event::Frame { tier, msg, .. } = event {
                 if let Ok(m) = message::dispatch(&msg.raw, tier) {
-                    nat_driver.on_peer_message(&m, now);
+                    // M9.5b-c part 6: answer an inbound
+                    // `relay_discovery` here too, before the DHT
+                    // intercept. The steady loop does the same, but a
+                    // discovery that arrives while this peer is still
+                    // in its own NAT phase would otherwise be consumed
+                    // by `driver.poll` and dropped — the requester
+                    // would never receive its relay.
+                    if let Some(reply) = try_serve_relay_discovery(
+                        &m,
+                        &peer,
+                        &local_id,
+                        driver,
+                        relay_capable,
+                        signer,
+                        now,
+                    ) {
+                        let _ = driver.send(&reply, now).await;
+                        continue;
+                    }
+                    if let Some(result) = dht::dht_result_from(&m, &peer) {
+                        nat_driver.on_dht_result(result, now);
+                    }
                 }
             }
         }
@@ -1962,9 +2158,24 @@ async fn run_nat_phase(
 /// §8.2): a fresh connection to an address we hold no session to. The
 /// `Endpoint` is local; no `KeyClaim` is exchanged because the probe
 /// carries no identity — it proves reachability, not identity.
+///
+/// # Probe identity
+///
+/// The seed is derived from the current time and the target address,
+/// so two probes never share a key. The all-zero seed part 5 used was
+/// a fixed identity any node could impersonate; a per-call seed
+/// removes that, though it does not make the probe unidentifiable.
+///
+/// TODO: mark probe connections so the accept loop does not register
+/// them as peers. A probe is a path-validation dial (§12.3), not a
+/// session; the receiving node's accept loop cannot tell the
+/// difference and allocates a slot for every probe. A future
+/// transport-level marker (a reserved ALPN, a handshake extension)
+/// will let the accept loop skip the peer task for probe connections.
 async fn probe_candidate(
     addr: quip_core::address::Address,
     timeout: Duration,
+    now: Timestamp,
 ) -> bool {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
@@ -1978,10 +2189,23 @@ async fn probe_candidate(
     };
 
     // A probe carries no identity: it needs a client endpoint with
-    // *some* claim. The claim is generated fresh per probe from a
-    // fixed seed, so the probe's key is not a long-lived secret.
-    let probe_signer = Ed25519Signer::from_seed(&[0u8; 32]);
-    let claim = match make_key_claim(&probe_signer, Timestamp::from_millis(0)) {
+    // *some* claim. The seed is mixed from the timestamp and the
+    // target address so no two probes share a key; the resulting
+    // identity is still a throwaway, not a long-lived secret.
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&now.as_millis().to_be_bytes());
+    match addr {
+        quip_core::address::Address::V4 { ip, port } => {
+            seed[8..12].copy_from_slice(&ip);
+            seed[12..14].copy_from_slice(&port.to_be_bytes());
+        }
+        quip_core::address::Address::V6 { ip, port } => {
+            seed[8..24].copy_from_slice(&ip);
+            seed[24..26].copy_from_slice(&port.to_be_bytes());
+        }
+    }
+    let probe_signer = Ed25519Signer::from_seed(&seed);
+    let claim = match make_key_claim(&probe_signer, now) {
         Ok(c) => c,
         Err(_) => return false,
     };
@@ -1999,6 +2223,94 @@ async fn probe_candidate(
         tokio::time::timeout(timeout, endpoint.connect(sock, "localhost")).await,
         Ok(Ok(_driver))
     )
+}
+
+/// Answer an inbound `relay_discovery` if we are relay-capable.
+///
+/// Returns `Some(response)` when the node should reply, `None`
+/// otherwise. The caller sends the response on the same T0 connection
+/// the discovery arrived on.
+///
+/// The conditions for answering:
+///
+/// - `relay_capable` is set. A node that has not opted in does not
+///   relay; the default keeps the responder inert.
+/// - The discovery's `requester` is the peer that sent it. This stops
+///   a connected peer from asking us to relay on someone else's
+///   behalf.
+/// - The discovery's `target` is us. §12.2 semantics: a
+///   `relay_discovery` asks "give me relays that can reach `target`."
+///   We can reach ourselves, so we answer with ourselves.
+/// - The discovery's signature verifies against its `requester`. No
+///   other code path verifies a `RelayDiscovery`; the receiver is the
+///   only place it can happen.
+///
+/// The `external_addr` in the `RelayEntry` is our transport address,
+/// as observed from our side. That is the address a peer should send
+/// relayed traffic to.
+fn try_serve_relay_discovery(
+    msg: &Message,
+    peer: &NodeId,
+    local_id: &NodeId,
+    driver: &ConnectionDriver,
+    relay_capable: bool,
+    signer: &SharedSigner,
+    now: Timestamp,
+) -> Option<Message> {
+    if !relay_capable {
+        return None;
+    }
+    let discovery = match msg {
+        Message::RelayDiscovery(d) => d,
+        _ => return None,
+    };
+    // The requester must be the connection's peer: no relaying on
+    // behalf of a third party.
+    if discovery.requester != *peer {
+        return None;
+    }
+    // We only relay to ourselves.
+    if discovery.target != *local_id {
+        return None;
+    }
+    // Verify the signature. `RelayDiscovery::verify` checks against
+    // the message's own `requester` field.
+    let verifier = Ed25519Verifier;
+    if !matches!(discovery.verify(&verifier), Ok(true)) {
+        return None;
+    }
+
+    let relay_external = match driver.local_addr() {
+        Some(addr) => socket_to_address(addr),
+        None => {
+            // No local address means the endpoint had already closed
+            // when the driver was built; there is no meaningful relay
+            // to advertise.
+            return None;
+        }
+    };
+
+    let mut response = RelayResponse {
+        request_id: discovery.request_id,
+        target: discovery.target,
+        requester: discovery.requester,
+        relays: vec![RelayEntry {
+            relay_id: *local_id,
+            external_addr: relay_external,
+            // A single relay slot; M9.7 makes this configurable.
+            capacity: 1,
+            load: 0,
+            cost: 0,
+        }],
+        timestamp: now,
+        signature: [0u8; 64],
+    };
+    let payload = match response.signing_payload() {
+        Ok(p) => p,
+        Err(_) => return None,
+    };
+    response.signature = signer.sign_ed25519(&payload);
+    Some(Message::RelayResponse(response))
 }
 
 /// Convert a socket address to the wire `Address` type.
@@ -2088,6 +2400,8 @@ async fn run_establishment(
     peers: &PeerRegistry,
     dht: &DhtHandle,
     signer: &SharedSigner,
+    relay_capable: bool,
+    force_relay: bool,
 ) -> bool {
     let session_id = derive_session_id(&local_claim.node_id, &peer);
     let mut flow = ConnectionFlow::resume_from_key_claim(
@@ -2129,6 +2443,8 @@ async fn run_establishment(
                     clock,
                     dht,
                     signer,
+                    relay_capable,
+                    force_relay,
                 )
                 .await;
                 match outcome {
@@ -2250,9 +2566,12 @@ async fn peer_run<B>(
     mut driver: ConnectionDriver,
     peer: NodeId,
     slot: PeerSlot,
+    local_id: NodeId,
     store: Arc<Mutex<QuipStore<B>>>,
     clock: SharedClock,
     auto_serve_pins: bool,
+    relay_capable: bool,
+    force_relay: bool,
     events_tx: mpsc::Sender<NodeEvent>,
     mut outbound_rx: mpsc::Receiver<Message>,
     dht: DhtHandle,
@@ -2322,6 +2641,8 @@ async fn peer_run<B>(
         &peers,
         &dht,
         &signer,
+        relay_capable,
+        force_relay,
     )
     .await;
 
@@ -2347,13 +2668,16 @@ async fn peer_run<B>(
         &mut driver,
         peer,
         slot,
+        local_id,
         &store,
         &clock,
         auto_serve_pins,
+        relay_capable,
         &events_tx,
         &mut outbound_rx,
         &dht,
         &discovery,
+        &signer,
     )
     .await;
 
@@ -2375,13 +2699,16 @@ async fn run_peer_loop<B>(
     driver: &mut ConnectionDriver,
     peer: NodeId,
     slot: PeerSlot,
+    local_id: NodeId,
     store: &Mutex<QuipStore<B>>,
     clock: &SharedClock,
     auto_serve_pins: bool,
+    relay_capable: bool,
     events_tx: &mpsc::Sender<NodeEvent>,
     outbound_rx: &mut mpsc::Receiver<Message>,
     dht: &DhtHandle,
     discovery: &DiscoveryHandle,
+    signer: &SharedSigner,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -2427,6 +2754,33 @@ async fn run_peer_loop<B>(
                 Event::Frame { tier, msg, .. } => {
                     match message::dispatch(&msg.raw, tier) {
                         Ok(m) => {
+                            // M9.5b-c part 6: answer an inbound
+                            // `relay_discovery` before the DHT
+                            // intercept, because the intercept does
+                            // not handle that verb. Only a node with
+                            // `relay_capable` set replies, and only
+                            // when the discovery names this peer as
+                            // its requester and this node as its
+                            // target.
+                            if let Some(reply) = try_serve_relay_discovery(
+                                &m,
+                                &peer,
+                                &local_id,
+                                driver,
+                                relay_capable,
+                                signer,
+                                now,
+                            ) {
+                                if let Err(e) = driver.send(&reply, now).await {
+                                    let _ = events_tx
+                                        .send(NodeEvent::Error {
+                                            peer: Some(peer),
+                                            error: e,
+                                        })
+                                        .await;
+                                }
+                                continue;
+                            }
                             // §12 NAT verbs route into the DHT client
                             // and never surface as a `Message` event.
                             // `dht_result_from` verifies the signature
@@ -2617,6 +2971,45 @@ mod tests {
     /// Build a node with a frozen clock, discarding the clock handle.
     async fn make_node(seed_byte: u8) -> Node {
         make_node_with_clock(seed_byte).await.0
+    }
+
+    /// Build a node whose every NAT session is forced onto the relay
+    /// branch.
+    ///
+    /// Used by `relay_path_produces_nat_relayed` for the *requesting*
+    /// side: A skips the direct probe ladder and sends a signed
+    /// `relay_discovery`. A does not need `relay_capable` — it is the
+    /// requester, not the relay.
+    async fn make_forced_relay_node(
+        seed_byte: u8,
+    ) -> (Node, Arc<ManualClock>) {
+        let signer = Ed25519Signer::from_seed(&seed(seed_byte));
+        let clock = frozen_clock();
+        let config = NodeConfig::new(addr_zero(), Arc::new(signer), clock.now())
+            .unwrap()
+            .with_clock(Arc::clone(&clock) as SharedClock)
+            .with_force_relay(true);
+        let node = Node::bind(config).await.unwrap();
+        (node, clock)
+    }
+
+    /// Build a node that answers inbound `relay_discovery`.
+    ///
+    /// Used by `relay_path_produces_nat_relayed` for the *responding*
+    /// side: B replies to A's discovery with a signed
+    /// `relay_response` naming itself. B is not forced onto the relay
+    /// branch — it takes the direct path and reaches `NatDirect`.
+    async fn make_relay_capable_node(
+        seed_byte: u8,
+    ) -> (Node, Arc<ManualClock>) {
+        let signer = Ed25519Signer::from_seed(&seed(seed_byte));
+        let clock = frozen_clock();
+        let config = NodeConfig::new(addr_zero(), Arc::new(signer), clock.now())
+            .unwrap()
+            .with_clock(Arc::clone(&clock) as SharedClock)
+            .with_relay_capable(true);
+        let node = Node::bind(config).await.unwrap();
+        (node, clock)
     }
 
     /// Wait for `node` to emit a `Connected` event for `expected`, up
@@ -3395,6 +3788,63 @@ mod tests {
         assert_eq!(
             b.peer_lifecycle(&a_node_id).await,
             Some(PeerLifecycle::NatDirect),
+        );
+    }
+
+    // ---- M9.5b-c (part 6): relay path ----
+
+    /// A node configured with `force_relay` puts every NAT session
+    /// onto the relay branch and reaches `NatRelayed` end-to-end when
+    /// the peer is `relay_capable`.
+    ///
+    /// On loopback the direct probe always succeeds, so `NatRelayed`
+    /// is unreachable by probe failure alone. `force_relay` is the
+    /// policy knob that a node behind a symmetric NAT would set; this
+    /// test exercises it against a `relay_capable` responder and
+    /// verifies both the lifecycle transition and the
+    /// routing-eligibility consequence.
+    #[tokio::test]
+    async fn relay_path_produces_nat_relayed() {
+        let (mut a, _) = make_forced_relay_node(1).await;
+        let (mut b, _) = make_relay_capable_node(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let a_node_id = a.local_node_id();
+        let b_node_id = b.local_node_id();
+
+        a.connect(b_addr, "localhost").await.unwrap();
+
+        // A takes the relay branch by policy. The full ladder runs:
+        // forced session → RequestRelays → signed relay_discovery →
+        // B's signed relay_response → A's on_relay_result → lifecycle.
+        let a_ready = wait_for_ready(&mut a, b_node_id, 20_000).await;
+        assert!(
+            a_ready.is_some(),
+            "A should reach Ready via the relay branch",
+        );
+
+        // B still takes the direct branch: A's real candidate is
+        // reachable from B.
+        let _ = wait_for_ready(&mut b, a_node_id, 20_000).await;
+
+        assert_eq!(
+            a.peer_lifecycle(&b_node_id).await,
+            Some(PeerLifecycle::NatRelayed),
+            "A's peer lifecycle should be NatRelayed",
+        );
+        assert_eq!(
+            b.peer_lifecycle(&a_node_id).await,
+            Some(PeerLifecycle::NatDirect),
+            "B's peer lifecycle should be NatDirect",
+        );
+
+        // A's routing-eligible set includes B: `NatRelayed` is
+        // routing-eligible (§3 of the design note).
+        let eligible = a.routing_eligible_peers().await;
+        assert!(
+            eligible.iter().any(|s| s.node_id == b_node_id),
+            "B should be routing-eligible for A after a relayed path; \
+             got {eligible:?}",
         );
     }
 }

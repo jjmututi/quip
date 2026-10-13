@@ -35,7 +35,12 @@ Candidate exchange between peers is now live: an empty-list
 candidates for the session. The node's signer is threaded into the
 peer task, so §12 NAT verbs the peer sends — candidate announces,
 relay discoveries — carry real signatures and are accepted by the
-receiving peer's `dht_result_from`.
+receiving peer's `dht_result_from`. The relayed branch is now
+reachable end-to-end: a node whose direct candidates all fail sends
+a signed `relay_discovery`, a `relay_capable` peer answers with a
+signed `relay_response`, and the requester's lifecycle concludes
+`PeerLifecycle::NatRelayed`. Inbound §12 verbs during the NAT phase
+are verified by `dht_result_from` before reaching the state machine.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -124,7 +129,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, cluster merge/split, XOR routing | in progress |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster merge/split, XOR routing | in progress |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
@@ -752,6 +757,70 @@ Tests: `nat_phase_exchanges_signed_candidates` (lib.rs). The
 existing integration tests are unchanged in intent but now depend
 on the signing path.
 
+### M9.5b-c (part 6) — relay path end-to-end — LANDED
+
+`PeerLifecycle::NatRelayed` is now reachable from a real peer. A node
+whose direct candidates fail sends a signed `relay_discovery` on T0,
+a `relay_capable` peer answers with a signed `relay_response` naming
+itself, and the requester's lifecycle concludes `NatRelayed`. Two
+config knobs make the branch reachable without touching the
+production default; both are honest production settings, not
+test-only scaffolding.
+
+`quip-net/src/nat.rs`. `NatConfig` and `SessionState` gain a
+`force_relay: bool`. A forced session skips the direct-candidate
+ladder in `NatTraversal::poll` and goes straight to
+`RequestRelays`; it still publishes its own candidates, only the
+inbound direct path is refused. `NatTraversal::force_relay_for`
+raises the flag per session; there is no un-force.
+
+`quip-net/src/nat_driver.rs`. `NatDriver::on_dht_result` is
+the routing arm factored out of `drain_dht`. It is the seam
+`run_nat_phase` uses to feed a verified `DhtResult` into the
+state machine without `on_peer_message`, which does not verify.
+`NatDriver::force_relay_for` is a passthrough.
+
+`quip-net/src/transport.rs`. `ConnectionDriver` gains
+`local_addr()`, captured at construction from the enclosing
+`Endpoint`. `quinn::Connection` does not expose the endpoint's
+bound port, and the relay responder needs the address a peer
+should send relayed traffic to.
+
+`quip-node/src/lib.rs`. `NodeConfig` gains `force_relay` and
+`relay_capable`, both default `false`. `run_nat_phase` answers an
+inbound `relay_discovery` via a new `try_serve_relay_discovery`
+helper before the `dht_result_from` intercept, because
+`dht_result_from` returns `None` for that verb. Without that, a
+relay-capable node that has not yet entered its steady loop drops
+the discovery and the requester times out into `NatDirect`.
+`probe_candidate` takes `now` and derives a fresh Ed25519 seed per
+call; part 5 used the all-zero seed, a fixed identity any node
+could impersonate.
+
+The relay branch, end to end. A forced session sends its
+`relay_discovery` on the first poll. The peer verifies the
+signature, confirms the requester is the connection's peer and the
+target is itself, and answers with a signed `RelayResponse` naming
+itself as the sole relay. The requester feeds the response through
+`dht_result_from` into `on_relay_response`, gets
+`RelayPathAvailable`, attempts the relay, and concludes
+`RelayedPathEstablished`. The `PeerLifecycle::NatRelayed` state that
+the design note's §2a table has admitted since M9.5b-a is now
+reachable from a real peer.
+
+Deliberately not in this commit. `run_nat_phase`'s inbound path
+handles the §12 verbs plus `relay_discovery`; §13 Coral verbs and
+auto-served pin verbs are still handled only in `run_peer_loop` and
+are dropped if they arrive during establishment. A comment at the
+inbound block records this. Cluster merge/split and XOR-distance
+routing remain M9.5b-c's outstanding work.
+
+Tests: `relay_path_produces_nat_relayed` (lib.rs);
+`on_dht_result_routes_candidates` (nat_driver.rs);
+`force_relay_from_config_skips_direct_candidates`,
+`force_relay_for_overrides_config`,
+`force_relay_for_unknown_session_is_noop` (nat.rs).
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -1194,10 +1263,17 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/nat.rs` (`NatTraversal::on_relay_result`) | M9.5b-c | sole producer of `RelayedPathEstablished` |
 | `quip-net/src/nat.rs` (`SessionState::relay_outcome`) | M9.5b-c | concluded-relayed-session marker |
 | `quip-net/src/nat_driver.rs` (`NatDriver::on_relay_result`) | M9.5b-c | driver passthrough |
+| `quip-net/src/nat_driver.rs` (`NatDriver::on_dht_result`) | M9.5b-c | verified-DhtResult routing arm |
+| `quip-net/src/nat.rs` (`NatTraversal::force_relay_for`) | M9.5b-c | per-session relay forcing |
+| `quip-net/src/nat.rs` (`NatConfig::force_relay`) | M9.5b-c | per-node relay forcing default |
+| `quip-net/src/transport.rs` (`ConnectionDriver::local_addr`) | M9.5b-c | endpoint bind address accessor |
+| `quip-node/src/lib.rs` (`try_serve_relay_discovery`) | M9.5b-c | signed relay_response for inbound discovery |
+| `quip-node/src/lib.rs` (`NodeConfig::force_relay`) | M9.5b-c | force sessions onto the relay branch |
+| `quip-node/src/lib.rs` (`NodeConfig::relay_capable`) | M9.5b-c | opt-in relay responder |
 | `quip-node/src/lib.rs` (`run_nat_phase`) | M9.5b-c | NAT phase driven through `NatDriver` |
 | `quip-node/src/lib.rs` (`NatPhaseOutcome`) | M9.5b-c | NAT phase terminal outcome |
 | `quip-node/src/lib.rs` (`socket_to_address`, `local_ip_address`) | M9.5b-c | socket/address conversion |
-| `quip-node/src/lib.rs` (`probe_candidate`) | M9.5b-c | real candidate dial |
+| `quip-node/src/lib.rs` (`probe_candidate`) | M9.5b-c (parts 5–6) | real candidate dial |
 | `quip-node/src/lib.rs` (`Node::signer_for_peers`) | M9.5b-c | signer threading for peer tasks |
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
@@ -1235,7 +1311,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/range.rs` (`RangeResponder`) | M7 | responder with cap + quarantine |
 | `quip-net/src/test_support.rs:1` | — | test-only `FakeSigner` |
 | `quip-node/src/lib.rs:1` | M9.1–M9.4a, M9.5b-b, M9.5b-c | `Node` type, store, clock, DHT routing, peer registry, lifecycle |
-| `quip-node/src/lib.rs` (`NodeConfig`) | M9.1, M9.2, M9.4a | node configuration, clock, and capabilities |
+| `quip-node/src/lib.rs` (`NodeConfig`) | M9.1, M9.2, M9.4a, M9.5b-c | node configuration, clock, and capabilities |
 | `quip-node/src/lib.rs` (`Node::bind`) | M9.1 | server bind + accept loop |
 | `quip-node/src/lib.rs` (`Node::connect`) | M9.1, M9.4a, M9.5b-b | dial + inline handshake + slot registration |
 | `quip-node/src/lib.rs` (`Node::store` and direct helpers) | M9.2 | store access and pin API |
@@ -1305,6 +1381,6 @@ consumed in M9.5b-c), `message.rs` BFT arms (M4), `bft.rs` (M4),
 next touch is cheap.
 
 **M9.5b-c note.** M9.5b-c now owns partial landed work (gates 5 and
-6, plus parts 2–5). The remaining integration (cluster merge/split
-against the routing-eligible set, XOR-distance routing, real relayed
-paths) lands in a later commit under the same milestone label.
+6, plus parts 2–6). The remaining integration (cluster merge/split
+against the routing-eligible set, XOR-distance routing) lands in a
+later commit under the same milestone label.

@@ -137,25 +137,41 @@ impl<D: DhtClient> NatDriver<D> {
         &mut self.state
     }
 
+    /// Feed one [`DhtResult`] into the state machine.
+    ///
+    /// This is the shared routing arm used by [`Self::drain_dht`] and
+    /// by callers that have already verified a wire message and
+    /// produced a `DhtResult` from it. The latter case is the NAT
+    /// phase's inbound path: `run_nat_phase` in `quip-node` verifies
+    /// every inbound §12 verb with `dht_result_from` (which checks the
+    /// signature and the claimed sender) and feeds the result here,
+    /// rather than pushing the raw message through
+    /// [`Self::on_peer_message`], which does not verify.
+    ///
+    /// Added in M9.5b-c part 6.
+    pub fn on_dht_result(&mut self, result: DhtResult, now: Timestamp) {
+        match result {
+            DhtResult::Connectivity(a) => self.state.on_connectivity_announce(a, now),
+            DhtResult::Candidates(cs) => {
+                for c in cs {
+                    self.state.on_candidate_announce(c, now);
+                }
+            }
+            DhtResult::Relays(responses) => {
+                for r in responses {
+                    self.state.on_relay_response(r, now);
+                }
+            }
+            DhtResult::Error(_) => {
+                // Logged by the DHT client; nothing to do here.
+            }
+        }
+    }
+
     /// Drain pending DHT results into the state machine.
     pub fn drain_dht(&mut self, now: Timestamp) {
         while let Some(result) = self.dht.poll() {
-            match result {
-                DhtResult::Connectivity(a) => self.state.on_connectivity_announce(a, now),
-                DhtResult::Candidates(cs) => {
-                    for c in cs {
-                        self.state.on_candidate_announce(c, now);
-                    }
-                }
-                DhtResult::Relays(responses) => {
-                    for r in responses {
-                        self.state.on_relay_response(r, now);
-                    }
-                }
-                DhtResult::Error(_) => {
-                    // Logged by the DHT client; nothing to do here.
-                }
-            }
+            self.on_dht_result(result, now);
         }
     }
 
@@ -320,6 +336,11 @@ impl<D: DhtClient> NatDriver<D> {
     /// `relay_response` messages carry their own `target` field (§12.2),
     /// so no out-of-band correlation is needed. Ignored for message
     /// types the state machine does not handle.
+    ///
+    /// This method does **not** verify signatures. Callers that have
+    /// not already established the sender's authenticity should use
+    /// [`Self::on_dht_result`] with a result from a verifying
+    /// conversion instead.
     pub fn on_peer_message(&mut self, msg: &Message, now: Timestamp) {
         match msg {
             Message::ConnectivityAnnounce(a) => {
@@ -389,6 +410,21 @@ impl<D: DhtClient> NatDriver<D> {
     /// Consume the driver, returning the DHT client.
     pub fn into_dht(self) -> D {
         self.dht
+    }
+
+    /// Force `session_id` onto the relay branch.
+    ///
+    /// Passthrough to [`NatTraversal::force_relay_for`]. After this
+    /// call, the driver's next [`Self::poll`] will emit
+    /// `RelayDiscoveryRequested` for the session instead of
+    /// `ProbeRequested`, and the session will not probe any inbound
+    /// candidate.
+    ///
+    /// Idempotent; a no-op for an unknown session.
+    ///
+    /// Added in M9.5b-c part 6.
+    pub fn force_relay_for(&mut self, session_id: &[u8; 16]) {
+        self.state.force_relay_for(session_id);
     }
 }
 
@@ -728,5 +764,38 @@ mod tests {
         d.on_relay_result([0xFF; 16], nid(10), true, now());
         let events = d.state_mut().drain_events();
         assert!(events.is_empty(), "no-op with no session: {events:?}");
+    }
+
+    /// `on_dht_result` routes a `Candidates` result into the state
+    /// machine's candidate path. This is the arm `run_nat_phase` uses
+    /// for inbound §12 verbs after `dht_result_from` has verified
+    /// them.
+    #[test]
+    fn on_dht_result_routes_candidates() {
+        use crate::nat_wire::{Candidate, CANDIDATE_HOST};
+        let mut d = NatDriver::new(
+            nid(1),
+            addr(1),
+            NatConfig::default(),
+            RecordingDht::default(),
+        );
+        d.start_session(nid(2), [0u8; 16], now());
+        let announce = CandidateAnnounce {
+            node_id: nid(2),
+            candidates: vec![Candidate {
+                addr: addr(10),
+                kind: CANDIDATE_HOST,
+                priority: 100,
+                foundation: "f".into(),
+                component: 0,
+            }],
+            session_id: [0u8; 16],
+            timestamp: now(),
+            signature: [0u8; 64],
+        };
+        d.on_dht_result(DhtResult::Candidates(vec![announce]), now());
+
+        let session = d.state().session(&[0u8; 16]).expect("session");
+        assert_eq!(session.candidates.remote_len(), 1);
     }
 }

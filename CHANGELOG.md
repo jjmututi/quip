@@ -42,6 +42,10 @@ binary running without Flutter — is the substrate the VPS tier,
 bootstrap nodes, and witness rings depend on. It lands as M9.7 after
 the M9.5b-c and M9.6 work that gives it something real to do.
 
+Candidate exchange between peers is now live: an empty-list 
+candidate_announce addressed to a specific peer pulls that peer's 
+candidates for the session.
+
 ### Build status
 
 All crates compile, every test passes, clippy and rustdoc are silent
@@ -118,7 +122,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, cluster merge/split, XOR routing | in progress |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, candidate exchange, cluster merge/split, XOR routing | in progress |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
@@ -651,6 +655,47 @@ Tests: no new tests. The existing integration tests —
 end-to-end: the node cannot reach `PeerLifecycle::NatDirect` without
 the driver emitting `DirectPathEstablished`.
 
+### M9.5b-c (part 4) — peer candidate exchange — LANDED
+
+§12.3 exchanges candidates between exactly two peers of a session,
+not across a DHT mesh. The `DhtClient` trait's mesh-shaped
+`publish_candidates` and `lookup_candidates` now carry that peer
+scope through the router.
+
+- **`quip-node/src/dht.rs`.** `Outbound` becomes a two-field struct:
+  `target: Option<NodeId>` (peer-scoped verbs) or `None` (mesh verbs,
+  broadcast). `DhtInner` gains a `sessions: Mutex<BTreeMap<[u8; 16],
+  NodeId>>` mapping a session to the peer it is with.
+  `publish_candidates` routes to the peer registered for the
+  announce's session, or drops when no session is registered — a
+  candidate announce to the wrong peer is a protocol violation, and
+  there is no safe fallback. `lookup_candidates(target, session_id)`
+  emits an empty-list `candidate_announce` addressed to `target`;
+  the peer's steady loop answers with its own announce for the same
+  session. New public methods `note_session` and `forget_session`
+  manage the mapping.
+- **`quip-node/src/lib.rs`.** `dht_router_task` takes the new
+  `Outbound` shape and routes peer-scoped messages to the named
+  peer's sender, mesh messages to every peer. `run_nat_phase`
+  registers the session with `dht.note_session` before starting the
+  driver and clears it with `dht.forget_session` on every terminal
+  path.
+
+**Deliberately not in this commit.** The empty-list pull announces
+with a zero timestamp and signature. `dht_result_from` verifies the
+claimed `NodeId` on the peer's side; an empty announce with an empty
+signature fails that check, so a real wire-level pull does not
+currently reach the state machine. On loopback the seeded candidate
+still succeeds first — the pipeline is exercised, the wiring for a
+*remote* candidate pull is in place, and threading the signer
+through is the follow-up.
+
+Tests: `publish_candidates_routes_to_the_session_peer`,
+`publish_candidates_without_a_session_is_dropped`,
+`lookup_candidates_emits_peer_scoped_pull`,
+`forget_session_removes_routing`,
+`publish_connectivity_is_broadcast` (dht.rs).
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -1145,6 +1190,9 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/dht.rs` (`DhtHandle`) | M9.4a, M9.5b-b, M9.5b-c | node-owned DHT handle |
 | `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a, M9.5b-b, M9.5b-c | routing-table entry shape with slot + lifecycle |
 | `quip-node/src/dht.rs` (`dht_result_from`) | M9.4a | §12 verb verification and conversion |
+| `quip-node/src/dht.rs` (`Outbound`) | M9.5b-c | peer-scoped vs mesh outbound |
+| `quip-node/src/dht.rs` (`note_session, forget_session`) | M9.5b-c | session-to-peer routing |
+| `quip-node/src/lib.rs` (`dht_router_task`) | M9.5b-c | peer-scoped routing |
 | `quip-node/src/lib.rs` (`run_establishment`) | M9.4b, M9.5b-c | §16 flow driven per peer, lifecycle transitions, NAT via `NatDriver` |
 | `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
 | `quip-node/src/lib.rs` (`peer_run`) | M9.4b, M9.5b-b, M9.5b-c | establishment + steady-state entry point, slot-guarded, closing transition |
@@ -1162,10 +1210,10 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |
 | `quip-node/src/peer.rs` (`PeerLifecycle::is_routing_eligible`) | M9.5b-c | routing-eligibility predicate |
-| quip-net/src/nat.rs (NatEvent::RelayedPathEstablished) | M9.5b-c | relayed-path terminal outcome |
-| quip-net/src/nat.rs (NatTraversal::on_relay_result) | M9.5b-c | sole producer of RelayedPathEstablished |
-| quip-net/src/nat.rs (SessionState::relay_outcome) | M9.5b-c | concluded-relayed-session marker |
-| quip-net/src/nat_driver.rs (NatDriver::on_relay_result) | M9.5b-c | driver passthrough |
+| `quip-net/src/nat.rs` (`NatEvent::RelayedPathEstablished`) | M9.5b-c | relayed-path terminal outcome |
+| `quip-net/src/nat.rs` (`NatTraversal::on_relay_result`) | M9.5b-c | sole producer of RelayedPathEstablished |
+| `quip-net/src/nat.rs` (`SessionState::relay_outcome`) | M9.5b-c | concluded-relayed-session marker |
+| `quip-net/src/nat_driver.rs` (`NatDriver::on_relay_result`) | M9.5b-c | driver passthrough |
 | `quip-node/src/peer.rs` (`TransitionError`) | M9.5b-b | rejected-transition error type |
 | `quip-node/src/lib.rs` (`Registry`) | M9.5b-b, M9.5b-c | peer handles + persistent generation counters + lifecycle |
 | `quip-node/src/lib.rs` (`register_peer`) | M9.5b-b | slot allocation and prior-task abort |

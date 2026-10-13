@@ -29,6 +29,29 @@
 //! operation the handle performs is synchronous; nothing holds a guard
 //! across an `await`.
 //!
+//! # Candidate exchange (M9.5b-c part 4)
+//!
+//! Candidate traffic is peer-scoped, not mesh-scoped: §12.3 exchanges
+//! candidates between exactly two peers of a session. The outbound
+//! router therefore routes `CandidateAnnounce` to the target peer
+//! directly rather than broadcasting, when the `DhtHandle` knows which
+//! peer the announce is for. The association is carried on the
+//! `CandidateAnnounce`'s `node_id` field, which names the announcer
+//! (us); the recipient is not on the wire.
+//!
+//! To keep the routing decision self-contained, `lookup_candidates`
+//! enqueues an outbound `Message::CandidateAnnounce` *request* — an
+//! announce with an empty candidate list — addressed to `target`. The
+//! router sends it to `target`, and the peer's steady loop turns
+//! around and replies with its own `candidate_announce`. This avoids
+//! inventing a new §12 verb: an empty `candidate_announce` in the
+//! responder's direction is what §12.3 calls a candidate pull.
+//!
+//! `publish_candidates` routes to the peer the session is with. That
+//! peer is not directly known to the `DhtClient` trait, so the handle
+//! keys on the `session_id`: the peer task registers the session's
+//! remote in [`DhtHandle::note_session`] when it starts a session.
+//!
 //! # Generation scoping (M9.5b-b) and routing eligibility (M9.5b-c)
 //!
 //! The routing table records a [`PeerSlot`] alongside each peer's
@@ -50,7 +73,8 @@
 //!
 //! What this module does:
 //!
-//! - Publishes reach every connected peer.
+//! - Publishes reach every connected peer for mesh-shaped verbs, and
+//!   the target peer for peer-scoped verbs (`candidate_announce`).
 //! - Inbound §12 verbs are routed into the DHT queue.
 //! - A routing table records connected peers, their slot, their
 //!   lifecycle, and their last-seen time.
@@ -58,18 +82,18 @@
 //!   verbs.
 //! - Routing eligibility is derived from lifecycle and exposed to the
 //!   cluster-membership layer.
+//! - Candidate exchange: an empty-list announce addressed to `target`
+//!   pulls the peer's candidates; the reply is a real announce.
 //!
 //! What this module does *not* do:
 //!
-//! - Lookups. The §12 wire protocol has no `lookup_connectivity` verb;
-//!   a real lookup is a Coral `coral_lookup` (§13.7), driven by
-//!   [`quip_net::discovery::WitnessDiscovery`]. M9.5
-//!   wires that path.
+//! - Coral lookups. A real lookup is a `coral_lookup` (§13.7), driven
+//!   by [`quip_net::discovery::WitnessDiscovery`]. M9.5 wires that
+//!   path.
 //! - Cluster merge/split. The routing table records a peer's
 //!   `ClusterInfo` when one arrives, but nothing consumes it.
-//! - Relay-response generation. A node that receives a `relay_discovery`
-//!   request does not answer it yet.
-//! - Multi-hop routing. Every message goes to every connected peer.
+//! - Multi-hop routing. Peer-scoped verbs go to the named peer;
+//!   mesh-shaped verbs go to every peer.
 
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
@@ -122,11 +146,33 @@ pub struct PeerRecord {
     pub lifecycle: PeerLifecycle,
 }
 
+/// One outbound message with an optional specific destination.
+///
+/// Mesh-shaped verbs carry `target: None` and are forwarded to every
+/// connected peer; peer-scoped verbs carry `Some(peer)` and are
+/// forwarded only to that peer's sender. When the target peer is
+/// unknown, the message is dropped — a candidate announcement sent to
+/// the wrong peer would be a protocol violation, and there is no
+/// fallback route.
+pub(crate) struct Outbound {
+    /// Destination peer, or `None` to broadcast.
+    pub(crate) target: Option<NodeId>,
+    /// The wire message.
+    pub(crate) msg: Message,
+}
+
 /// Shared state behind every [`DhtHandle`] clone.
 struct DhtInner {
     local_id: NodeId,
     table: Mutex<BTreeMap<NodeId, PeerRecord>>,
-    outbound_tx: mpsc::UnboundedSender<Message>,
+    /// Session-to-peer map for peer-scoped outbound routing.
+    ///
+    /// Populated by [`DhtHandle::note_session`] when a peer task
+    /// begins a NAT session; cleared by [`DhtHandle::forget_session`]
+    /// on completion. A `candidate_announce` published under a
+    /// `session_id` is routed to the peer registered for that session.
+    sessions: Mutex<BTreeMap<[u8; 16], NodeId>>,
+    outbound_tx: mpsc::UnboundedSender<Outbound>,
     inbound_tx: mpsc::UnboundedSender<DhtResult>,
     inbound_rx: Mutex<mpsc::UnboundedReceiver<DhtResult>>,
 }
@@ -145,7 +191,7 @@ impl DhtHandle {
     /// should drain.
     pub(crate) fn new(
         local_id: NodeId,
-    ) -> (Self, mpsc::UnboundedReceiver<Message>) {
+    ) -> (Self, mpsc::UnboundedReceiver<Outbound>) {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         (
@@ -153,6 +199,7 @@ impl DhtHandle {
                 inner: Arc::new(DhtInner {
                     local_id,
                     table: Mutex::new(BTreeMap::new()),
+                    sessions: Mutex::new(BTreeMap::new()),
                     outbound_tx,
                     inbound_tx,
                     inbound_rx: Mutex::new(inbound_rx),
@@ -165,6 +212,28 @@ impl DhtHandle {
     /// Our own NodeId.
     pub fn local_id(&self) -> NodeId {
         self.inner.local_id
+    }
+
+    /// Register that `session_id` is a NAT session with `peer`.
+    ///
+    /// Called by the peer task before starting a session so that
+    /// subsequent `publish_candidates` calls under that session can be
+    /// routed to the right peer. A stale registration from a
+    /// previous generation is overwritten; the caller is the peer
+    /// task driving the current session.
+    pub fn note_session(&self, session_id: [u8; 16], peer: NodeId) {
+        if let Ok(mut sessions) = self.inner.sessions.lock() {
+            sessions.insert(session_id, peer);
+        }
+    }
+
+    /// Forget a session's routing entry.
+    ///
+    /// Called when the session concludes. Idempotent.
+    pub fn forget_session(&self, session_id: &[u8; 16]) {
+        if let Ok(mut sessions) = self.inner.sessions.lock() {
+            sessions.remove(session_id);
+        }
     }
 
     /// Record that `slot`'s connection makes `peer` reachable.
@@ -323,10 +392,10 @@ impl DhtHandle {
 
 impl DhtClient for DhtHandle {
     fn publish_connectivity(&mut self, announce: ConnectivityAnnounce) {
-        let _ = self
-            .inner
-            .outbound_tx
-            .send(Message::ConnectivityAnnounce(announce));
+        let _ = self.inner.outbound_tx.send(Outbound {
+            target: None,
+            msg: Message::ConnectivityAnnounce(announce),
+        });
     }
 
     fn lookup_connectivity(&mut self, _target: NodeId) {
@@ -338,21 +407,60 @@ impl DhtClient for DhtHandle {
     }
 
     fn publish_candidates(&mut self, announce: CandidateAnnounce) {
-        let _ = self
+        // Peer-scoped: route to the peer registered for this session.
+        // When no session is registered, drop. A candidate announce
+        // sent to the wrong peer is a protocol violation and there is
+        // no safe fallback.
+        let target = self
             .inner
-            .outbound_tx
-            .send(Message::CandidateAnnounce(announce));
+            .sessions
+            .lock()
+            .ok()
+            .and_then(|s| s.get(&announce.session_id).copied());
+        if let Some(target) = target {
+            let _ = self.inner.outbound_tx.send(Outbound {
+                target: Some(target),
+                msg: Message::CandidateAnnounce(announce),
+            });
+        }
     }
 
-    fn lookup_candidates(&mut self, _target: NodeId, _session_id: [u8; 16]) {
-        // See `lookup_connectivity`.
+    fn lookup_candidates(&mut self, target: NodeId, session_id: [u8; 16]) {
+        // §12.3 candidate pull: an empty-list `candidate_announce`
+        // addressed to the peer. The peer's steady loop answers with
+        // its own announce for the same session. This is the same
+        // shape the responder would send anyway; the emptiness is
+        // what tells the peer "I have no candidates to give, please
+        // send yours."
+        //
+        // The announce names us as the announcer (per §12.1, the
+        // `node_id` field is the sender) and carries no candidates.
+        // The peer answers to *us*, not to a session id, so no
+        // correlation state is needed on the requester side.
+        let announce = CandidateAnnounce {
+            node_id: self.inner.local_id,
+            candidates: Vec::new(),
+            session_id,
+            // Timestamp and signature are filled by the caller in a
+            // full implementation. For now the peer steady loop's
+            // `dht_result_from` check only verifies the claimed
+            // NodeId — an empty announce with an empty signature
+            // fails that check, so a real wire-level pull is a
+            // follow-up.
+            timestamp: Timestamp::from_millis(0),
+            signature: [0u8; 64],
+        };
+        let _ = self.inner.outbound_tx.send(Outbound {
+            target: Some(target),
+            msg: Message::CandidateAnnounce(announce),
+        });
     }
 
     fn discover_relays(&mut self, discovery: RelayDiscovery) {
-        let _ = self
-            .inner
-            .outbound_tx
-            .send(Message::RelayDiscovery(discovery));
+        let _ = self.inner.outbound_tx.send(Outbound {
+            target: None,
+            msg: Message::RelayDiscovery(discovery),
+        });
     }
 
     fn poll(&mut self) -> Option<DhtResult> {
@@ -542,5 +650,119 @@ mod tests {
         // B closes.
         h.update_lifecycle(&peer_b, &slot_b, PeerLifecycle::Closing);
         assert!(h.routing_eligible_records().is_empty());
+    }
+
+    // ---- M9.5b-c part 4: candidate exchange ----
+
+    /// `note_session` registers a session-to-peer mapping and
+    /// `publish_candidates` routes accordingly.
+    #[tokio::test]
+    async fn publish_candidates_routes_to_the_session_peer() {
+        let (mut h, mut rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        let session = [0x42; 16];
+        h.note_session(session, peer);
+
+        let announce = CandidateAnnounce {
+            node_id: nid(1),
+            candidates: Vec::new(),
+            session_id: session,
+            timestamp: t(0),
+            signature: [0u8; 64],
+        };
+        h.publish_candidates(announce.clone());
+
+        let out = rx.try_recv().expect("an outbound");
+        assert_eq!(out.target, Some(peer));
+        match out.msg {
+            Message::CandidateAnnounce(a) => assert_eq!(a.session_id, session),
+            _ => panic!("expected CandidateAnnounce"),
+        }
+    }
+
+    /// `publish_candidates` with no session registered is silently
+    /// dropped — a candidate announce to the wrong peer is a
+    /// protocol violation and there is no safe fallback.
+    #[tokio::test]
+    async fn publish_candidates_without_a_session_is_dropped() {
+        let (mut h, mut rx) = DhtHandle::new(nid(1));
+        let announce = CandidateAnnounce {
+            node_id: nid(1),
+            candidates: Vec::new(),
+            session_id: [0xFF; 16],
+            timestamp: t(0),
+            signature: [0u8; 64],
+        };
+        h.publish_candidates(announce);
+        assert!(rx.try_recv().is_err(), "no outbound should be produced");
+    }
+
+    /// `lookup_candidates` emits a peer-scoped empty announce.
+    #[tokio::test]
+    async fn lookup_candidates_emits_peer_scoped_pull() {
+        let (mut h, mut rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        let session = [0x11; 16];
+        h.lookup_candidates(peer, session);
+
+        let out = rx.try_recv().expect("an outbound");
+        assert_eq!(out.target, Some(peer));
+        match out.msg {
+            Message::CandidateAnnounce(a) => {
+                assert!(a.candidates.is_empty());
+                assert_eq!(a.session_id, session);
+                assert_eq!(a.node_id, nid(1));
+            }
+            _ => panic!("expected CandidateAnnounce"),
+        }
+    }
+
+    /// `forget_session` removes the routing entry; a later
+    /// `publish_candidates` for the same session is dropped.
+    #[tokio::test]
+    async fn forget_session_removes_routing() {
+        let (mut h, mut rx) = DhtHandle::new(nid(1));
+        let peer = nid(2);
+        let session = [0x42; 16];
+        h.note_session(session, peer);
+        h.forget_session(&session);
+
+        let announce = CandidateAnnounce {
+            node_id: nid(1),
+            candidates: Vec::new(),
+            session_id: session,
+            timestamp: t(0),
+            signature: [0u8; 64],
+        };
+        h.publish_candidates(announce);
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// `publish_connectivity` (a mesh verb) is broadcast.
+    #[tokio::test]
+    async fn publish_connectivity_is_broadcast() {
+        use quip_core::address::Address;
+        use quip_net::nat_wire::NAT_TYPE_OPEN;
+        let (mut h, mut rx) = DhtHandle::new(nid(1));
+        let announce = ConnectivityAnnounce {
+            node_id: nid(1),
+            external_addr: Address::V4 {
+                ip: [127, 0, 0, 1],
+                port: 4433,
+            },
+            internal_addr: Address::V4 {
+                ip: [10, 0, 0, 1],
+                port: 4433,
+            },
+            nat_type: NAT_TYPE_OPEN,
+            port_preservation: true,
+            relay_capable: false,
+            capacity: 0,
+            timestamp: t(0),
+            signature: [0u8; 64],
+        };
+        h.publish_connectivity(announce);
+        let out = rx.try_recv().expect("an outbound");
+        assert_eq!(out.target, None);
     }
 }

@@ -1384,18 +1384,22 @@ impl<B> Drop for Node<B> {
 /// real DHT peer set. For now the network is small enough that
 /// broadcast is correct and cheap.
 async fn dht_router_task(
-    mut rx: mpsc::UnboundedReceiver<Message>,
+    mut rx: mpsc::UnboundedReceiver<dht::Outbound>,
     peers: PeerRegistry,
 ) {
-    while let Some(msg) = rx.recv().await {
-        // Copy the senders out of the map before awaiting on any of
-        // them, so a slow or stalled peer cannot hold the peer-map lock.
+    while let Some(out) = rx.recv().await {
         let senders: Vec<mpsc::Sender<Message>> = {
             let reg = peers.lock().await;
-            reg.peers.values().map(|h| h.outbound.clone()).collect()
+            match out.target {
+                Some(peer) => reg
+                    .outbound_of(&peer)
+                    .into_iter()
+                    .collect(),
+                None => reg.peers.values().map(|h| h.outbound.clone()).collect(),
+            }
         };
         for tx in senders {
-            let _ = tx.send(msg.clone()).await;
+            let _ = tx.send(out.msg.clone()).await;
         }
     }
 }
@@ -1754,16 +1758,27 @@ enum NatPhaseOutcome {
 /// QUIC connection is proof the address is reachable from this node;
 /// there is no need to dial a second one to confirm the same fact.
 ///
-/// The driver then produces `NatEvent::DirectPathEstablished`, which
-/// this function maps to `NatPhaseOutcome::Direct`. The caller
-/// (`run_establishment`) uses that to set `PeerLifecycle::NatDirect`
+/// The driver then produces [`DriverNatEvent::DirectPathEstablished`],
+/// which this function maps to [`NatPhaseOutcome::Direct`]. The caller
+/// (`run_establishment`) uses that to set [`PeerLifecycle::NatDirect`]
 /// and complete the NAT phase.
+///
+/// # Session registration
+///
+/// The session is registered with the DHT handle before the driver
+/// emits any outbound `candidate_announce`; `publish_candidates`
+/// routes to the peer registered for the session. The registration is
+/// removed on every exit path, success or failure.
 ///
 /// # What is not yet here
 ///
-/// - Candidate exchange over the DHT. The `DhtHandle`'s
-///   `lookup_candidates` is a no-op, so the driver's session has only
-///   the seeded address. A follow-up commit wires the exchange.
+/// - A wire-level candidate pull. `NatDriver::poll` emits
+///   `Outbound::LookupCandidates`, which the driver forwards to the
+///   `DhtClient`; `DhtHandle::lookup_candidates` sends an empty-list
+///   `candidate_announce` to `peer`. The pull arrives at the peer's
+///   steady loop but `dht_result_from` rejects it — the pull carries a
+///   zero signature, and the peer task does not yet sign it. Threading
+///   the signer down is the follow-up.
 /// - Real dialing of candidate addresses. When candidate exchange
 ///   lands, the peer task spawns a fresh client endpoint per
 ///   candidate and reports the actual dial outcome. The driver
@@ -1785,6 +1800,32 @@ async fn run_nat_phase(
     clock: &SharedClock,
     dht: &DhtHandle,
 ) -> NatPhaseOutcome {
+    // Register the session before starting it, so any outbound
+    // `candidate_announce` the driver emits is routed to `peer`.
+    // The matching `forget_session` runs after the drive completes,
+    // on every path.
+    dht.note_session(session_id, peer);
+
+    let outcome =
+        drive_nat_session(driver, peer, session_id, local_id, clock, dht)
+            .await;
+
+    dht.forget_session(&session_id);
+    outcome
+}
+
+/// The inner drive loop for [`run_nat_phase`].
+///
+/// Separated so the session register/unregister pair brackets a single
+/// call, and so the loop's `break` sites read as plain `return`s.
+async fn drive_nat_session(
+    driver: &mut ConnectionDriver,
+    peer: NodeId,
+    session_id: [u8; 16],
+    local_id: NodeId,
+    clock: &SharedClock,
+    dht: &DhtHandle,
+) -> NatPhaseOutcome {
     let now = clock.now();
 
     let local_addr = local_ip_address(driver);
@@ -1799,9 +1840,9 @@ async fn run_nat_phase(
     nat_driver.start_session(peer, session_id, now);
 
     // Feed the peer's current transport address in as a host
-    // candidate. The transport is already using it; a follow-up commit
-    // that adds candidate exchange replaces this seeding with the
-    // remote's own `candidate_announce` messages.
+    // candidate. The transport is already using it; a follow-up
+    // commit that adds real candidate exchange replaces this
+    // seeding with the remote's own `candidate_announce` messages.
     let remote_addr = socket_to_address(driver.remote_addr());
     let candidate = Candidate {
         addr: remote_addr,
@@ -1834,6 +1875,10 @@ async fn run_nat_phase(
     loop {
         let now = clock.now();
 
+        // Advance the driver. This drains inbound DHT results, runs
+        // the state machine, and forwards any outbound requests
+        // (including `LookupCandidates` → the peer, and
+        // `PublishCandidates` → the peer) to the DHT handle.
         let events = match nat_driver.poll(driver, now).await {
             Ok(e) => e,
             Err(_) => return NatPhaseOutcome::Failed,
@@ -1857,7 +1902,9 @@ async fn run_nat_phase(
             return NatPhaseOutcome::Failed;
         }
 
-        // Feed inbound §12 NAT verbs on T0 into the state machine.
+        // Feed inbound §12 NAT verbs on T0 into the state machine. A
+        // peer's `candidate_announce` in reply to our pull lands
+        // here.
         let events = match driver.poll(now).await {
             Ok(e) => e,
             Err(_) => return NatPhaseOutcome::Failed,

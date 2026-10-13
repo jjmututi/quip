@@ -30,6 +30,12 @@ succeeds emits `RelayedPathEstablished`, the counterpart of
 `DirectPathEstablished`. The peer task now drives a per-peer
 `NatDriver`, so the §16 NAT phase concludes from a `NatEvent` the
 driver emitted rather than from a hardcoded reading of the transport.
+Candidate exchange between peers is now live: an empty-list
+`candidate_announce` addressed to a specific peer pulls that peer's
+candidates for the session. The node's signer is threaded into the
+peer task, so §12 NAT verbs the peer sends — candidate announces,
+relay discoveries — carry real signatures and are accepted by the
+receiving peer's `dht_result_from`.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -42,21 +48,13 @@ binary running without Flutter — is the substrate the VPS tier,
 bootstrap nodes, and witness rings depend on. It lands as M9.7 after
 the M9.5b-c and M9.6 work that gives it something real to do.
 
-Candidate exchange between peers is now live: an empty-list 
-candidate_announce addressed to a specific peer pulls that peer's 
-candidates for the session.
-
-The node's signer is threaded into the peer task, so §12 NAT verbs 
-the peer sends — candidate announces, relay discoveries — carry real 
-signatures and are accepted by the receiving peer's dht_result_from.
-
 ### Build status
 
 All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~678 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~684 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -92,16 +90,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main` after M9.5b-c (part 2):
+Baseline on `main` after M9.5b-c (part 5):
 
 ```
 quip-core      74 passed
 quip-net      478 passed
 quip-storage   57 passed
-quip-node      69 passed
+quip-node      75 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~678 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~684 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -711,11 +709,14 @@ answered by dialing the candidate rather than by asserting success.
   `run_establishment` take a `&SharedSigner`; both call sites
   (`Node::connect`, `accept_loop`) clone the node's signer into the
   peer task.
-- `run_nat_phase` sends a signed `candidate_announce` carrying this
-  node's host candidate, and handles three driver events the
-  previous cut ignored: `ProbeRequested` dials the candidate with a
-  fresh client `Endpoint` under the App. A.5 5 s timeout and reports
-  the actual outcome; `RelayDiscoveryRequested` signs and sends a
+- `run_nat_phase` seeds the peer's current transport address into
+  the state machine as if the peer had announced it, sends a signed
+  `candidate_announce` carrying this node's host candidate to the
+  peer, and handles three driver events the previous cut ignored:
+  `ProbeRequested` dials the candidate with a fresh client
+  `Endpoint` under the App. A.5 5 s timeout — short-circuited when
+  the address is the transport address, since the live connection
+  is the proof — and `RelayDiscoveryRequested` signs and sends a
   `relay_discovery` on T0.
 - A new `probe_candidate` helper opens a fresh client endpoint per
   probe. The probe carries no identity — the `KeyClaim` is
@@ -729,6 +730,15 @@ The two-node tests passed because `run_nat_phase` reported the
 probe result directly, bypassing the wire. They now pass because
 the signed announces survive `dht_result_from` and reach the state
 machine.
+
+**Test narrowed.** `dht_forged_connectivity_is_dropped` previously
+asserted B's DHT queue stayed empty during a quiet connection. That
+held only because no other DHT traffic existed. With the NAT
+exchange sending a legitimate `candidate_announce`, the assertion
+is narrowed to the property it exists to check: no `Connectivity`
+result attributed to B when A delivered it. The legitimate
+`Candidates` result is drained from the queue without tripping the
+assertion.
 
 **Deliberately not in this commit.** The pull emitted by
 `DhtHandle::lookup_candidates` is still zero-signed: the trait
@@ -1048,16 +1058,15 @@ M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### Application layer (M9)
 
-16. **M9.5b-c — real `NatDriver`, cluster merge/split, XOR routing.**
-    Wire a per-peer `NatDriver` into the flow so the NAT phase
-    concludes from a real `NatEvent::DirectPathEstablished` rather
-    than from the transport being up. Exchange actual candidates,
-    perform probing, distinguish direct / relayed / failed
-    connectivity, and propagate an explicit `NatStatus`. Wire
-    `PeerLifecycle` into the flow as a live state variable.
-    Run `ClusterState` merge/split against the routing table.
-    Replace `LiveDht`'s lookup no-ops with real Coral lookups and
-    the DHT router's broadcast with XOR-distance routing.
+16. **M9.5b-c — cluster merge/split and XOR routing.** Parts 2
+    through 5 landed: `NatRelayed` is producible, the peer task
+    drives a per-peer `NatDriver`, candidate exchange is peer-scoped
+    and signed, and probes are real dials. What remains: run
+    `ClusterState` merge/split against the routing-eligible set,
+    replace `LiveDht`'s lookup no-ops with real Coral lookups, and
+    replace the DHT router's broadcast with XOR-distance routing.
+    Producing `NatRelayed` from a real relayed path also requires a
+    network (or a test) where direct candidates fail.
 
 17. **M9.6 — witness accumulation and trust bootstrap.** The
     responder currently answers with no witnesses; when the node
@@ -1188,6 +1197,8 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`run_nat_phase`) | M9.5b-c | NAT phase driven through `NatDriver` |
 | `quip-node/src/lib.rs` (`NatPhaseOutcome`) | M9.5b-c | NAT phase terminal outcome |
 | `quip-node/src/lib.rs` (`socket_to_address`, `local_ip_address`) | M9.5b-c | socket/address conversion |
+| `quip-node/src/lib.rs` (`probe_candidate`) | M9.5b-c | real candidate dial |
+| `quip-node/src/lib.rs` (`Node::signer_for_peers`) | M9.5b-c | signer threading for peer tasks |
 | `quip-net/src/nat_driver.rs` (`NatApplication`) | M3.4 | probe + relay-discovery handlers |
 | `quip-net/src/nat_driver.rs` (`dispatch_event`) | M3.4 | event routing |
 | `quip-net/src/establishment.rs:1` | M3.5 | §16 connection flow |
@@ -1229,7 +1240,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`Node::connect`) | M9.1, M9.4a, M9.5b-b | dial + inline handshake + slot registration |
 | `quip-node/src/lib.rs` (`Node::store` and direct helpers) | M9.2 | store access and pin API |
 | `quip-node/src/lib.rs` (`try_auto_serve_pins`) | M9.2 | pin/unpin/query_pins auto-serve |
-| `quip-node/src/lib.rs` (`dht_router_task`) | M9.4a | broadcast DHT outbound to peers |
+| `quip-node/src/lib.rs` (`dht_router_task`) | M9.4a, M9.5b-c | peer-scoped and mesh routing |
 | `quip-node/src/lib.rs` (`run_peer_loop` DHT branch) | M9.4a | intercept §12 NAT verbs |
 | `quip-node/src/dht.rs:1` | M9.4a, M9.5b-b, M9.5b-c | live `DhtClient`, slot-aware routing table, lifecycle mirror |
 | `quip-node/src/dht.rs` (`LiveDht`) | M9.4a | DHT client implementation |
@@ -1237,13 +1248,10 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/dht.rs` (`PeerRecord`) | M9.4a, M9.5b-b, M9.5b-c | routing-table entry shape with slot + lifecycle |
 | `quip-node/src/dht.rs` (`dht_result_from`) | M9.4a | §12 verb verification and conversion |
 | `quip-node/src/dht.rs` (`Outbound`) | M9.5b-c | peer-scoped vs mesh outbound |
-| `quip-node/src/dht.rs` (`note_session, forget_session`) | M9.5b-c | session-to-peer routing |
-| `quip-node/src/lib.rs` (`dht_router_task`) | M9.5b-c | peer-scoped routing |
+| `quip-node/src/dht.rs` (`note_session`, `forget_session`) | M9.5b-c | session-to-peer routing |
 | `quip-node/src/lib.rs` (`run_establishment`) | M9.4b, M9.5b-c | §16 flow driven per peer, lifecycle transitions, NAT via `NatDriver` |
 | `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
 | `quip-node/src/lib.rs` (`peer_run`) | M9.4b, M9.5b-b, M9.5b-c | establishment + steady-state entry point, slot-guarded, closing transition |
-| `quip-node/src/lib.rs` (`probe_candidate`) | M9.5b-c | real candidate dial |
-| `quip-node/src/lib.rs` (`Node::signer_for_peers`) | M9.5b-c | signer threading for peer tasks |
 | `quip-node/src/dht.rs` (`DhtHandle` impl `DhtClient`) | M9.4b | shared handle as DhtClient |
 | `quip-node/src/discovery.rs:1` | M9.5a | shared Coral discovery client |
 | `quip-node/src/discovery.rs` (`DiscoveryHandle`) | M9.5a | shared handle |
@@ -1258,10 +1266,6 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |
 | `quip-node/src/peer.rs` (`PeerLifecycle::is_routing_eligible`) | M9.5b-c | routing-eligibility predicate |
-| `quip-net/src/nat.rs` (`NatEvent::RelayedPathEstablished`) | M9.5b-c | relayed-path terminal outcome |
-| `quip-net/src/nat.rs` (`NatTraversal::on_relay_result`) | M9.5b-c | sole producer of RelayedPathEstablished |
-| `quip-net/src/nat.rs` (`SessionState::relay_outcome`) | M9.5b-c | concluded-relayed-session marker |
-| `quip-net/src/nat_driver.rs` (`NatDriver::on_relay_result`) | M9.5b-c | driver passthrough |
 | `quip-node/src/peer.rs` (`TransitionError`) | M9.5b-b | rejected-transition error type |
 | `quip-node/src/lib.rs` (`Registry`) | M9.5b-b, M9.5b-c | peer handles + persistent generation counters + lifecycle |
 | `quip-node/src/lib.rs` (`register_peer`) | M9.5b-b | slot allocation and prior-task abort |
@@ -1301,5 +1305,6 @@ consumed in M9.5b-c), `message.rs` BFT arms (M4), `bft.rs` (M4),
 next touch is cheap.
 
 **M9.5b-c note.** M9.5b-c now owns partial landed work (gates 5 and
-6). The remaining integration (real `NatDriver`, cluster merge/split,
-XOR routing) lands in a later commit under the same milestone label.
+6, plus parts 2–5). The remaining integration (cluster merge/split
+against the routing-eligible set, XOR-distance routing, real relayed
+paths) lands in a later commit under the same milestone label.

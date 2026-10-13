@@ -2993,6 +2993,7 @@ mod tests {
     use quip_net::nat_wire::{ConnectivityAnnounce, NAT_TYPE_OPEN};
     use quip_net::sync::{GetRequest, QueryPins};
     use quip_storage::CidTagging;
+    use std::collections::BTreeSet;
 
     fn seed(b: u8) -> [u8; 32] {
         let mut s = [0u8; 32];
@@ -3934,5 +3935,153 @@ mod tests {
             closest.contains(&b_node_id),
             "XOR routing should reach B: {closest:?}",
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Multi-node test harness.
+    // ------------------------------------------------------------------
+
+    /// The largest mesh [`MeshHarness`] supports.
+    ///
+    /// `connect_all` dials a complete graph — n×(n−1) connections, each
+    /// spawning a peer task — so the cost is O(n²). Six is the largest
+    /// mesh the §8 acceptance tests are expected to need; a
+    /// sparse-connection mode can grow this later.
+    const MESH_MAX_NODES: usize = 6;
+
+    // Multi-node test harness. Exists for M9.6a (witness accumulation,
+    // which needs four independent witnesses plus a subject) and §8's
+    // multi-node acceptance tests. Not part of any milestone's public
+    // surface.
+    /// A loopback mesh of nodes for multi-node tests.
+    ///
+    /// Owns the nodes and their frozen clocks together, so a test can
+    /// poll a specific node — or all of them — without holding a borrow
+    /// across the whole polling loop. Dropped nodes abort their peer
+    /// tasks, so the mesh tears down with the harness.
+    struct MeshHarness {
+        nodes: Vec<(Node, Arc<ManualClock>)>,
+        /// Distinct peers each node has reported `Ready` for, keyed by
+        /// node index and accumulated across polls.
+        ready: Vec<BTreeSet<NodeId>>,
+    }
+
+    impl MeshHarness {
+        /// Build `n` nodes with distinct Ed25519 seeds and frozen
+        /// clocks, bound on loopback but not yet connected.
+        async fn new(n: usize) -> MeshHarness {
+            assert!(
+                n <= MESH_MAX_NODES,
+                "MeshHarness capped at {MESH_MAX_NODES} nodes; got {n}",
+            );
+            let mut nodes = Vec::with_capacity(n);
+            for i in 0..n {
+                nodes.push(make_node_with_clock((i + 1) as u8).await);
+            }
+            MeshHarness {
+                nodes,
+                ready: vec![BTreeSet::new(); n],
+            }
+        }
+
+        /// Every node's `NodeId`, in index order.
+        fn node_ids(&self) -> Vec<NodeId> {
+            self.nodes
+                .iter()
+                .map(|(node, _)| node.local_node_id())
+                .collect()
+        }
+
+        /// The distinct peers node `idx` has reported `Ready` for,
+        /// sorted.
+        fn ready_peers(&self, idx: usize) -> Vec<NodeId> {
+            self.ready[idx].iter().copied().collect()
+        }
+
+        /// Dial every node from every other node, forming a complete
+        /// connection graph.
+        ///
+        /// The `NodeId` each `connect` returns is discarded — the
+        /// harness already has it via [`Self::node_ids`] — but the dial
+        /// has to happen for the mesh to exist.
+        async fn connect_all(&mut self) {
+            let addrs: Vec<SocketAddr> = self
+                .nodes
+                .iter()
+                .map(|(node, _)| node.local_addr().expect("node is bound"))
+                .collect();
+            let n = self.nodes.len();
+            for i in 0..n {
+                for (j, &addr) in addrs.iter().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    let _ = self.nodes[i].0.connect(addr, "localhost").await;
+                }
+            }
+        }
+
+        /// Poll node `idx` once, recording any `Ready` peers it reports.
+        async fn poll_ready(&mut self, idx: usize) {
+            if let Ok(events) = self.nodes[idx].0.poll().await {
+                for event in events {
+                    if let NodeEvent::Ready { peer, .. } = event {
+                        self.ready[idx].insert(peer);
+                    }
+                }
+            }
+        }
+
+        /// Wait until every node has emitted a `Ready` event for every
+        /// other node, up to `timeout_ms`. Returns `true` when the full
+        /// mesh is ready.
+        async fn wait_all_ready(&mut self, timeout_ms: u64) -> bool {
+            let deadline =
+                std::time::Instant::now() + Duration::from_millis(timeout_ms);
+            let n = self.nodes.len();
+            let ids = self.node_ids();
+            loop {
+                for i in 0..n {
+                    self.poll_ready(i).await;
+                }
+                let ready = &self.ready;
+                let all = (0..n)
+                    .all(|i| (0..n).all(|j| i == j || ready[i].contains(&ids[j])));
+                if all {
+                    return true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
+            }
+        }
+    }
+
+    /// A three-node mesh reaches full readiness through the harness:
+    /// each node reports `Ready` for exactly the other two, by their
+    /// real `NodeId`s.
+    #[tokio::test]
+    async fn mesh_harness_three_nodes_all_ready() {
+        let mut h = MeshHarness::new(3).await;
+        h.connect_all().await;
+        assert!(
+            h.wait_all_ready(15_000).await,
+            "a three-node mesh should reach full readiness",
+        );
+
+        let ids = h.node_ids();
+        for i in 0..3 {
+            let peers = h.ready_peers(i);
+            assert_eq!(peers.len(), 2, "node {i} should report Ready for 2 peers");
+            for (j, &id) in ids.iter().enumerate() {
+                if i == j {
+                    continue;
+                }
+                assert!(
+                    peers.contains(&id),
+                    "node {i} should report Ready for node {j} ({id:?})",
+                );
+            }
+        }
     }
 }

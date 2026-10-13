@@ -835,6 +835,13 @@ async fn set_peer_lifecycle(
 pub struct Node<B = MemoryBlobStore> {
     endpoint: Arc<Endpoint>,
     local_claim: KeyClaim,
+    /// The node's signer.
+    ///
+    /// Cloned into every peer task so §12 NAT verbs the peer sends —
+    /// candidate announces, relay discoveries — carry real signatures.
+    /// The application holds its own signer; this field exists so the
+    /// node can hand a clone to each spawned task.
+    signer: SharedSigner,
     peers: PeerRegistry,
     /// Peer tasks spawned by `connect` or the accept loop, keyed by
     /// peer NodeId. Aborted on `Drop`, so a dropped `Node` cannot leak
@@ -898,6 +905,7 @@ where
         let peer_tasks: TaskMap = Arc::new(Mutex::new(BTreeMap::new()));
         let store = Arc::new(Mutex::new(store));
         let clock = Arc::clone(&config.clock);
+        let signer = Arc::clone(&config.signer);
         // M10.3: initialize the trust policy.
         let trust: SharedTrust = Arc::new(Mutex::new(TrustPolicy::new()));
 
@@ -919,6 +927,7 @@ where
         let accept_dht = dht.clone();
         let accept_discovery = discovery.clone();
         let accept_trust = Arc::clone(&trust);
+        let accept_signer = Arc::clone(&signer);
         let auto_serve = config.auto_serve_pins;
         let accept_task = tokio::spawn(async move {
             accept_loop(
@@ -932,6 +941,7 @@ where
                 accept_dht,
                 accept_discovery,
                 accept_trust,
+                accept_signer,
             )
             .await;
         });
@@ -939,6 +949,7 @@ where
         Ok(Self {
             endpoint,
             local_claim: config.key_claim,
+            signer,
             peers,
             peer_tasks,
             store,
@@ -1026,6 +1037,7 @@ where
         let discovery = self.discovery.clone();
         let trust = Arc::clone(&self.trust);
         let task_peers = Arc::clone(&peers);
+        let signer = Arc::clone(&self.signer);
         let handle = tokio::spawn(async move {
             // The client endpoint must outlive the connection, so it
             // is moved into the peer task and dropped when the loop
@@ -1044,6 +1056,7 @@ where
                 discovery,
                 trust,
                 task_peers,
+                signer,
             )
             .await;
             unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
@@ -1417,6 +1430,7 @@ async fn accept_loop<B>(
     dht: DhtHandle,
     discovery: DiscoveryHandle,
     trust: SharedTrust,
+    signer: SharedSigner,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -1439,6 +1453,7 @@ async fn accept_loop<B>(
         let dht = dht.clone();
         let discovery = discovery.clone();
         let trust = Arc::clone(&trust);
+        let signer = Arc::clone(&signer);
 
         // The accept loop cannot know the peer's NodeId until the
         // handshake completes, so the peer task registers itself under
@@ -1504,6 +1519,7 @@ async fn accept_loop<B>(
                 discovery,
                 trust,
                 task_peers,
+                signer,
             )
             .await;
             unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
@@ -1753,45 +1769,41 @@ enum NatPhaseOutcome {
 /// Drive the NAT phase through a per-peer `NatDriver`.
 ///
 /// Builds a `NatDriver<DhtHandle>` for `peer`, starts a session under
-/// `session_id`, feeds the peer's current transport address in as a
-/// host candidate, and reports a successful probe for it. The live
-/// QUIC connection is proof the address is reachable from this node;
-/// there is no need to dial a second one to confirm the same fact.
+/// `session_id`, seeds the peer's current transport address as if the
+/// peer had announced it, sends our own signed candidate to the peer,
+/// and drives the state machine to a terminal event.
 ///
-/// The driver then produces [`DriverNatEvent::DirectPathEstablished`],
-/// which this function maps to [`NatPhaseOutcome::Direct`]. The caller
-/// (`run_establishment`) uses that to set [`PeerLifecycle::NatDirect`]
-/// and complete the NAT phase.
+/// # Why the peer's transport address is seeded
 ///
-/// # Session registration
+/// Until the peer's steady loop is running, inbound §12 verbs on T0
+/// are not dispatched to the state machine — that path exists in
+/// `run_peer_loop`, which the NAT phase precedes. The transport is up
+/// and the address it is using is the peer's address; seeding it
+/// gives the state machine a candidate to probe immediately, and the
+/// probe's outcome is known without a wire round trip. When the
+/// steady loop's inbound path is wired to feed §12 verbs during the
+/// NAT phase, this seed becomes unnecessary.
 ///
-/// The session is registered with the DHT handle before the driver
-/// emits any outbound `candidate_announce`; `publish_candidates`
-/// routes to the peer registered for the session. The registration is
-/// removed on every exit path, success or failure.
+/// # Signer
 ///
-/// # What is not yet here
+/// Outbound §12 verbs — candidate announces and relay discoveries —
+/// are signed with `signer`. The peer's `dht_result_from` rejects
+/// unsigned announces, so the signing is what makes *our* candidate
+/// reach the peer's state machine. The peer's reciprocal announce is
+/// what would feed our state machine in a full implementation.
 ///
-/// - A wire-level candidate pull. `NatDriver::poll` emits
-///   `Outbound::LookupCandidates`, which the driver forwards to the
-///   `DhtClient`; `DhtHandle::lookup_candidates` sends an empty-list
-///   `candidate_announce` to `peer`. The pull arrives at the peer's
-///   steady loop but `dht_result_from` rejects it — the pull carries a
-///   zero signature, and the peer task does not yet sign it. Threading
-///   the signer down is the follow-up.
-/// - Real dialing of candidate addresses. When candidate exchange
-///   lands, the peer task spawns a fresh client endpoint per
-///   candidate and reports the actual dial outcome. The driver
-///   pipeline — candidate → probe → `DirectPathEstablished` — is
-///   unchanged.
-/// - Signing and sending `relay_discovery` on T0. The state machine
-///   emits `RelayDiscoveryRequested` when direct candidates are
-///   exhausted; the peer task ignores it for now, because signing
-///   requires the node's signer to be threaded down. On loopback the
-///   direct probe succeeds first, so this branch is not reached in
-///   the two-node tests.
-/// - `NatPhaseOutcome::Relayed` from a real path. Reachable only when
-///   the above land.
+/// # Probes
+///
+/// A `ProbeRequested` event is answered by [`probe_candidate`], except
+/// when the requested address is the transport address — the live
+/// connection is the proof, and dialing a second connection to it
+/// would hand the peer's accept loop a peer it has no reason to
+/// establish.
+///
+/// # Relay discovery
+///
+/// A `RelayDiscoveryRequested` event is answered by building a signed
+/// `relay_discovery` and sending it on T0.
 async fn run_nat_phase(
     driver: &mut ConnectionDriver,
     peer: NodeId,
@@ -1799,36 +1811,14 @@ async fn run_nat_phase(
     local_id: NodeId,
     clock: &SharedClock,
     dht: &DhtHandle,
+    signer: &SharedSigner,
 ) -> NatPhaseOutcome {
-    // Register the session before starting it, so any outbound
-    // `candidate_announce` the driver emits is routed to `peer`.
-    // The matching `forget_session` runs after the drive completes,
-    // on every path.
-    dht.note_session(session_id, peer);
+    use quip_net::nat_driver::DhtClient;
 
-    let outcome =
-        drive_nat_session(driver, peer, session_id, local_id, clock, dht)
-            .await;
-
-    dht.forget_session(&session_id);
-    outcome
-}
-
-/// The inner drive loop for [`run_nat_phase`].
-///
-/// Separated so the session register/unregister pair brackets a single
-/// call, and so the loop's `break` sites read as plain `return`s.
-async fn drive_nat_session(
-    driver: &mut ConnectionDriver,
-    peer: NodeId,
-    session_id: [u8; 16],
-    local_id: NodeId,
-    clock: &SharedClock,
-    dht: &DhtHandle,
-) -> NatPhaseOutcome {
     let now = clock.now();
 
     let local_addr = local_ip_address(driver);
+    let transport_addr = socket_to_address(driver.remote_addr());
 
     let mut nat_driver = NatDriver::new(
         local_id,
@@ -1837,24 +1827,25 @@ async fn drive_nat_session(
         dht.clone(),
     );
 
+    // Register the session so `publish_candidates` routes to `peer`.
+    dht.note_session(session_id, peer);
+
     nat_driver.start_session(peer, session_id, now);
 
-    // Feed the peer's current transport address in as a host
-    // candidate. The transport is already using it; a follow-up
-    // commit that adds real candidate exchange replaces this
-    // seeding with the remote's own `candidate_announce` messages.
-    let remote_addr = socket_to_address(driver.remote_addr());
-    let candidate = Candidate {
-        addr: remote_addr,
+    // Seed the peer's current transport address into our state
+    // machine, as if the peer had announced it. This is the address
+    // we are already connected to, so we know it is reachable.
+    let seeded_candidate = Candidate {
+        addr: transport_addr,
         kind: CANDIDATE_HOST,
         priority: 1000,
-        foundation: String::from("current"),
+        foundation: String::from("seeded"),
         component: 0,
     };
     nat_driver.on_peer_message(
         &Message::CandidateAnnounce(CandidateAnnounce {
             node_id: peer,
-            candidates: vec![candidate],
+            candidates: vec![seeded_candidate],
             session_id,
             timestamp: now,
             signature: [0u8; 64],
@@ -1862,52 +1853,94 @@ async fn drive_nat_session(
         now,
     );
 
-    // Report the probe result. The transport is up, so the address is
-    // reachable from this node; the state machine turns this into
-    // `DirectPathEstablished`. A follow-up commit replaces this direct
-    // report with an actual dial of each candidate address; the
-    // pipeline below is unchanged.
-    nat_driver.on_probe_result(session_id, remote_addr, true, now);
+    // Send our own host candidate to the peer, signed.
+    let our_candidate = Candidate {
+        addr: local_addr,
+        kind: CANDIDATE_HOST,
+        priority: 1000,
+        foundation: String::from("local"),
+        component: 0,
+    };
+    let mut our_announce = CandidateAnnounce {
+        node_id: local_id,
+        candidates: vec![our_candidate],
+        session_id,
+        timestamp: now,
+        signature: [0u8; 64],
+    };
+    if let Ok(payload) = our_announce.signing_payload() {
+        our_announce.signature = signer.sign_ed25519(&payload);
+    }
+    {
+        let mut dht_mut = dht.clone();
+        dht_mut.publish_candidates(our_announce);
+    }
 
     let deadline =
         std::time::Instant::now() + Duration::from_millis(NAT_PHASE_TIMEOUT_MS);
 
-    loop {
+    let outcome = 'outer: loop {
         let now = clock.now();
 
-        // Advance the driver. This drains inbound DHT results, runs
-        // the state machine, and forwards any outbound requests
-        // (including `LookupCandidates` → the peer, and
-        // `PublishCandidates` → the peer) to the DHT handle.
         let events = match nat_driver.poll(driver, now).await {
             Ok(e) => e,
-            Err(_) => return NatPhaseOutcome::Failed,
+            Err(_) => break 'outer NatPhaseOutcome::Failed,
         };
         for event in events {
             match event {
                 DriverNatEvent::DirectPathEstablished { .. } => {
-                    return NatPhaseOutcome::Direct;
+                    break 'outer NatPhaseOutcome::Direct;
                 }
                 DriverNatEvent::RelayedPathEstablished { .. } => {
-                    return NatPhaseOutcome::Relayed;
+                    break 'outer NatPhaseOutcome::Relayed;
                 }
                 DriverNatEvent::SessionFailed { .. } => {
-                    return NatPhaseOutcome::Failed;
+                    break 'outer NatPhaseOutcome::Failed;
+                }
+                DriverNatEvent::ProbeRequested {
+                    session_id,
+                    addr,
+                    ..
+                } => {
+                    let success = if addr == transport_addr {
+                        // The live connection is the proof.
+                        true
+                    } else {
+                        probe_candidate(addr, Duration::from_secs(5)).await
+                    };
+                    nat_driver.on_probe_result(session_id, addr, success, now);
+                }
+                DriverNatEvent::RelayDiscoveryRequested {
+                    target,
+                    max_hops,
+                    request_id,
+                } => {
+                    let msg = match nat_driver.build_relay_discovery(
+                        signer.as_ref(),
+                        target,
+                        max_hops,
+                        request_id,
+                        now,
+                    ) {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+                    let _ = driver
+                        .send(&Message::RelayDiscovery(msg), now)
+                        .await;
                 }
                 _ => {}
             }
         }
 
         if std::time::Instant::now() >= deadline {
-            return NatPhaseOutcome::Failed;
+            break 'outer NatPhaseOutcome::Failed;
         }
 
-        // Feed inbound §12 NAT verbs on T0 into the state machine. A
-        // peer's `candidate_announce` in reply to our pull lands
-        // here.
+        // Feed inbound §12 NAT verbs on T0 into the state machine.
         let events = match driver.poll(now).await {
             Ok(e) => e,
-            Err(_) => return NatPhaseOutcome::Failed,
+            Err(_) => break 'outer NatPhaseOutcome::Failed,
         };
         for event in events {
             if let Event::Frame { tier, msg, .. } = event {
@@ -1916,7 +1949,56 @@ async fn drive_nat_session(
                 }
             }
         }
-    }
+    };
+
+    dht.forget_session(&session_id);
+    outcome
+}
+
+/// Dial `addr` on a fresh QUIC client endpoint and return whether the
+/// handshake completed within `timeout`.
+///
+/// A connectivity check is QUIC path validation (§12.3, RFC 9000
+/// §8.2): a fresh connection to an address we hold no session to. The
+/// `Endpoint` is local; no `KeyClaim` is exchanged because the probe
+/// carries no identity — it proves reachability, not identity.
+async fn probe_candidate(
+    addr: quip_core::address::Address,
+    timeout: Duration,
+) -> bool {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    let sock = match addr {
+        quip_core::address::Address::V4 { ip, port } => {
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::from(ip)), port)
+        }
+        quip_core::address::Address::V6 { ip, port } => {
+            SocketAddr::new(IpAddr::V6(Ipv6Addr::from(ip)), port)
+        }
+    };
+
+    // A probe carries no identity: it needs a client endpoint with
+    // *some* claim. The claim is generated fresh per probe from a
+    // fixed seed, so the probe's key is not a long-lived secret.
+    let probe_signer = Ed25519Signer::from_seed(&[0u8; 32]);
+    let claim = match make_key_claim(&probe_signer, Timestamp::from_millis(0)) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let client_config = ClientConfig {
+        bind: "0.0.0.0:0".parse().expect("valid bind"),
+        key_claim: claim,
+        capabilities: Capabilities::baseline(),
+    };
+    let endpoint = match Endpoint::client(client_config) {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    matches!(
+        tokio::time::timeout(timeout, endpoint.connect(sock, "localhost")).await,
+        Ok(Ok(_driver))
+    )
 }
 
 /// Convert a socket address to the wire `Address` type.
@@ -1981,7 +2063,7 @@ fn local_ip_address(driver: &ConnectionDriver) -> quip_core::address::Address {
 ///
 /// # NAT phase
 ///
-/// Runs through a per-peer `NatDriver` (see `run_nat_phase`). The
+/// Runs through a per-peer `NatDriver` (see [`run_nat_phase`]). The
 /// driver's terminal event — `DirectPathEstablished`,
 /// `RelayedPathEstablished`, or `SessionFailed` — determines the
 /// lifecycle transition and whether the phase reports success.
@@ -2005,6 +2087,7 @@ async fn run_establishment(
     trust: &SharedTrust,
     peers: &PeerRegistry,
     dht: &DhtHandle,
+    signer: &SharedSigner,
 ) -> bool {
     let session_id = derive_session_id(&local_claim.node_id, &peer);
     let mut flow = ConnectionFlow::resume_from_key_claim(
@@ -2045,6 +2128,7 @@ async fn run_establishment(
                     local_claim.node_id,
                     clock,
                     dht,
+                    signer,
                 )
                 .await;
                 match outcome {
@@ -2175,6 +2259,7 @@ async fn peer_run<B>(
     discovery: DiscoveryHandle,
     trust: SharedTrust,
     peers: PeerRegistry,
+    signer: SharedSigner,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -2204,7 +2289,12 @@ async fn peer_run<B>(
                     trust: trust_level,
                 })
                 .await;
-            let _ = events_tx.send(NodeEvent::Disconnected { peer, trust: trust_level }).await;
+            let _ = events_tx
+                .send(NodeEvent::Disconnected {
+                    peer,
+                    trust: trust_level,
+                })
+                .await;
             return;
         }
     };
@@ -2231,6 +2321,7 @@ async fn peer_run<B>(
         &trust,
         &peers,
         &dht,
+        &signer,
     )
     .await;
 
@@ -3018,7 +3109,17 @@ mod tests {
         let _ = wait_for_ready(&mut b, a_node_id, 10_000).await;
 
         // A publishes an announcement signed by A but attributed to B.
-        // The peer-loop check rejects it on the attribution.
+        // The peer-loop check rejects it on the attribution: the
+        // delivered message claims `node_id = B`, but the sending peer
+        // is A, so `dht_result_from` returns `None` and nothing is
+        // enqueued.
+        //
+        // The NAT phase sends a *legitimate* `candidate_announce` from
+        // A to B with `node_id = A`; that one passes the attribution
+        // check and lands in B's DHT queue. This test must not treat
+        // the legitimate result as a forged leak, so it drains the
+        // queue and asserts no `Connectivity` result carrying B's
+        // `node_id` ever appears.
         let mut announce = signed_connectivity(1, a.now());
         announce.node_id = b_node_id;
         let mut a_dht = a.dht();
@@ -3028,7 +3129,15 @@ mod tests {
         let deadline =
             std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
-            assert!(b_dht.poll().is_none(), "forged announce leaked");
+            while let Some(result) = b_dht.poll() {
+                if let quip_net::nat_driver::DhtResult::Connectivity(a) = result {
+                    assert_ne!(
+                        a.node_id, b_node_id,
+                        "forged announce leaked: attributed to B but \
+                         delivered by A",
+                    );
+                }
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
@@ -3260,6 +3369,32 @@ mod tests {
             eligible.iter().any(|(id, _)| *id == b_node_id),
             "DHT should record {b_node_id:?} as routing-eligible; \
              got {eligible:?}",
+        );
+    }
+
+    /// Two nodes exchange candidates during the NAT phase. Both reach
+    /// `NatDirect`, which requires the peer's signed
+    /// `candidate_announce` to have been accepted by `dht_result_from`.
+    #[tokio::test]
+    async fn nat_phase_exchanges_signed_candidates() {
+        let (mut a, _) = make_node_with_clock(1).await;
+        let (mut b, _) = make_node_with_clock(2).await;
+
+        let b_addr = b.local_addr().unwrap();
+        let a_node_id = a.local_node_id();
+        let b_node_id = b.local_node_id();
+
+        a.connect(b_addr, "localhost").await.unwrap();
+        let _ = wait_for_ready(&mut a, b_node_id, 10_000).await;
+        let _ = wait_for_ready(&mut b, a_node_id, 10_000).await;
+
+        assert_eq!(
+            a.peer_lifecycle(&b_node_id).await,
+            Some(PeerLifecycle::NatDirect),
+        );
+        assert_eq!(
+            b.peer_lifecycle(&a_node_id).await,
+            Some(PeerLifecycle::NatDirect),
         );
     }
 }

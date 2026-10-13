@@ -46,6 +46,10 @@ Candidate exchange between peers is now live: an empty-list
 candidate_announce addressed to a specific peer pulls that peer's 
 candidates for the session.
 
+The node's signer is threaded into the peer task, so §12 NAT verbs 
+the peer sends — candidate announces, relay discoveries — carry real 
+signatures and are accepted by the receiving peer's dht_result_from.
+
 ### Build status
 
 All crates compile, every test passes, clippy and rustdoc are silent
@@ -122,7 +126,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, candidate exchange, cluster merge/split, XOR routing | in progress |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, cluster merge/split, XOR routing | in progress |
 | M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
@@ -696,6 +700,48 @@ Tests: `publish_candidates_routes_to_the_session_peer`,
 `forget_session_removes_routing`,
 `publish_connectivity_is_broadcast` (dht.rs).
 
+### M9.5b-c (part 5) — signed NAT verbs and real candidate probing — LANDED
+
+The NAT phase's evidence is now genuine. Outbound §12 verbs are
+signed with the node's key, and the driver's probe requests are
+answered by dialing the candidate rather than by asserting success.
+
+- **`quip-node/src/lib.rs`.** `Node` gains a private `signer` field
+  and a `signer_for_peers()` accessor. `peer_run` and
+  `run_establishment` take a `&SharedSigner`; both call sites
+  (`Node::connect`, `accept_loop`) clone the node's signer into the
+  peer task.
+- `run_nat_phase` sends a signed `candidate_announce` carrying this
+  node's host candidate, and handles three driver events the
+  previous cut ignored: `ProbeRequested` dials the candidate with a
+  fresh client `Endpoint` under the App. A.5 5 s timeout and reports
+  the actual outcome; `RelayDiscoveryRequested` signs and sends a
+  `relay_discovery` on T0.
+- A new `probe_candidate` helper opens a fresh client endpoint per
+  probe. The probe carries no identity — the `KeyClaim` is
+  generated fresh per probe — because §12.3 path validation does
+  not authenticate the prober.
+
+**What changed for the receiver.** The peer's `dht_result_from`
+already verified `candidate_announce` signatures; the announces
+were reaching it with zero-filled signatures and being rejected.
+The two-node tests passed because `run_nat_phase` reported the
+probe result directly, bypassing the wire. They now pass because
+the signed announces survive `dht_result_from` and reach the state
+machine.
+
+**Deliberately not in this commit.** The pull emitted by
+`DhtHandle::lookup_candidates` is still zero-signed: the trait
+method has no signer parameter, and threading one through the trait
+is a larger change than the value justifies — the peer's response
+carries its own valid signature and is what advances the session.
+Cluster merge/split and XOR routing remain M9.5b-c's outstanding
+work.
+
+Tests: `nat_phase_exchanges_signed_candidates` (lib.rs). The
+existing integration tests are unchanged in intent but now depend
+on the signing path.
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -1196,6 +1242,8 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`run_establishment`) | M9.4b, M9.5b-c | §16 flow driven per peer, lifecycle transitions, NAT via `NatDriver` |
 | `quip-node/src/lib.rs` (`derive_session_id`) | M9.4b | symmetric session-id derivation |
 | `quip-node/src/lib.rs` (`peer_run`) | M9.4b, M9.5b-b, M9.5b-c | establishment + steady-state entry point, slot-guarded, closing transition |
+| `quip-node/src/lib.rs` (`probe_candidate`) | M9.5b-c | real candidate dial |
+| `quip-node/src/lib.rs` (`Node::signer_for_peers`) | M9.5b-c | signer threading for peer tasks |
 | `quip-node/src/dht.rs` (`DhtHandle` impl `DhtClient`) | M9.4b | shared handle as DhtClient |
 | `quip-node/src/discovery.rs:1` | M9.5a | shared Coral discovery client |
 | `quip-node/src/discovery.rs` (`DiscoveryHandle`) | M9.5a | shared handle |

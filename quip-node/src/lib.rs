@@ -335,6 +335,7 @@ pub mod dht;
 pub mod discovery;
 pub mod event;
 pub mod peer;
+pub mod registry;
 pub mod trust;
 
 use quip_core::cid::{CidOrV1, HashAlgo};
@@ -384,6 +385,7 @@ pub use peer::{PeerLifecycle, PeerSlot};
 use trust::{PeerTrust, TrustPolicy};
 // M9.5b-c part 7: cluster membership over the routing-eligible set.
 use cluster::{ClusterHandle, ClusterView};
+use registry::{register_peer, unregister_peer, PeerRegistry, Registry, TaskMap};
 
 /// Capacity of the node's event channel.
 const EVENT_CHANNEL_CAPACITY: usize = 128;
@@ -417,205 +419,6 @@ const LOCAL_CANDIDATE_PRIORITY: u64 = 1000;
 // M10.3: shared handle around the trust policy, same shape as the
 // store and the DHT handle.
 type SharedTrust = Arc<Mutex<TrustPolicy>>;
-
-// -------------------------------------------------------------------------
-// Peer registry
-// -------------------------------------------------------------------------
-
-/// A registered peer connection.
-struct PeerHandle {
-    /// The current connection generation for this peer.
-    slot: PeerSlot,
-    /// Outbound queue for the peer task driving this generation.
-    outbound: mpsc::Sender<Message>,
-    /// Connection lifecycle for this generation.
-    ///
-    /// The peer task is the single writer; every transition flows
-    /// through `set_peer_lifecycle`, which validates the edge
-    /// against §2a via [`PeerLifecycle::transition_to`]. A new slot
-    /// starts at `Established`, because a [`PeerSlot`] is allocated
-    /// only after the §4 handshake completes — the peer's `NodeId`
-    /// is not known before then — so `Connecting` is not observable
-    /// at the slot level.
-    lifecycle: PeerLifecycle,
-}
-
-/// Per-node registry of active peer handles and generation counters.
-///
-/// The two maps live behind one lock so that "allocate a new slot,
-/// replace the handle" is a single atomic step with respect to any
-/// other `register` call for the same `NodeId`. This is what makes a
-/// concurrent reconnect deterministic: whoever takes the lock second
-/// wins, and the first task's slot is no longer current.
-///
-/// The generation counter is **persistent**. It is never reset when a
-/// peer disconnects, because resetting would allow a slot value to be
-/// reused and break the "stale slot cannot match" invariant.
-struct Registry {
-    /// Active peer handles, keyed by logical NodeId.
-    peers: BTreeMap<NodeId, PeerHandle>,
-    /// Persistent per-NodeId generation counter. Incremented every
-    /// time a new `PeerSlot` is allocated for the NodeId. Never
-    /// reset, so a slot value is never reused within a `Node`'s
-    /// lifetime.
-    generations: BTreeMap<NodeId, u64>,
-}
-
-impl Registry {
-    fn new() -> Self {
-        Self {
-            peers: BTreeMap::new(),
-            generations: BTreeMap::new(),
-        }
-    }
-
-    /// Allocate a fresh slot for `peer`, replace any existing handle,
-    /// and return the new slot plus the previous handle if any.
-    ///
-    /// The new handle starts in [`PeerLifecycle::Established`]: a
-    /// [`PeerSlot`] is allocated only after the §4 handshake has
-    /// completed, so `Connecting` is not observable at the slot
-    /// level.
-    ///
-    /// The generation counter uses `wrapping_add`: reaching
-    /// `u64::MAX` connections for a single peer would require a
-    /// connection rate no deployed node will ever see, and a panic
-    /// in the accept loop is worse than an astronomically unlikely
-    /// reuse.
-    fn register(
-        &mut self,
-        peer: NodeId,
-        outbound: mpsc::Sender<Message>,
-    ) -> (PeerSlot, Option<PeerHandle>) {
-        let counter = self.generations.entry(peer).or_insert(0);
-        *counter = counter.wrapping_add(1);
-        let slot = PeerSlot::new(peer, *counter);
-        let old = self.peers.insert(
-            peer,
-            PeerHandle {
-                slot,
-                outbound,
-                lifecycle: PeerLifecycle::Established,
-            },
-        );
-        (slot, old)
-    }
-
-    /// True if `slot` is the currently-registered slot for its peer.
-    fn is_current(&self, slot: &PeerSlot) -> bool {
-        self.peers
-            .get(&slot.node_id)
-            .map(|h| h.slot == *slot)
-            .unwrap_or(false)
-    }
-
-    /// Apply a lifecycle transition for `slot` if it is still current.
-    ///
-    /// The edge is validated against §2a via
-    /// [`PeerLifecycle::transition_to`]. A rejected edge is a caller
-    /// bug and leaves the state unchanged; a stale slot is a silent
-    /// no-op. Returns `true` if the transition was applied.
-    fn set_lifecycle(&mut self, slot: &PeerSlot, to: PeerLifecycle) -> bool {
-        if let Some(h) = self.peers.get_mut(&slot.node_id) {
-            if h.slot == *slot && h.lifecycle.transition_to(to).is_ok() {
-                h.lifecycle = to;
-                return true;
-            }
-        }
-        false
-    }
-
-    /// Slots of peers that are currently routing-eligible.
-    ///
-    /// §3 of `docs/M9.5b-design.md`: physical connection existence and
-    /// routing eligibility are distinct. The predicate is
-    /// [`PeerLifecycle::is_routing_eligible`].
-    fn routing_eligible_slots(&self) -> Vec<PeerSlot> {
-        self.peers
-            .values()
-            .filter(|h| h.lifecycle.is_routing_eligible())
-            .map(|h| h.slot)
-            .collect()
-    }
-
-    /// Remove the entry for `slot` if it is current; return whether
-    /// anything was removed.
-    fn remove_if_current(&mut self, slot: &PeerSlot) -> bool {
-        if self.is_current(slot) {
-            self.peers.remove(&slot.node_id);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Clone the outbound sender for `peer`, if it is registered.
-    fn outbound_of(&self, peer: &NodeId) -> Option<mpsc::Sender<Message>> {
-        self.peers.get(peer).map(|h| h.outbound.clone())
-    }
-}
-
-/// Shared registry behind the same lock the node's `peers` handle
-/// uses.
-type PeerRegistry = Arc<Mutex<Registry>>;
-
-/// Peer tasks keyed by logical NodeId. The slot is stored alongside
-/// the handle so a task's cleanup path can verify that the entry it
-/// sees is its own before removing it.
-type TaskMap = Arc<Mutex<BTreeMap<NodeId, (PeerSlot, JoinHandle<()>)>>>;
-
-/// Allocate a slot for a new connection and abort any previous task
-/// for the same `NodeId`.
-///
-/// Returns the new slot. The caller must insert the returned
-/// `JoinHandle` into the task map once it has spawned its task.
-async fn register_peer(
-    peers: &PeerRegistry,
-    peer_tasks: &TaskMap,
-    peer: NodeId,
-    outbound: mpsc::Sender<Message>,
-) -> PeerSlot {
-    let slot = {
-        let mut reg = peers.lock().await;
-        let (slot, _old) = reg.register(peer, outbound);
-        slot
-    };
-    // Abort the previous task if there is one. We take the entry
-    // out of the map first so that a subsequent insert by the caller
-    // replaces it deterministically.
-    if let Some((_old_slot, old_task)) = peer_tasks.lock().await.remove(&peer) {
-        old_task.abort();
-    }
-    slot
-}
-
-/// Remove a peer task's registry entries on exit.
-///
-/// The peer handle and the task-map entry are both removed only if
-/// `slot` is still the current generation for its peer. A stale task
-/// — whose slot was superseded by a newer connection before it
-/// finished — leaves the newer task's state alone.
-async fn unregister_peer(
-    peers: &PeerRegistry,
-    peer_tasks: &TaskMap,
-    peer: &NodeId,
-    slot: &PeerSlot,
-) {
-    let removed = {
-        let mut reg = peers.lock().await;
-        reg.remove_if_current(slot)
-    };
-    if removed {
-        let mut tasks = peer_tasks.lock().await;
-        let is_ours = tasks
-            .get(peer)
-            .map(|(s, _)| s == slot)
-            .unwrap_or(false);
-        if is_ours {
-            tasks.remove(peer);
-        }
-    }
-}
 
 /// Apply a lifecycle transition to both the registry and the DHT
 /// routing table.
@@ -994,7 +797,7 @@ where
 
     /// Snapshot of currently connected peers.
     pub async fn peers(&self) -> Vec<NodeId> {
-        self.peers.lock().await.peers.keys().copied().collect()
+        self.peers.lock().await.peer_ids()
     }
 
     /// Slots of peers that are currently routing-eligible.
@@ -1022,19 +825,14 @@ where
     /// different slots for the same `NodeId` mean a reconnect happened
     /// in between.
     pub async fn peer_slot(&self, peer: &NodeId) -> Option<PeerSlot> {
-        self.peers.lock().await.peers.get(peer).map(|h| h.slot)
+        self.peers.lock().await.peer_slot(peer)
     }
 
     /// The current lifecycle state for `peer`, if it is connected.
     ///
     /// Read-only. The peer task is the single writer.
     pub async fn peer_lifecycle(&self, peer: &NodeId) -> Option<PeerLifecycle> {
-        self.peers
-            .lock()
-            .await
-            .peers
-            .get(peer)
-            .map(|h| h.lifecycle)
+        self.peers.lock().await.peer_lifecycle(peer)
     }
 
     /// Initiate a graceful close of the endpoint.
@@ -1282,7 +1080,7 @@ async fn dht_router_task(
                     // broadcast.
                     let targets: Vec<NodeId> = match out.key {
                         Some(key) => dht.closest_to(&key, GATEWAY_ROUTER_COUNT),
-                        None => reg.peers.keys().copied().collect(),
+                        None => reg.peer_ids(),
                     };
                     targets
                         .into_iter()

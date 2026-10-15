@@ -19,9 +19,9 @@
 //! - Accept inbound connections; drive the §4/§16 handshake to
 //!   completion in a background task.
 //! - Dial outbound connections; drive the handshake inline.
-//! - Run a [`ConnectionFlow`] per peer, sequencing §16 establishment
+//! - Run a [`ConnectionFlow`](quip_net::establishment::ConnectionFlow) per peer, sequencing §16 establishment
 //!   from the point the transport's inline handshake leaves off.
-//! - Drive a per-peer [`NatDriver`] during the flow's NAT phase, so
+//! - Drive a per-peer [`NatDriver`](quip_net::nat_driver::NatDriver) during the flow's NAT phase, so
 //!   the phase concludes from a `NatEvent` rather than from a
 //!   hardcoded reading of the transport.
 //! - Run Coral witness discovery for each peer during the flow's
@@ -37,7 +37,7 @@
 //!   when [`NodeConfig::auto_serve_pins`] is set.
 //! - Expose direct store helpers: `put_content`, `get_content`,
 //!   `pin`, `unpin`, `query_pins`, and a raw `store()` accessor.
-//! - Read the wall clock through a [`Clock`], so tests can inject a
+//! - Read the wall clock through a [`Clock`](quip_core::time::Clock), so tests can inject a
 //!   deterministic time source.
 //! - **M9.5b-b:** allocate a [`PeerSlot`] for every connection,
 //!   abort the previous generation's task on reconnect, and scope
@@ -139,7 +139,7 @@
 //!
 //! # NAT phase (M9.5b-c parts 3, 5, and 6)
 //!
-//! The §16 NAT phase is driven by a per-peer [`NatDriver`]. The peer
+//! The §16 NAT phase is driven by a per-peer [`NatDriver`](quip_net::nat_driver::NatDriver). The peer
 //! task seeds the driver with the peer's current transport address,
 //! reports a successful probe for it — the live QUIC connection is
 //! proof the address is reachable — and reads the terminal
@@ -183,8 +183,8 @@
 //!
 //! After the §4 handshake and §16 Key Claim exchange — both performed
 //! inline by `ConnectionDriver` — each peer task runs a
-//! [`ConnectionFlow`] resumed at `NatTraversal` via
-//! [`ConnectionFlow::resume_from_key_claim`]. The NAT phase runs
+//! [`ConnectionFlow`](quip_net::establishment::ConnectionFlow) resumed at `NatTraversal` via
+//! [`ConnectionFlow::resume_from_key_claim`](quip_net::establishment::ConnectionFlow::resume_from_key_claim). The NAT phase runs
 //! through the per-peer `NatDriver` described above. The witness phase
 //! runs a real
 //! [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
@@ -272,7 +272,7 @@
 //! # Signer
 //!
 //! The node signs wire messages — §16 Key Claims, §13 Coral lookups
-//! and responses, §12 NAT verbs — with the [`Ed25519Signer`] held in
+//! and responses, §12 NAT verbs — with the [`Ed25519Signer`](quip_net::crypto::Ed25519Signer) held in
 //! [`NodeConfig::signer`]. It is `Arc<Ed25519Signer>` rather than
 //! `Arc<dyn Signer>`: every verifier in the workspace is
 //! `Ed25519Verifier`, so a `dyn` would be strictly less safe with no
@@ -335,7 +335,7 @@ pub mod dht;
 pub mod discovery;
 pub mod event;
 pub mod peer;
-pub mod registry;
+mod registry;
 pub mod trust;
 mod tasks;
 

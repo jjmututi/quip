@@ -329,6 +329,7 @@
 //! # }
 //! ```
 
+pub mod claim_log;
 pub mod cluster;
 pub mod config;
 pub mod dht;
@@ -338,6 +339,7 @@ pub mod peer;
 mod registry;
 pub mod trust;
 mod tasks;
+pub mod witness;
 
 use quip_core::cid::{CidOrV1, HashAlgo};
 use quip_core::dvv::NodeId;
@@ -359,6 +361,8 @@ use tokio::task::JoinHandle;
 
 use dht::DhtHandle;
 use discovery::DiscoveryHandle;
+use claim_log::ClaimLog;
+use witness::WitnessStore;
 // M9.5b-b: peer-slot and lifecycle vocabulary.
 // M9.5b-c: `PeerLifecycle::is_routing_eligible` is the sole routing-
 // eligibility predicate.
@@ -477,6 +481,12 @@ pub struct Node<B = MemoryBlobStore> {
     /// The node's trust policy. Shared with every peer task and with
     /// the application through [`Node::trust_peer`].
     trust: SharedTrust,
+    /// The node-wide first-seen claim log. Shared with the trust policy
+    /// (its writer) and the witness store's 6-hour rule (its reader).
+    claim_log: ClaimLog,
+    /// The node-wide witness store: corroboration the Coral responder
+    /// answers from and the peer tasks accumulate into.
+    witness: WitnessStore,
     /// The node's cluster state, driving membership derivation and
     /// the §13.2 acceptance test over the routing-eligible set.
     cluster: ClusterHandle,
@@ -520,8 +530,15 @@ where
         let store = Arc::new(Mutex::new(store));
         let clock = Arc::clone(&config.clock);
         let signer = Arc::clone(&config.signer);
+        // M9.6a: one claim log, written by the trust policy and read by
+        // the witness store; one witness store, shared by every peer
+        // task and the Coral responder.
+        let claim_log = ClaimLog::new();
+        let witness = WitnessStore::new();
         // M10.3: initialize the trust policy.
-        let trust: SharedTrust = Arc::new(Mutex::new(TrustPolicy::new()));
+        let trust: SharedTrust = Arc::new(Mutex::new(
+            TrustPolicy::with_claim_log(claim_log.clone()),
+        ));
 
         let local_id = config.key_claim.node_id;
         let (dht, dht_outbound_rx) = DhtHandle::new(local_id);
@@ -531,7 +548,11 @@ where
             dht.clone(),
         ));
 
-        let discovery = DiscoveryHandle::new(Arc::clone(&config.signer));
+        let discovery = DiscoveryHandle::new(
+            Arc::clone(&config.signer),
+            witness.clone(),
+            claim_log.clone(),
+        );
 
         // A fresh node is its own cluster: the cluster id is derived
         // from its own NodeId, at the innermost (Local) tier. Merging
@@ -550,6 +571,7 @@ where
         let accept_dht = dht.clone();
         let accept_discovery = discovery.clone();
         let accept_trust = Arc::clone(&trust);
+        let accept_witness = witness.clone();
         let accept_signer = Arc::clone(&signer);
         let auto_serve = config.auto_serve_pins;
         let relay_capable = config.relay_capable;
@@ -568,6 +590,7 @@ where
                 accept_dht,
                 accept_discovery,
                 accept_trust,
+                accept_witness,
                 accept_signer,
             )
             .await;
@@ -591,6 +614,8 @@ where
             dht_task: Some(dht_task),
             discovery,
             trust,
+            claim_log,
+            witness,
             cluster,
         })
     }
@@ -668,6 +693,7 @@ where
         let dht = self.dht.clone();
         let discovery = self.discovery.clone();
         let trust = Arc::clone(&self.trust);
+        let witness = self.witness.clone();
         let task_peers = Arc::clone(&peers);
         let signer = Arc::clone(&self.signer);
         let local_id = self.local_claim.node_id;
@@ -691,6 +717,7 @@ where
                 dht.clone(),
                 discovery,
                 trust,
+                witness,
                 task_peers,
                 signer,
             )
@@ -889,6 +916,22 @@ where
         self.discovery.clone()
     }
 
+    /// The node-wide witness store.
+    ///
+    /// Clones share the underlying map, so a caller observes the same
+    /// accumulation the peer tasks and the Coral responder see.
+    pub fn witness_store(&self) -> WitnessStore {
+        self.witness.clone()
+    }
+
+    /// The node-wide first-seen claim log.
+    ///
+    /// Clones share the underlying map. The trust policy is the writer;
+    /// the witness store's 6-hour rule is the reader.
+    pub fn claim_log(&self) -> ClaimLog {
+        self.claim_log.clone()
+    }
+
     /// Record the node's trust decision for `peer`.
     ///
     /// The node records every peer's Key Claim on first contact but
@@ -1060,6 +1103,9 @@ fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>)> {
 mod tests {
     use super::*;
     use crate::tasks::make_lookup_paths;
+    use crate::witness::{
+        WITNESS_FIRST_SEEN_SECONDS, WITNESS_REISSUE_INTERVAL_SECONDS,
+    };
     use quip_core::address::Address;
     use quip_core::cid::Cid;
     use quip_core::dvv::Dvv;
@@ -2134,6 +2180,63 @@ mod tests {
                 }
             }
         }
+
+        /// Advance every node's clock by `delta_ms`.
+        fn advance_all(&self, delta_ms: u64) {
+            for (_, clock) in &self.nodes {
+                clock.advance(delta_ms);
+            }
+        }
+
+        /// Poll node `idx` until it reports `Ready` for `peer`, and
+        /// return the KT status that `Ready` carried.
+        ///
+        /// Unlike [`Self::poll_ready`], this keeps the status, which is
+        /// what M9.6a's acceptance tests assert on.
+        async fn wait_ready_status(
+            &mut self,
+            idx: usize,
+            peer: NodeId,
+            timeout_ms: u64,
+        ) -> Option<KtStatus> {
+            let deadline =
+                std::time::Instant::now() + Duration::from_millis(timeout_ms);
+            while std::time::Instant::now() < deadline {
+                if let Ok(events) = self.nodes[idx].0.poll().await {
+                    for event in events {
+                        if let NodeEvent::Ready {
+                            peer: reported,
+                            kt_status,
+                            ..
+                        } = event
+                        {
+                            if reported == peer {
+                                return Some(kt_status);
+                            }
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        /// Wait until node `idx` holds at least `n` witness statements.
+        async fn wait_witnesses(
+            &mut self,
+            idx: usize,
+            n: usize,
+            timeout_ms: u64,
+        ) -> bool {
+            let deadline =
+                std::time::Instant::now() + Duration::from_millis(timeout_ms);
+            while std::time::Instant::now() < deadline {
+                if self.nodes[idx].0.witness_store().len() >= n {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            false
+        }
     }
 
     /// A three-node mesh reaches full readiness through the harness:
@@ -2162,5 +2265,113 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // M9.6a: witness accumulation and issuance.
+    // ------------------------------------------------------------------
+
+    /// The six-node shape M9.6a's acceptance tests need.
+    ///
+    /// Indices are 0-based: node 1 (index 0) is the peer being verified,
+    /// node 2 (index 1) is the verifier, and nodes 3..=6 (indices 2..=5)
+    /// are the four independent witnesses. With the verifier and the
+    /// peer excluded, four is the most an N=6 mesh can offer, which is
+    /// exactly `MIN_WITNESSES`.
+    async fn six_node_mesh() -> MeshHarness {
+        let mut h = MeshHarness::new(6).await;
+        h.connect_all().await;
+        assert!(
+            h.wait_all_ready(20_000).await,
+            "the six-node mesh should reach full readiness",
+        );
+        h
+    }
+
+    /// Have the four witnesses accept the peer, then move every clock
+    /// forward by `advance_ms`.
+    async fn trust_and_advance(
+        h: &mut MeshHarness,
+        advance_ms: u64,
+    ) -> (NodeId, NodeId) {
+        let ids = h.node_ids();
+        let peer = ids[0];
+        let subject = ids[1];
+        for i in 2..6 {
+            assert!(
+                h.nodes[i].0.trust_peer(&peer, PeerTrust::Trusted).await,
+                "node {i} should accept node 1",
+            );
+        }
+        h.advance_all(advance_ms);
+        (peer, subject)
+    }
+
+    /// A verifier computes `Verified` once four independent witnesses
+    /// have been first-seen for §5.3.3's six hours and their statements
+    /// reach its flow.
+    #[tokio::test]
+    async fn six_nodes_reach_verified_after_first_seen_window() {
+        let mut h = six_node_mesh().await;
+        // Past the first-seen window and one re-issuance interval.
+        let advance_ms =
+            (WITNESS_FIRST_SEEN_SECONDS + WITNESS_REISSUE_INTERVAL_SECONDS)
+                * 1_000;
+        let (peer, subject) = trust_and_advance(&mut h, advance_ms).await;
+
+        assert!(
+            h.wait_witnesses(0, 4, 5_000).await,
+            "node 1 should accumulate the four statements about itself",
+        );
+        assert!(
+            h.wait_witnesses(1, 4, 5_000).await,
+            "node 2 should accumulate the four statements about node 1",
+        );
+
+        // `Ready` fired once, before the clocks moved, and the flow was
+        // not advanced afterwards. A fresh flow is the only way to
+        // compute the status again; the discovery phase re-queries the
+        // responder, whose store now holds four matured statements.
+        let addr = h.nodes[0].0.local_addr().expect("node 1 is bound");
+        h.nodes[1]
+            .0
+            .connect(addr, "localhost")
+            .await
+            .expect("reconnect");
+        let status = h.wait_ready_status(1, peer, 20_000).await;
+        assert_eq!(
+            status,
+            Some(KtStatus::Verified),
+            "subject {subject:?} should compute Verified for {peer:?}",
+        );
+    }
+
+    /// The control: the statements are held, but before the six-hour
+    /// window closes the responder's query-time rule filters them out,
+    /// so the verifier stays `Pending`.
+    #[tokio::test]
+    async fn six_nodes_stay_pending_before_first_seen_window() {
+        let mut h = six_node_mesh().await;
+        // One second short of the first-seen window.
+        let advance_ms = (WITNESS_FIRST_SEEN_SECONDS - 1) * 1_000;
+        let (peer, subject) = trust_and_advance(&mut h, advance_ms).await;
+
+        assert!(
+            h.wait_witnesses(0, 4, 5_000).await,
+            "node 1 should still hold the statements",
+        );
+
+        let addr = h.nodes[0].0.local_addr().expect("node 1 is bound");
+        h.nodes[1]
+            .0
+            .connect(addr, "localhost")
+            .await
+            .expect("reconnect");
+        let status = h.wait_ready_status(1, peer, 20_000).await;
+        assert_eq!(
+            status,
+            Some(KtStatus::Pending),
+            "subject {subject:?} must not verify {peer:?} before six hours",
+        );
     }
 }

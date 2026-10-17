@@ -39,6 +39,8 @@
 //! milestone that fans out a discovery across multiple peers will need
 //! per-target refcounting; the handle is the right place for it.
 
+use quip_core::cbor::{encode, CborValue};
+use quip_core::cid::HashAlgo;
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
 use quip_core::messages::Signer;
@@ -46,13 +48,17 @@ use quip_net::coral::{
     CoralLookup, LookupPath, LookupResponse, PathId, PathProof, SpilloverRequest,
     SpilloverResponse,
 };
-use quip_net::crypto::Ed25519Signer;
+use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
 use quip_net::discovery::{
     DiscoveryStatus, Outbound, StartOutcome, WitnessDiscovery,
 };
 use quip_net::{Error, Result};
+use quip_storage::ContentHasher;
 
 use std::sync::{Arc, Mutex, MutexGuard};
+
+use crate::claim_log::ClaimLog;
+use crate::witness::WitnessStore;
 
 /// Shared handle to the node's Coral discovery client.
 ///
@@ -63,18 +69,29 @@ use std::sync::{Arc, Mutex, MutexGuard};
 pub struct DiscoveryHandle {
     client: Arc<Mutex<WitnessDiscovery<Ed25519Signer>>>,
     signer: Arc<Ed25519Signer>,
+    /// The node-wide witness store the responder answers from.
+    witness: WitnessStore,
+    /// The first-seen log the store's 6-hour rule consults.
+    claim_log: ClaimLog,
 }
 
 impl DiscoveryHandle {
-    /// Build a handle that signs with `signer`.
+    /// Build a handle that signs with `signer` and answers lookups from
+    /// `witness`, applying `claim_log`'s first-seen rule.
     ///
     /// Crate-internal: the node constructs one per `Node`; the
     /// application uses `Node::discovery()` to obtain a clone.
-    pub(crate) fn new(signer: Arc<Ed25519Signer>) -> Self {
+    pub(crate) fn new(
+        signer: Arc<Ed25519Signer>,
+        witness: WitnessStore,
+        claim_log: ClaimLog,
+    ) -> Self {
         let client = WitnessDiscovery::new((*signer).clone());
         Self {
             client: Arc::new(Mutex::new(client)),
             signer,
+            witness,
+            claim_log,
         }
     }
 
@@ -142,31 +159,45 @@ impl DiscoveryHandle {
         }
     }
 
-    /// Answer a `coral_lookup` with no witnesses.
+    /// Answer a `coral_lookup` from the node-wide witness store.
     ///
-    /// The response carries one `PathProof` per requested path, each
-    /// marked `responded: true`, with an empty `values` list. That is
-    /// honest: a fresh node holds no witnesses for the target. The
-    /// response is signed with the node's own key, matching the §10.1
-    /// signing convention.
+    /// The response carries one encoded `WitnessStatement` per entry in
+    /// `values`, limited to statements that are valid now and whose
+    /// witness has been first-seen for at least §5.3.3's 6 hours
+    /// (`WitnessStore::statements_for`). The 4+ threshold and the
+    /// requester's trust policy are the *requester's* rules: the
+    /// responder returns what it holds, no more and no less.
+    ///
+    /// Every `PathProof` commits to the same `values` blob — the wire
+    /// shape has one shared value list, not one per path (§3 of
+    /// `docs/M9.6a-design.md`). Each proof is marked `responded: true`;
+    /// the response is signed with the node's own key, matching §10.1.
     pub fn respond_to_lookup(
         &self,
         lookup: &CoralLookup,
         now: Timestamp,
     ) -> LookupResponse {
+        let values: Vec<Vec<u8>> = self
+            .witness
+            .statements_for(&lookup.key, &self.claim_log, now)
+            .iter()
+            .filter_map(|stmt| encode(&stmt.to_cbor()).ok())
+            .collect();
+        let value_hash = values_hash(&values);
+
         let path_proofs: Vec<PathProof> = lookup
             .lookup_paths
             .iter()
             .map(|p| PathProof {
                 path_id: p.path_id,
                 node_signatures: Vec::new(),
-                value_hash: [0u8; 32],
+                value_hash,
                 responded: true,
             })
             .collect();
         let mut resp = LookupResponse {
             key: lookup.key,
-            values: Vec::new(),
+            values,
             path_proofs,
             responder: self.signer.public_key(),
             timestamp: now,
@@ -211,6 +242,26 @@ impl DiscoveryHandle {
     }
 }
 
+/// Hash the shared `values` blob a lookup response commits to.
+///
+/// The wire has one value list, not one per path, so every `PathProof`
+/// carries this same digest (§3 of the design note). The digest is over
+/// the CBOR encoding of the value array, which is what the requester
+/// receives on the wire; an empty list hashes to SHA-256 of `80` (the
+/// CBOR empty array), not to zero.
+fn values_hash(values: &[Vec<u8>]) -> [u8; 32] {
+    let array = CborValue::Array(
+        values
+            .iter()
+            .map(|v| CborValue::Bytes(v.clone()))
+            .collect(),
+    );
+    let blob = encode(&array).unwrap_or_default();
+    Sha256Hasher
+        .digest(HashAlgo::Sha256, &blob)
+        .unwrap_or([0u8; 32])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,7 +272,11 @@ mod tests {
     }
 
     fn handle() -> DiscoveryHandle {
-        DiscoveryHandle::new(Arc::new(Ed25519Signer::from_seed(&[0x42; 32])))
+        DiscoveryHandle::new(
+            Arc::new(Ed25519Signer::from_seed(&[0x42; 32])),
+            WitnessStore::new(),
+            ClaimLog::new(),
+        )
     }
 
     fn nid(b: u8) -> NodeId {
@@ -260,6 +315,45 @@ mod tests {
         // The signature verifies against the responder.
         let verifier = quip_net::crypto::Ed25519Verifier;
         assert!(resp.verify(&verifier).unwrap());
+    }
+
+    #[test]
+    fn respond_to_lookup_returns_matured_statements_with_a_shared_hash() {
+        let witness_signer = Ed25519Signer::from_seed(&[0x07; 32]);
+        let witness = WitnessStore::new();
+        let claim_log = ClaimLog::new();
+        claim_log.observe(witness_signer.public_key(), t(0));
+        let stmt = crate::witness::issue_statement(
+            nid(1),
+            [0u8; 32],
+            &witness_signer,
+            t(0),
+        );
+        assert!(witness.ingest(stmt, t(0)));
+
+        let h = DiscoveryHandle::new(
+            Arc::new(Ed25519Signer::from_seed(&[0x42; 32])),
+            witness,
+            claim_log,
+        );
+        let lookup = CoralLookup {
+            key: nid(1),
+            lookup_paths: vec![path(1, 2), path(2, 3)],
+            witness_ring_id: [0u8; 32],
+            timestamp: t(0),
+            requester: nid(2),
+            signature: [0u8; 64],
+        };
+        // Seven hours after first contact: past the 6-hour window and
+        // well inside the statement's 24-hour validity.
+        let resp = h.respond_to_lookup(&lookup, t(7 * 3_600_000));
+        assert_eq!(resp.values.len(), 1, "one matured statement");
+        assert_eq!(resp.path_proofs.len(), 2);
+        assert_eq!(
+            resp.path_proofs[0].value_hash, resp.path_proofs[1].value_hash,
+            "every path commits to the same values blob",
+        );
+        assert_ne!(resp.path_proofs[0].value_hash, [0u8; 32]);
     }
 
     #[test]

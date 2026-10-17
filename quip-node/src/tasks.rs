@@ -7,10 +7,11 @@
 //! readable; the tasks are `pub(crate)` and are called only from the
 //! `Node` implementation.
 
+use quip_core::cbor::decode;
 use quip_core::dvv::NodeId;
-use quip_core::messages::{KeyClaim, Signer};
+use quip_core::messages::{KeyClaim, Signer, WitnessStatement};
 use quip_core::time::Timestamp;
-use quip_net::coral::LookupPath;
+use quip_net::coral::{LookupPath, LookupResponse};
 use quip_net::crypto::{Ed25519Signer, Ed25519Verifier};
 use quip_net::discovery::{
     DiscoveryPhaseKind, Outbound as DiscoveryOutbound, StartOutcome,
@@ -46,6 +47,7 @@ use crate::event::NodeEvent;
 use crate::peer::{PeerLifecycle, PeerSlot};
 use crate::registry::{register_peer, unregister_peer, PeerRegistry, TaskMap};
 use crate::trust::PeerTrust;
+use crate::witness::{issue_statement, WitnessStore};
 use crate::{
     set_peer_lifecycle, DISCOVERY_WAIT_MS, LOCAL_CANDIDATE_PRIORITY, NAT_PHASE_TIMEOUT_MS,
     OUTBOUND_CAPACITY, SharedTrust,
@@ -107,6 +109,7 @@ pub(crate) async fn accept_loop<B>(
     dht: DhtHandle,
     discovery: DiscoveryHandle,
     trust: SharedTrust,
+    witness: WitnessStore,
     signer: SharedSigner,
 ) where
     B: BlobStore + Send + Sync + 'static,
@@ -130,6 +133,7 @@ pub(crate) async fn accept_loop<B>(
         let dht = dht.clone();
         let discovery = discovery.clone();
         let trust = Arc::clone(&trust);
+        let witness = witness.clone();
         let signer = Arc::clone(&signer);
 
         // The accept loop cannot know the peer's NodeId until the
@@ -203,6 +207,7 @@ pub(crate) async fn accept_loop<B>(
                 dht.clone(),
                 discovery,
                 trust,
+                witness,
                 task_peers,
                 signer,
             )
@@ -303,10 +308,19 @@ async fn handle_discovery_event(
     clock: &SharedClock,
     discovery: &DiscoveryHandle,
     msg: Message,
+    flow: Option<&mut ConnectionFlow>,
+    witness: &WitnessStore,
 ) {
     let now = clock.now();
     match msg {
         Message::CoralLookupResponse(resp) => {
+            // M9.6a: the responder fills `values` with encoded
+            // `WitnessStatement`s. Decode them, feed the flow (seam 2)
+            // and the store (seam 1), then hand the discovery client a
+            // NodeId view of the same response: the client's ring
+            // resolution interprets each value as a 32-byte NodeId, so
+            // it cannot consume the encoded form directly.
+            let resp = decode_lookup_values(resp, flow, witness, now);
             if let Ok(outbound) = discovery.ingest_lookup_response(resp, now) {
                 for out in outbound {
                     if let Some(m) = outbound_to_message(out) {
@@ -314,6 +328,12 @@ async fn handle_discovery_event(
                     }
                 }
             }
+        }
+        Message::AnnounceWitness(stmt) => {
+            // Seams 1 and 2: a statement arriving on the establishing
+            // connection is stored node-wide and fed to the flow so
+            // `compute_kt_status` counts it.
+            feed_witness_statement(&stmt, flow, witness, now);
         }
         Message::SpilloverResponse(resp) => {
             let _ = discovery.ingest_spillover_response(resp, now);
@@ -334,6 +354,64 @@ async fn handle_discovery_event(
     }
 }
 
+/// Feed one witness statement to the node-wide store and the flow.
+///
+/// Verification gates both: an unverified statement is neither stored
+/// nor counted. A statement the store rejects as an *older replay* is
+/// still offered to the flow only when it passed [`WitnessStore::accepts`];
+/// the flow's per-witness map is last-write-wins, so a replay cannot
+/// displace a fresher entry either.
+fn feed_witness_statement(
+    stmt: &WitnessStatement,
+    flow: Option<&mut ConnectionFlow>,
+    witness: &WitnessStore,
+    now: Timestamp,
+) {
+    if !witness.accepts(stmt, now) {
+        return;
+    }
+    let _ = witness.ingest(stmt.clone(), now);
+    if let Some(flow) = flow {
+        if flow.remote_node_id() == Some(stmt.subject) {
+            let _ = flow.on_message(&Message::AnnounceWitness(stmt.clone()), now);
+        }
+    }
+}
+
+/// Decode witness statements out of a lookup response's `values`, feed
+/// them to the flow and store, and return the response with `values`
+/// rewritten to the 32-byte witness NodeIds the discovery client
+/// expects.
+///
+/// A value that does not decode as a `WitnessStatement` is passed
+/// through unchanged: an older responder may still return bare NodeIds.
+fn decode_lookup_values(
+    mut resp: LookupResponse,
+    mut flow: Option<&mut ConnectionFlow>,
+    witness: &WitnessStore,
+    now: Timestamp,
+) -> LookupResponse {
+    let mut ids: Vec<Vec<u8>> = Vec::with_capacity(resp.values.len());
+    let mut decoded: Vec<WitnessStatement> = Vec::new();
+    for value in &resp.values {
+        match decode(value)
+            .ok()
+            .and_then(|cbor| WitnessStatement::from_cbor(&cbor).ok())
+        {
+            Some(stmt) => {
+                ids.push(stmt.witness.to_vec());
+                decoded.push(stmt);
+            }
+            None => ids.push(value.clone()),
+        }
+    }
+    for stmt in &decoded {
+        feed_witness_statement(stmt, flow.as_deref_mut(), witness, now);
+    }
+    resp.values = ids;
+    resp
+}
+
 /// Run the flow's witness-discovery phase to completion.
 ///
 /// On entry the flow is in [`FlowPhase::WitnessDiscovery`]. On exit it
@@ -348,6 +426,7 @@ async fn run_discovery_phase(
     clock: &SharedClock,
     discovery: &DiscoveryHandle,
     flow: &mut ConnectionFlow,
+    witness: &WitnessStore,
 ) {
     let now = clock.now();
     let paths = make_lookup_paths(peer, now);
@@ -391,6 +470,11 @@ async fn run_discovery_phase(
         }
         if let Some(status) = discovery.status(&peer) {
             if matches!(status.phase, DiscoveryPhaseKind::Failed(_)) {
+                // A failed discovery must not linger: the next attempt
+                // for the same target would otherwise be treated as
+                // already in flight and never issue a lookup. M9.6a's
+                // reconnect path depends on this.
+                discovery.forget(&peer);
                 let _ = flow.on_discovery_failed();
                 return;
             }
@@ -416,7 +500,10 @@ async fn run_discovery_phase(
         for event in events {
             if let Event::Frame { tier, msg, .. } = event {
                 if let Ok(m) = message::dispatch(&msg.raw, tier) {
-                    handle_discovery_event(driver, clock, discovery, m).await;
+                    handle_discovery_event(
+                        driver, clock, discovery, m, Some(flow), witness,
+                    )
+                    .await;
                 }
             }
             // Other event variants (Datagram, BulkStreamOpened, ...)
@@ -955,8 +1042,10 @@ fn local_ip_address(driver: &ConnectionDriver) -> quip_core::address::Address {
 ///
 /// Runs a real
 /// [`WitnessDiscovery`](quip_net::discovery::WitnessDiscovery) against
-/// the peer; a later milestone wires witness accumulation so
-/// `Ready(Verified)` becomes reachable.
+/// the peer. M9.6a's seams feed the flow the witness statements the
+/// responder returns, so `Ready(Verified)` is reachable once four
+/// independent, first-seen-matured witnesses have corroborated the
+/// claim.
 #[allow(clippy::too_many_arguments)]
 async fn run_establishment(
     driver: &mut ConnectionDriver,
@@ -967,6 +1056,7 @@ async fn run_establishment(
     clock: &SharedClock,
     events_tx: &mpsc::Sender<NodeEvent>,
     discovery: &DiscoveryHandle,
+    witness: &WitnessStore,
     trust: &SharedTrust,
     peers: &PeerRegistry,
     dht: &DhtHandle,
@@ -1045,8 +1135,10 @@ async fn run_establishment(
                 }
             }
             FlowPhase::WitnessDiscovery => {
-                run_discovery_phase(driver, peer, clock, discovery, &mut flow)
-                    .await;
+                run_discovery_phase(
+                    driver, peer, clock, discovery, &mut flow, witness,
+                )
+                .await;
             }
             FlowPhase::Ready(status) => {
                 let kt_status = *status;
@@ -1148,6 +1240,7 @@ pub(crate) async fn peer_run<B>(
     dht: DhtHandle,
     discovery: DiscoveryHandle,
     trust: SharedTrust,
+    witness: WitnessStore,
     peers: PeerRegistry,
     signer: SharedSigner,
 ) where
@@ -1208,6 +1301,7 @@ pub(crate) async fn peer_run<B>(
         &clock,
         &events_tx,
         &discovery,
+        &witness,
         &trust,
         &peers,
         &dht,
@@ -1248,6 +1342,9 @@ pub(crate) async fn peer_run<B>(
         &mut outbound_rx,
         &dht,
         &discovery,
+        &trust,
+        &peers,
+        &witness,
         &signer,
     )
     .await;
@@ -1279,6 +1376,9 @@ async fn run_peer_loop<B>(
     outbound_rx: &mut mpsc::Receiver<Message>,
     dht: &DhtHandle,
     discovery: &DiscoveryHandle,
+    trust: &SharedTrust,
+    peers: &PeerRegistry,
+    witness: &WitnessStore,
     signer: &SharedSigner,
 ) where
     B: BlobStore + Send + Sync + 'static,
@@ -1312,6 +1412,36 @@ async fn run_peer_loop<B>(
             dht.note_rtt(&peer, &slot, ms);
         }
 
+        // M9.6a §4: the placeholder issuance policy. `maybe_issue`
+        // enforces the 12-hour cadence internally, so calling it on
+        // every iteration is correct. The signed statement is broadcast
+        // to every connected peer: corroboration is useful to any node
+        // that asks, not just the connection this task owns, and the
+        // subject must receive it too.
+        let now = clock.now();
+        let due = {
+            let policy = trust.lock().await;
+            witness.maybe_issue(&policy, now)
+        };
+        if !due.is_empty() {
+            let senders: Vec<mpsc::Sender<Message>> = {
+                let reg = peers.lock().await;
+                reg.peer_ids()
+                    .into_iter()
+                    .filter_map(|p| reg.outbound_of(&p))
+                    .collect()
+            };
+            for subject in due {
+                let stmt =
+                    issue_statement(subject, [0u8; 32], &**signer, now);
+                let msg = Message::AnnounceWitness(stmt);
+                for tx in &senders {
+                    let _ = tx.send(msg.clone()).await;
+                }
+                witness.mark_issued(subject, now);
+            }
+        }
+
         // Poll inbound; `driver.poll` blocks up to POLL_TIMEOUT_MS
         // internally, which yields this task to the runtime on every
         // iteration.
@@ -1334,6 +1464,16 @@ async fn run_peer_loop<B>(
                 Event::Frame { tier, msg, .. } => {
                     match message::dispatch(&msg.raw, tier) {
                         Ok(m) => {
+                            // M9.6a seam 3: a witness statement arriving
+                            // in the steady state is stored node-wide
+                            // and does not surface as a
+                            // `NodeEvent::Message`.
+                            if let Message::AnnounceWitness(stmt) = &m {
+                                if witness.accepts(stmt, now) {
+                                    let _ = witness.ingest(stmt.clone(), now);
+                                }
+                                continue;
+                            }
                             // M9.5b-c part 6: answer an inbound
                             // `relay_discovery` before the DHT
                             // intercept, because the intercept does
@@ -1381,6 +1521,8 @@ async fn run_peer_loop<B>(
                                     clock,
                                     discovery,
                                     m,
+                                    None,
+                                    witness,
                                 )
                                 .await;
                                 continue;

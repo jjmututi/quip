@@ -45,12 +45,12 @@ The node now samples each peer connection's RTT into its routing
 table and derives a cluster member set from the routing-eligible
 peers that fall within the cluster's §13.2 threshold. Mesh verbs are
 routed by XOR distance to the `GATEWAY_ROUTER_COUNT` closest
-eligible peers rather than broadcast to every connected peer. Witness 
-accumulation is now live: a running node stores WitnessStatements 
-node-wide, serves them from the Coral responder, and — for the first 
-time — feeds them to its own ConnectionFlow, so Ready(Verified) is 
-reachable in a network with four independent, first-seen-matured 
-witnesses. The issuance policy that produces those statements is a 
+eligible peers rather than broadcast to every connected peer. Witness
+accumulation is now live: a running node stores `WitnessStatement`s
+node-wide, serves them from the Coral responder, and — for the first
+time — feeds them to its own `ConnectionFlow`, so `Ready(Verified)` is
+reachable in a network with four independent, first-seen-matured
+witnesses. The issuance policy that produces those statements is a
 labelled placeholder pending a spec revision.
 
 The protocol skeleton is complete. What remains is concentrated in
@@ -70,7 +70,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~684 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~718 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -106,16 +106,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main` after M9.5b-c (part 5):
+Baseline on `main` after M9.6a:
 
 ```
 quip-core      74 passed
-quip-net      478 passed
+quip-net      483 passed
 quip-storage   57 passed
-quip-node      75 passed
+quip-node     104 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~684 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~718 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -131,7 +131,7 @@ doc-tests       4 passed (one per crate)
 | M7 | Hardening: rate limits, caches, quarantine, state machines | landed |
 | M8 | Range fetch: bao verified streaming | landed |
 | Spec pass | S1–S7 and D4 resolved in the draft | landed |
-| Spec pass | S8 (`bft_state_transfer` ring signature scope) | open, spec-only |
+| Spec pass | S8–S10 (`bft_state_transfer` ring signature scope; initial witness issuance; verifier independence) | open, spec-only |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
@@ -140,7 +140,7 @@ doc-tests       4 passed (one per crate)
 | M9.5a | `quip-node`: shared Coral discovery wired into the flow | landed |
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
-| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster membership and XOR routing; cluster split execution deferred to M9.6 | in progress |
+| M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster membership and XOR routing; cluster split execution deferred to M9.6b | landed |
 | M9.6a | `quip-node`: witness accumulation, store, responder, issuance policy | landed |
 | M9.6b | `quip-node`: cluster-info exchange and split execution | not started |
 | M9.6c | `quip-node`: trust bootstrap | not started |
@@ -1027,8 +1027,8 @@ Tests: `peer_stays_unknown_until_decided`, `trust_change_emits_event`,
 
 ## Spec pass
 
-Seven points where the draft left a choice, plus one numeric mismatch
-and one open revision.
+Seven points where the draft left a choice, one numeric mismatch,
+and three open revisions.
 
 - **S1 — `RelayHop.encrypted_key`.** §12.2 defines HPKE `mode_base`,
   `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` / `ChaCha20Poly1305`,
@@ -1081,7 +1081,7 @@ Organized by the axis it belongs to — correctness, network
 completion, validation, protocol design, or release discipline —
 rather than by milestone number. The status table above names the
 same items under their phase labels (BFT-A, BFT-V, N-Hard, Spec,
-M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
+M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
 
 ### BFT correctness (BFT-A)
 
@@ -1256,9 +1256,18 @@ M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     nodes, and witness rings depend on. Requires M9.5b-c and M9.6
     to give it something real to do.
 
+19. **M9.6a follow-up — issuance redundancy.** Each peer task runs
+    `maybe_issue` on every steady-loop iteration, so an N-node mesh
+    sends each witness statement N−1 times; the `(subject, witness)`
+    dedupe at the receiver makes the repetition harmless, but the
+    outbound traffic is N−1× what it needs to be. A later milestone
+    can hoist issuance above the peer tasks, into one node-wide
+    timer. Recorded here so the redundancy is not rediscovered as a
+    surprise.
+
 ### Interface layer (M10)
 
-19. **M10.4 — platform signer shim.** A `SignerBackend` trait in
+20. **M10.4 — platform signer shim.** A `SignerBackend` trait in
     `quip-node` and one implementation per platform: Kotlin/JNI for
     Android, Swift for iOS, C ABI for Linux/Windows. Hardware-backed
     Ed25519 is available on Android 13+ with TEE or StrongBox,
@@ -1269,13 +1278,13 @@ M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     cannot be coerced into `Ed25519Signer::from_seed`'s
     `[u8; 32]` shape — the private bytes never exist.
 
-20. **M10.5 — end-to-end verification on Android.** The smoke tests
+21. **M10.5 — end-to-end verification on Android.** The smoke tests
     from M10.1 through M10.3 re-run against an Android device,
     exercising the platform signer shim.
 
 ### Browser substrate (M11)
 
-21. **Local gateway.** A `quip-daemon` or FFI-exposed server that
+22. **Local gateway.** A `quip-daemon` or FFI-exposed server that
     answers `http://localhost:PORT/quip/<cid>` and
     `http://localhost:PORT/hint/<name>`, so any existing browser can
     resolve QUIP content without a bespoke browser. This is the tier
@@ -1283,20 +1292,20 @@ M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     URL shape, content-type negotiation, trust-policy enforcement,
     all reachable from a Firefox tab.
 
-22. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
+23. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
     verify → policy → `GovernanceStore`), a CBOR value-blob schema
     for what responders publish as Coral values, and the name-hint
     mechanism that lets a client go from a hint string to a set of
     CIDs via Coral lookup.
 
-23. **Content-type metadata.** CIDs do not carry MIME types. The
+24. **Content-type metadata.** CIDs do not carry MIME types. The
     options are pin-time metadata, byte sniffing, or address hints.
     Pin-time metadata is cleanest and mirrors how IPFS handles it.
     The alternative is serving everything as
     `application/octet-stream`, which makes the gateway useless for
     anything but downloads.
 
-24. **The VPS tier.** A user-controlled always-on anchor. Not a new
+25. **The VPS tier.** A user-controlled always-on anchor. Not a new
     protocol layer: the same headless build (M9.7), deployed
     differently. Acts as rendezvous point, relay candidate,
     availability anchor, and custodian of witness statements. Also
@@ -1304,7 +1313,7 @@ M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
     the VPS is a push provider, using APNs and FCM as
     notification-only channels.
 
-25. **No rendering format.** The browser substrate renders standard
+26. **No rendering format.** The browser substrate renders standard
     web formats (HTML, CSS, JS, images, media) via the existing
     browser engine. QUIP does not define a markup language. Its
     contribution is the resolver, the address scheme, and the trust
@@ -1312,33 +1321,40 @@ M9.5b-c, M9.6, M9.7, M10.4, M10.5, M11).
 
 ### FFI / API stabilization
 
-26. **Node lifecycle.** Duplicate connections, reconnect behavior,
+27. **Node lifecycle.** Duplicate connections, reconnect behavior,
     shutdown ordering, FFI-safe ownership and lifetimes. M9.5b-b
     resolves the peer-generation race; the identity type boundary
     (Spec 14) is still open. The FFI surface should not be frozen
     until both are resolved.
 
-27. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
+28. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
     carry `verb: String` + `raw: Vec<u8>`; a typed decoder
     (`decodeMessage(raw)`) is needed so Dart consumers do not
     reimplement CBOR parsing.
 
 ### Housekeeping
 
-28. **Release tag.** `git tag v0.1.0-m9.5b-c && git push origin
+29. **Release tag.** `git tag v0.1.0-m9.5b-c && git push origin
     v0.1.0-m9.5b-c`, then `v0.1.0` once S8 and BFT-A land.
 
-29. **GitHub metadata.** Repository description and topics. The
+30. **GitHub metadata.** Repository description and topics. The
     README currently links to this file; the repo description is
     still blank.
 
-30. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+31. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
     The bound currently sits on `quip-node`'s `SharedClock` alias
     because widening the trait is a breaking change. Every
     reasonable clock satisfies the stronger bound; the alias should
     eventually become unnecessary.
 
-31. **Draft contribution log.** The reference implementation was
+32. **M9.6a note follow-up.** `docs/M9.6a-design.md` predates three
+    things the implementation needed: `WitnessStore::accepts` (split
+    out of `ingest` so the KT seam can feed the flow a statement the
+    store already holds), `issue_statement` (the statement builder),
+    and `WITNESS_VALIDITY_S` (the validity window). A `docs:` commit
+    brings §2, §4, and §7 into line.
+
+33. **Draft contribution log.** The reference implementation was
     developed against earlier drafts; the resolutions that became
     revision 03 are documented in the spec-pass section above. A
     short paragraph in the draft's doc history — one line per

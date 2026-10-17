@@ -479,10 +479,17 @@ impl ConnectionFlow {
             None => return KtStatus::Pending,
         };
         let _ = remote.first_seen; // reserved for the §5.3.3 6-hour rule
+        // §5.3.3's witnesses must be *independent*. A node's own
+        // statement about a peer cannot corroborate that peer for it, so
+        // the local NodeId is excluded from the count even if a peer
+        // echoes our statement back.
+        let local = self.local_claim.node_id;
         let valid = remote
             .witnesses
-            .values()
-            .filter(|w| w.valid_until > now)
+            .iter()
+            .filter(|(witness, stmt)| {
+                **witness != local && stmt.valid_until > now
+            })
             .count();
         if valid >= 4 {
             KtStatus::Verified
@@ -673,6 +680,28 @@ mod tests {
         let actions = f.on_discovery_complete(vec![], t(10));
         assert_eq!(*f.phase(), FlowPhase::Ready(KtStatus::Verified));
         assert_eq!(actions, vec![FlowAction::Ready(KtStatus::Verified)]);
+    }
+
+    #[test]
+    fn local_statement_does_not_count_toward_verified() {
+        let mut f = new_flow();
+        drive_to_discovery(&mut f);
+        // Three other witnesses, plus a statement witnessed by the
+        // local node itself (`new_flow`'s FakeSigner is node 1).
+        for w in 10..=12 {
+            let s = statement_for(2, w, t(1_000_000));
+            let _ = f.on_message(&Message::AnnounceWitness(s), t(5));
+        }
+        let own = statement_for(2, 1, t(1_000_000));
+        let _ = f.on_message(&Message::AnnounceWitness(own), t(5));
+        assert_eq!(f.witness_count(), 4, "the flow stores what it sees");
+        let actions = f.on_discovery_complete(vec![], t(10));
+        assert_eq!(
+            *f.phase(),
+            FlowPhase::Ready(KtStatus::Pending),
+            "a node's own statement cannot corroborate a peer for it",
+        );
+        assert_eq!(actions, vec![FlowAction::Ready(KtStatus::Pending)]);
     }
 
     #[test]

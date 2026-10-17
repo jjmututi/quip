@@ -27,6 +27,8 @@ use quip_core::messages::KeyClaim;
 use quip_core::time::Timestamp;
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::claim_log::ClaimLog;
+
 /// A peer's trust level.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum PeerTrust {
@@ -70,12 +72,34 @@ pub struct StoredClaim {
 pub struct TrustPolicy {
     claims: BTreeMap<NodeId, StoredClaim>,
     tombstoned: BTreeSet<NodeId>,
+    /// The node-wide first-seen log. `observe_claim` records into it;
+    /// the witness store reads it back for §5.3.3's 6-hour rule.
+    /// Sharing one log means trust pinning and witness accumulation
+    /// cannot disagree about when a claim was first seen.
+    claim_log: ClaimLog,
 }
 
 impl TrustPolicy {
-    /// An empty policy.
+    /// An empty policy with its own private `ClaimLog`.
+    ///
+    /// A `Node` builds its policy with [`Self::with_claim_log`] so the
+    /// same log is shared with the witness store. This constructor is
+    /// for standalone use and the unit tests below.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An empty policy that records first-seen facts into `claim_log`.
+    pub fn with_claim_log(claim_log: ClaimLog) -> Self {
+        Self {
+            claim_log,
+            ..Self::default()
+        }
+    }
+
+    /// The first-seen log this policy writes to.
+    pub fn claim_log(&self) -> &ClaimLog {
+        &self.claim_log
     }
 
     /// Number of peers in the store.
@@ -121,9 +145,20 @@ impl TrustPolicy {
     ) -> PeerTrust {
         let peer = claim.node_id;
 
+        // Record the observation before any early return: the log's fact
+        // is "we saw this claim", which is true even for a tombstoned
+        // peer. The log keeps the first observation, so later calls do
+        // not move the timestamp.
+        self.claim_log.observe(peer, now);
+
         if self.tombstoned.contains(&peer) {
             return PeerTrust::Revoked;
         }
+
+        // `first_seen` is owned by the log, not by this call. A peer
+        // re-observed after a reconnect keeps its original first-seen
+        // time.
+        let first_seen = self.claim_log.first_seen(&peer).unwrap_or(now);
 
         match self.claims.get_mut(&peer) {
             Some(stored) => {
@@ -140,7 +175,7 @@ impl TrustPolicy {
                     peer,
                     StoredClaim {
                         claim,
-                        first_seen: now,
+                        first_seen,
                         decided_at: None,
                         trust: PeerTrust::Unknown,
                     },
@@ -213,6 +248,28 @@ impl TrustPolicy {
             self.trust_of(peer),
             PeerTrust::Trusted | PeerTrust::Verified
         )
+    }
+
+    /// Every peer the application has accepted, in `NodeId` order.
+    ///
+    /// This is the subject list M9.6a's placeholder issuance policy
+    /// iterates: a node issues a `WitnessStatement` about each peer it
+    /// has accepted. `Verified` is included because it implies
+    /// `Trusted` — a peer that was promoted keeps being corroborated.
+    /// Tombstoned peers are excluded even if their stored claim still
+    /// says `Trusted`, because revocation is terminal.
+    pub fn trusted_peers(&self) -> Vec<NodeId> {
+        self.claims
+            .iter()
+            .filter(|(peer, stored)| {
+                !self.tombstoned.contains(*peer)
+                    && matches!(
+                        stored.trust,
+                        PeerTrust::Trusted | PeerTrust::Verified
+                    )
+            })
+            .map(|(peer, _)| *peer)
+            .collect()
     }
 
     /// The stored claim for `peer`, if any.

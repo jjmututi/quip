@@ -45,7 +45,13 @@ The node now samples each peer connection's RTT into its routing
 table and derives a cluster member set from the routing-eligible
 peers that fall within the cluster's §13.2 threshold. Mesh verbs are
 routed by XOR distance to the `GATEWAY_ROUTER_COUNT` closest
-eligible peers rather than broadcast to every connected peer.
+eligible peers rather than broadcast to every connected peer. Witness 
+accumulation is now live: a running node stores WitnessStatements 
+node-wide, serves them from the Coral responder, and — for the first 
+time — feeds them to its own ConnectionFlow, so Ready(Verified) is 
+reachable in a network with four independent, first-seen-matured 
+witnesses. The issuance policy that produces those statements is a 
+labelled placeholder pending a spec revision.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -135,7 +141,9 @@ doc-tests       4 passed (one per crate)
 | M9.5b-a | M9.5b design: peer lifecycle, routing, cluster-membership contracts | landed |
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
 | M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster membership and XOR routing; cluster split execution deferred to M9.6 | in progress |
-| M9.6 | `quip-node`: witness accumulation and trust bootstrap | not started |
+| M9.6a | `quip-node`: witness accumulation, store, responder, issuance policy | landed |
+| M9.6b | `quip-node`: cluster-info exchange and split execution | not started |
+| M9.6c | `quip-node`: trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
 | M10.2 | `quip-node-ffi`: event stream across the FFI boundary | landed |
@@ -874,6 +882,38 @@ Tests: `note_rtt_records_sample_and_class`,
 `missing_rtt_samples_are_not_members` (cluster.rs);
 `cluster_starts_local_and_routes_to_eligible_peer` (lib.rs).
 
+### M9.6a — witness accumulation and issuance — LANDED
+
+Implements the design frozen in `docs/M9.6a-design.md`. A
+node-wide `WitnessStore` keyed by `(subject, witness)` is fed by
+the three seams of §2a: store ingress during establishment,
+requester-side KT wiring so `ConnectionFlow::compute_kt_status`
+sees the statements, and a new first branch in the steady loop for
+post-establishment accumulation. The first-seen fact moves into a
+shared `ClaimLog` (§2.5 of the note), consumed by both
+`TrustPolicy` and the store, so §5.3.3's 6-hour rule has one home.
+
+The Coral responder now returns valid, first-seen-matured
+statements from the store (§3 of the note); the 4+ threshold stays
+client-side. The issuance policy is the labelled placeholder of §4,
+and the gap it fills — the draft describes re-issuance but not
+first issuance — is recorded as a Spec item. The note's own
+correction is also closed: `ConnectionFlow`'s witness map was never
+populated in production, so `Ready(Verified)` was unreachable; seam
+2 fills it.
+
+One `quip-net` change: `compute_kt_status` excludes the local
+NodeId, encoding verifier independence. §5.3.3's "independent" is
+implied but not stated, so that too is recorded as a Spec item.
+
+Deliberately not here: trust bootstrap (deferred to M9.6c); cluster
+split execution (deferred to M9.6b); a cap on the store (N-Hard);
+`ClaimLog` persistence (belongs with M9.7's store persistence).
+
+Tests: `six_nodes_reach_verified_after_first_seen_window`,
+`six_nodes_stay_pending_before_first_seen_window`, plus the unit
+tests in `quip-node::witness` and `quip-node::claim_log`.
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -1021,6 +1061,17 @@ and one open revision.
   `(ring_id, checkpoint_sequence, checkpoint_digest)`. **Spec
   revision required**, text-only: §5.3.4.1 should either describe
   the extra round or adopt the checkpoint-signatures interpretation.
+- **S9 — initial witness issuance.** §5.3.3 specifies that a
+  witness re-issues every 12 hours, but not what triggers its first
+  issuance. The implementation uses a labelled placeholder: a node
+  issues about a peer once the peer's claim is `Trusted` and no
+  statement has been issued in the last 12 hours. **Spec revision
+  required**, text-only: §5.3.3 should describe first issuance.
+- **S10 — verifier independence.** §5.3.3's "4+ independent"
+  implies that a node's own statement about a peer does not count
+  toward that node's `Verified` verdict, but does not say so.
+  `compute_kt_status` excludes the local NodeId. **Spec revision
+  required**, text-only: §5.3.3 should state the exclusion.
 
 ---
 
@@ -1415,6 +1466,15 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`Node::peer_slot`) | M9.5b-b | live generation query |
 | `quip-node/src/lib.rs` (`Node::peer_lifecycle`) | M9.5b-c | live lifecycle query |
 | `quip-node/src/lib.rs` (`Node::routing_eligible_peers`) | M9.5b-c | public derived eligibility set |
+| `quip-node/src/witness.rs:1` | M9.6a | witness store and issuance |
+| `quip-node/src/witness.rs` (`WitnessStore::ingest`) | M9.6a | dedupe-on-ingest with later-timestamp wins |
+| `quip-node/src/witness.rs` (`WitnessStore::statements_for`) | M9.6a | responder query, 6-hour rule at query time |
+| `quip-node/src/witness.rs` (`WitnessStore::maybe_issue`) | M9.6a | placeholder issuance policy |
+| `quip-node/src/claim_log.rs:1` | M9.6a | first-seen fact, shared by trust and witness store |
+| `quip-node/src/trust.rs` (`TrustPolicy::trusted_peers`) | M9.6a | subject enumeration for issuance |
+| `quip-node/src/tasks.rs` (`run_discovery_phase` seam 1, 2) | M9.6a | store ingress + requester-side KT wiring |
+| `quip-node/src/tasks.rs` (`run_peer_loop` seam 3) | M9.6a | steady-loop store ingress |
+| `quip-net/src/establishment.rs` (`compute_kt_status`) | M9.6a | verifier independence (excludes local NodeId) |
 | `quip-node/src/lib.rs` (`Node::take_events`) | M10.2 | receiver hand-off for the FFI layer |
 | `quip-node/src/trust.rs:1` | M10.3 | trust policy |
 | `quip-node/src/trust.rs` (`PeerTrust`) | M10.3 | five-level trust enum |

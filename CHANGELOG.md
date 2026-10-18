@@ -969,6 +969,16 @@ a `cfg(test)`-only frame injection on `ConnectionDriver`);
 `classify_inbound` over the verb × phase matrix and the `InboundOptions`
 values (`tasks.rs`).
 
+**What the tests do not prove.** The two phase-timed fixes —
+`relay_discovery` served during discovery, `AnnounceWitness` ingested
+during handshake — are tested at the routing layer: `classify_inbound`
+returns the right outcome for the right phase, and the call sites
+execute it. They are not tested by reproducing the timing that made the
+drops: that requires a test-only gate that parks a peer mid-phase, which
+is a larger surface than the frame injection and is not added. A future
+instance of this class that escapes both the unit tests and CI would
+escape for the same reason these did.
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`

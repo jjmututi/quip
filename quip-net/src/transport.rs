@@ -143,6 +143,17 @@
 //! is established by the Key Claim exchange, not by the TLS certificate.
 //! The server's certificate is supplied by the caller; the client skips
 //! certificate verification with an internal no-op verifier.
+//!
+//! # Test-only surface
+//!
+//! `ConnectionDriver::inject_frame_for_test` writes a frame on T0
+//! *without* the send-side capability check, so a test can model a peer
+//! that ignores its own §4 negotiation. It is `#[cfg(test)]` and must
+//! stay that way. If a caller outside this crate ever needs it, the
+//! answer is not a feature flag: it is a separate test-only crate that
+//! depends on `quip-net`, so that the bypass cannot reach production
+//! code by turning a feature on. Lifting it is a decision about whether
+//! an unchecked send is a legitimate path, and it is not one today.
 
 use crate::backoff::BackoffTracker;
 use crate::conn::{Connection as QuipConnection, QuipNetConfig};

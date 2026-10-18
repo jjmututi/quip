@@ -170,7 +170,7 @@ pub use frame::{
 };
 pub use handshake::{Capabilities, ExtensionId, Handshake};
 pub use message::{
-    dispatch, ErrorMessage, Message, SendChunk, SendComplete, SendStart,
+    dispatch, dispatch_inbound, ErrorMessage, Message, SendChunk, SendComplete, SendStart,
 };
 pub use query::Query;
 pub use rate::{

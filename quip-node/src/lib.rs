@@ -650,7 +650,15 @@ where
         let mut driver = client_endpoint.connect(addr, server_name).await?;
 
         let clock = Arc::clone(&self.clock);
-        let peer = drive_handshake(&mut driver, &clock).await?;
+        let peer = drive_handshake(
+            &mut driver,
+            &clock,
+            &self.discovery,
+            &self.witness,
+            self.store.as_ref(),
+            &self.signer,
+        )
+        .await?;
 
         let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAPACITY);
         let slot =

@@ -1292,6 +1292,24 @@ impl ConnectionDriver {
         Ok(())
     }
 
+    /// Write `msg` on T0 **without** the send-side capability check.
+    ///
+    /// Test-only, and deliberately so. A conformant sender cannot emit a
+    /// verb outside the negotiated set — [`Self::send`] refuses first —
+    /// so testing the *receive-side* gate needs a peer that ignores its
+    /// own. That is exactly the malicious-peer model the gate exists
+    /// for. Never lift this out of `cfg(test)`.
+    #[cfg(test)]
+    pub(crate) async fn inject_frame_for_test(&mut self, msg: &Message) -> Result<()> {
+        let bytes = msg.to_bytes()?;
+        let framed = frame::encode_message(&bytes)?;
+        let send = self
+            .control_send
+            .as_mut()
+            .ok_or_else(|| Error::Transport("T0 not open".into()))?;
+        write_all_cancel_safe(send, &framed).await
+    }
+
     /// Route a T2 verb to the correct per-resource stream.
     async fn send_bulk(&mut self, msg: &Message, bytes: &[u8]) -> Result<()> {
         let framed = frame::encode_message(bytes)?;
@@ -1942,6 +1960,46 @@ mod tests {
 
         let events = poll_until_event(&mut server, 100).await.unwrap();
         assert!(events.is_empty());
+    }
+
+    /// A peer that ignores its own gate is still rejected on receive:
+    /// the frame reaches `poll`, and `dispatch_inbound` refuses it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn injected_frame_is_rejected_by_dispatch_inbound() {
+        let (mut server, mut client) = handshake_pair(1, 2).await;
+
+        let msg =
+            Message::RegisterTcid(quip_core::messages::TrustedCidRegistration {
+                cid: quip_core::cid::CidOrV1::Raw(quip_core::cid::Cid([0x10; 32])),
+                app_metadata: vec![],
+                owner: nid(1),
+                timestamp: now(),
+                signature: [0xef; 64],
+            });
+        // `send` would refuse: neither side negotiated GOVERNANCE. This
+        // models a peer that constructs the frame itself.
+        server
+            .inject_frame_for_test(&msg)
+            .await
+            .expect("inject frame");
+
+        let events = poll_until_event(&mut client, 500).await.expect("poll");
+        let (tier, incoming) = events
+            .into_iter()
+            .find_map(|e| match e {
+                Event::Frame { tier, msg, .. } => Some((tier, msg)),
+                _ => None,
+            })
+            .expect("client should receive the injected frame");
+
+        let negotiated = client.agreed().expect("client negotiated");
+        assert!(!negotiated.has(crate::handshake::Capabilities::GOVERNANCE));
+        let err = message::dispatch_inbound(negotiated, &incoming.raw, tier)
+            .expect_err("the receive-side gate must reject the verb");
+        assert!(
+            matches!(err, Error::CapabilityViolation { .. }),
+            "expected CapabilityViolation, got {err:?}",
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

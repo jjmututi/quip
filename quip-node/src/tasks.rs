@@ -23,7 +23,7 @@ use quip_net::frame::Tier;
 use quip_net::handshake::Capabilities;
 use quip_net::message::{self, Message};
 use quip_net::nat::{NatConfig, NatEvent as DriverNatEvent};
-use quip_net::nat_driver::NatDriver;
+use quip_net::nat_driver::{DhtResult, NatDriver};
 use quip_net::nat_wire::{
     Candidate, CandidateAnnounce, RelayEntry, RelayResponse, CANDIDATE_HOST,
 };
@@ -143,7 +143,16 @@ pub(crate) async fn accept_loop<B>(
         // registration — a narrow window, but real. The endpoint close
         // in Drop still causes it to exit.
         tokio::spawn(async move {
-            let peer = match drive_handshake(&mut driver, &clock).await {
+            let peer = match drive_handshake(
+                &mut driver,
+                &clock,
+                &discovery,
+                &witness,
+                store.as_ref(),
+                &signer,
+            )
+            .await
+            {
                 Ok(p) => p,
                 Err(e) => {
                     let _ = events_tx
@@ -222,19 +231,57 @@ pub(crate) async fn accept_loop<B>(
 ///
 /// Returns the peer's NodeId. The driver is left in
 /// `DriverPhase::Established`.
-pub(crate) async fn drive_handshake(
+pub(crate) async fn drive_handshake<B>(
     driver: &mut ConnectionDriver,
     clock: &SharedClock,
-) -> Result<NodeId> {
+    discovery: &DiscoveryHandle,
+    witness: &WitnessStore,
+    store: &Mutex<QuipStore<B>>,
+    signer: &SharedSigner,
+) -> Result<NodeId>
+where
+    B: BlobStore + Send + Sync + 'static,
+{
+    let deps = InboundDeps {
+        discovery,
+        witness,
+        store,
+        signer,
+    };
     loop {
         let now = clock.now();
         let events = driver.poll(now).await?;
-        for e in events {
-            if matches!(e, Event::ControlConnected { .. }) {
-                if let Some(peer) = driver.peer_node_id() {
-                    return Ok(peer);
+        let mut connected = None;
+        for event in events {
+            match event {
+                Event::ControlConnected { .. } => {
+                    // Record it, but finish this batch: a frame that
+                    // arrived alongside the completion is still ours to
+                    // ingest.
+                    connected = driver.peer_node_id();
                 }
+                Event::Frame { tier, msg, .. } => {
+                    if let Ok(m) = parse_inbound(driver, &msg.raw, tier) {
+                        let peer = driver.peer_node_id();
+                        let local_id = driver.local_key_claim().node_id;
+                        let action = classify_inbound(
+                            &m,
+                            InboundOptions::HANDSHAKE,
+                            peer,
+                            &local_id,
+                            false,
+                        );
+                        let _ = apply_inbound(
+                            action, m, driver, clock, peer, local_id, false, &deps, None,
+                        )
+                        .await;
+                    }
+                }
+                _ => {}
             }
+        }
+        if let Some(peer) = connected {
+            return Ok(peer);
         }
     }
 }
@@ -295,6 +342,248 @@ fn is_coral_verb(m: &Message) -> bool {
             | Message::Spillover(_)
             | Message::SpilloverResponse(_)
     )
+}
+
+/// Parse an inbound frame and enforce the negotiated capability set.
+///
+/// Every inbound path — handshake, NAT, discovery, steady state — goes
+/// through this. `message::dispatch` is deliberately not used directly:
+/// parsing without the capability check would make §4's negotiation
+/// advisory on receive.
+fn parse_inbound(driver: &ConnectionDriver, raw: &[u8], tier: Tier) -> Result<Message> {
+    let negotiated = driver
+        .agreed()
+        .ok_or(Error::Handshake("inbound frame before capability negotiation"))?;
+    message::dispatch_inbound(negotiated, raw, tier)
+}
+
+/// Which optional verbs a phase is willing to serve.
+///
+/// The dispatch *order* is shared by every phase; only the enabled set
+/// varies. Making the set explicit is what stops a phase from silently
+/// dropping a verb another phase handles — the bug class that has now
+/// been closed three times (`relay_discovery` in M9.5b-c part 6,
+/// `AnnounceWitness` and Coral verbs in `edef239`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct InboundOptions {
+    serve_relay_discovery: bool,
+    serve_coral: bool,
+    serve_pins: bool,
+}
+
+impl InboundOptions {
+    /// Pre-establishment: witness ingest only.
+    const HANDSHAKE: Self = Self {
+        serve_relay_discovery: false,
+        serve_coral: false,
+        serve_pins: false,
+    };
+    /// §12 NAT phase: relay and Coral are served; pins are not.
+    const NAT: Self = Self {
+        serve_relay_discovery: true,
+        serve_coral: true,
+        serve_pins: false,
+    };
+    /// Witness discovery: relay and Coral are served; pins are not.
+    const DISCOVERY: Self = Self {
+        serve_relay_discovery: true,
+        serve_coral: true,
+        serve_pins: false,
+    };
+    /// Established: everything this layer owns.
+    const STEADY: Self = Self {
+        serve_relay_discovery: true,
+        serve_coral: true,
+        serve_pins: true,
+    };
+    /// T3 datagrams carry no §12/§13 verbs; only witness ingest applies.
+    const DATAGRAM: Self = Self {
+        serve_relay_discovery: false,
+        serve_coral: false,
+        serve_pins: false,
+    };
+}
+
+/// What one inbound message means to the phase that received it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum InboundAction {
+    /// A witness statement: store it, and feed the flow if there is one.
+    Witness,
+    /// A `relay_discovery` addressed to this node: answer it.
+    Relay,
+    /// A §12 verb. The caller decides whether to feed a `NatDriver`
+    /// (`run_nat_phase`) or enqueue it for the DHT router.
+    Nat,
+    /// A §13 Coral verb: serve or ingest it.
+    Coral,
+    /// An auto-served pin verb.
+    Pins,
+    /// Nothing this layer owns.
+    Unhandled,
+}
+
+/// Classify one decoded message for a phase.
+///
+/// Pure — no driver, no clock, no I/O — so the per-phase table is
+/// testable without a connection.
+fn classify_inbound(
+    msg: &Message,
+    opts: InboundOptions,
+    peer: Option<NodeId>,
+    local_id: &NodeId,
+    relay_capable: bool,
+) -> InboundAction {
+    if matches!(msg, Message::AnnounceWitness(_)) {
+        return InboundAction::Witness;
+    }
+    if opts.serve_relay_discovery && relay_capable {
+        if let Some(peer) = peer {
+            if relay_request_is_for_us(msg, &peer, local_id) {
+                return InboundAction::Relay;
+            }
+        }
+    }
+    if let Some(peer) = peer {
+        if dht::dht_result_from(msg, &peer).is_some() {
+            return InboundAction::Nat;
+        }
+    }
+    if opts.serve_coral && is_coral_verb(msg) {
+        return InboundAction::Coral;
+    }
+    if opts.serve_pins && is_pin_verb(msg) {
+        return InboundAction::Pins;
+    }
+    InboundAction::Unhandled
+}
+
+/// True when `msg` is a `relay_discovery` this node should answer:
+/// addressed to us, requested by the connection's peer, and signed.
+fn relay_request_is_for_us(msg: &Message, peer: &NodeId, local_id: &NodeId) -> bool {
+    let Message::RelayDiscovery(d) = msg else {
+        return false;
+    };
+    if d.requester != *peer || d.target != *local_id {
+        return false;
+    }
+    matches!(d.verify(&Ed25519Verifier), Ok(true))
+}
+
+/// True for the verbs `try_auto_serve_pins` handles.
+fn is_pin_verb(msg: &Message) -> bool {
+    matches!(
+        msg,
+        Message::Pin(_) | Message::Unpin(_) | Message::QueryPins(_)
+    )
+}
+
+/// The stable references every inbound action needs.
+///
+/// Built once per peer task. `store` is only read by the `Pins` action,
+/// which only the steady loop enables, but carrying it here keeps the
+/// action set independent of the phase.
+struct InboundDeps<'a, B> {
+    discovery: &'a DiscoveryHandle,
+    witness: &'a WitnessStore,
+    store: &'a Mutex<QuipStore<B>>,
+    signer: &'a SharedSigner,
+}
+
+/// The outcome of applying an [`InboundAction`].
+enum InboundOutcome {
+    /// A §12 result the caller may feed to a `NatDriver` or enqueue for
+    /// the DHT router. The variant means "may", not "must".
+    Nat(DhtResult),
+    /// The node consumed the message; nothing to surface.
+    Handled,
+    /// Not owned by this layer; the caller decides.
+    Unhandled(Message),
+}
+
+/// Apply a classified message.
+///
+/// `flow` is `Some` only before the flow reaches `Ready`:
+/// `compute_kt_status` runs once, at discovery completion, so feeding a
+/// post-`Ready` flow would be inert at best and would invite someone to
+/// think it does something. The steady loop passes `None` and must keep
+/// doing so.
+#[allow(clippy::too_many_arguments)]
+async fn apply_inbound<B>(
+    action: InboundAction,
+    msg: Message,
+    driver: &mut ConnectionDriver,
+    clock: &SharedClock,
+    peer: Option<NodeId>,
+    local_id: NodeId,
+    relay_capable: bool,
+    deps: &InboundDeps<'_, B>,
+    mut flow: Option<&mut ConnectionFlow>,
+) -> InboundOutcome
+where
+    B: BlobStore + Send + Sync + 'static,
+{
+    let now = clock.now();
+    match action {
+        InboundAction::Witness => {
+            if let Message::AnnounceWitness(stmt) = &msg {
+                if deps.witness.accepts(stmt, now) {
+                    let _ = deps.witness.ingest(stmt.clone(), now);
+                    if let Some(flow) = flow.as_deref_mut() {
+                        if flow.remote_node_id() == Some(stmt.subject) {
+                            let _ = flow.on_message(
+                                &Message::AnnounceWitness(stmt.clone()),
+                                now,
+                            );
+                        }
+                    }
+                }
+            }
+            InboundOutcome::Handled
+        }
+        InboundAction::Relay => {
+            if let Some(peer) = peer {
+                if let Some(reply) = try_serve_relay_discovery(
+                    &msg,
+                    &peer,
+                    &local_id,
+                    driver,
+                    relay_capable,
+                    deps.signer,
+                    now,
+                ) {
+                    let _ = driver.send(&reply, now).await;
+                }
+            }
+            InboundOutcome::Handled
+        }
+        InboundAction::Nat => {
+            match peer.and_then(|peer| dht::dht_result_from(&msg, &peer)) {
+                Some(result) => InboundOutcome::Nat(result),
+                None => InboundOutcome::Unhandled(msg),
+            }
+        }
+        InboundAction::Coral => {
+            handle_discovery_event(
+                driver,
+                clock,
+                deps.discovery,
+                msg,
+                flow,
+                deps.witness,
+            )
+            .await;
+            InboundOutcome::Handled
+        }
+        InboundAction::Pins => {
+            if let Some(Some(reply)) =
+                try_auto_serve_pins(deps.store, &msg, now).await
+            {
+                let _ = driver.send(&reply, now).await;
+            }
+            InboundOutcome::Handled
+        }
+        InboundAction::Unhandled => InboundOutcome::Unhandled(msg),
+    }
 }
 
 /// Route one decoded Coral message into the shared discovery handle.
@@ -420,14 +709,20 @@ fn decode_lookup_values(
 ///
 /// The state machine is shared across peer tasks; the peer we are
 /// establishing with is the target.
-async fn run_discovery_phase(
+#[allow(clippy::too_many_arguments)]
+async fn run_discovery_phase<B>(
     driver: &mut ConnectionDriver,
     peer: NodeId,
     clock: &SharedClock,
-    discovery: &DiscoveryHandle,
+    dht: &DhtHandle,
+    deps: &InboundDeps<'_, B>,
+    local_id: NodeId,
+    relay_capable: bool,
     flow: &mut ConnectionFlow,
-    witness: &WitnessStore,
-) {
+) where
+    B: BlobStore + Send + Sync + 'static,
+{
+    let discovery = deps.discovery;
     let now = clock.now();
     let paths = make_lookup_paths(peer, now);
 
@@ -499,11 +794,32 @@ async fn run_discovery_phase(
         };
         for event in events {
             if let Event::Frame { tier, msg, .. } = event {
-                if let Ok(m) = message::dispatch(&msg.raw, tier) {
-                    handle_discovery_event(
-                        driver, clock, discovery, m, Some(flow), witness,
+                if let Ok(m) = parse_inbound(driver, &msg.raw, tier) {
+                    let action = classify_inbound(
+                        &m,
+                        InboundOptions::DISCOVERY,
+                        Some(peer),
+                        &local_id,
+                        relay_capable,
+                    );
+                    if let InboundOutcome::Nat(result) = apply_inbound(
+                        action,
+                        m,
+                        driver,
+                        clock,
+                        Some(peer),
+                        local_id,
+                        relay_capable,
+                        deps,
+                        Some(&mut *flow),
                     )
-                    .await;
+                    .await
+                    {
+                        // The NAT phase for this connection has already
+                        // concluded; a late §12 result belongs to the
+                        // DHT router. Before Pre-6b this was dropped.
+                        dht.enqueue(result);
+                    }
                 }
             }
             // Other event variants (Datagram, BulkStreamOpened, ...)
@@ -594,7 +910,7 @@ enum NatPhaseOutcome {
 /// discovery that arrives while this peer is still establishing from
 /// being consumed and dropped by `driver.poll`.
 #[allow(clippy::too_many_arguments)]
-async fn run_nat_phase(
+async fn run_nat_phase<B>(
     driver: &mut ConnectionDriver,
     peer: NodeId,
     session_id: [u8; 16],
@@ -602,11 +918,13 @@ async fn run_nat_phase(
     clock: &SharedClock,
     dht: &DhtHandle,
     signer: &SharedSigner,
-    discovery: &DiscoveryHandle,
-    witness: &WitnessStore,
+    deps: &InboundDeps<'_, B>,
     relay_capable: bool,
     force_relay: bool,
-) -> NatPhaseOutcome {
+) -> NatPhaseOutcome
+where
+    B: BlobStore + Send + Sync + 'static,
+{
     use quip_net::nat_driver::DhtClient;
 
     let now = clock.now();
@@ -779,53 +1097,28 @@ async fn run_nat_phase(
         };
         for event in events {
             if let Event::Frame { tier, msg, .. } = event {
-                if let Ok(m) = message::dispatch(&msg.raw, tier) {
-                    // M9.5b-c part 6: answer an inbound
-                    // `relay_discovery` here too, before the DHT
-                    // intercept. The steady loop does the same, but a
-                    // discovery that arrives while this peer is still
-                    // in its own NAT phase would otherwise be consumed
-                    // by `driver.poll` and dropped — the requester
-                    // would never receive its relay.
-                    if let Some(reply) = try_serve_relay_discovery(
+                if let Ok(m) = parse_inbound(driver, &msg.raw, tier) {
+                    let action = classify_inbound(
                         &m,
-                        &peer,
+                        InboundOptions::NAT,
+                        Some(peer),
                         &local_id,
-                        driver,
                         relay_capable,
-                        signer,
-                        now,
-                    ) {
-                        let _ = driver.send(&reply, now).await;
-                        continue;
-                    }
-                    if let Some(result) = dht::dht_result_from(&m, &peer) {
+                    );
+                    if let InboundOutcome::Nat(result) = apply_inbound(
+                        action,
+                        m,
+                        driver,
+                        clock,
+                        Some(peer),
+                        local_id,
+                        relay_capable,
+                        deps,
+                        None,
+                    )
+                    .await
+                    {
                         nat_driver.on_dht_result(result, now);
-                        continue;
-                    }
-                    // M9.6a: a witness statement is node-wide
-                    // corroboration and must not be dropped just because
-                    // this connection is still probing. Issuance fires
-                    // once per re-issue interval, so a dropped statement
-                    // is lost for twelve hours.
-                    if let Message::AnnounceWitness(stmt) = &m {
-                        if witness.accepts(stmt, now) {
-                            let _ = witness.ingest(stmt.clone(), now);
-                        }
-                        continue;
-                    }
-                    // M9.6a: answer §13 Coral lookups during the NAT
-                    // phase too. A requester that finished its own NAT
-                    // phase can reach discovery while this side is still
-                    // probing, and `driver.poll` consumes the frame
-                    // either way — without this branch the lookup is
-                    // dropped and the requester's discovery falls back
-                    // to `Pending` on its 5 s deadline.
-                    if is_coral_verb(&m) {
-                        handle_discovery_event(
-                            driver, clock, discovery, m, None, witness,
-                        )
-                        .await;
                     }
                 }
             }
@@ -1074,7 +1367,7 @@ fn local_ip_address(driver: &ConnectionDriver) -> quip_core::address::Address {
 /// independent, first-seen-matured witnesses have corroborated the
 /// claim.
 #[allow(clippy::too_many_arguments)]
-async fn run_establishment(
+async fn run_establishment<B>(
     driver: &mut ConnectionDriver,
     local_claim: &KeyClaim,
     peer_claim: &KeyClaim,
@@ -1082,15 +1375,17 @@ async fn run_establishment(
     slot: PeerSlot,
     clock: &SharedClock,
     events_tx: &mpsc::Sender<NodeEvent>,
-    discovery: &DiscoveryHandle,
-    witness: &WitnessStore,
+    deps: &InboundDeps<'_, B>,
     trust: &SharedTrust,
     peers: &PeerRegistry,
     dht: &DhtHandle,
     signer: &SharedSigner,
     relay_capable: bool,
     force_relay: bool,
-) -> bool {
+) -> bool
+where
+    B: BlobStore + Send + Sync + 'static,
+{
     let session_id = derive_session_id(&local_claim.node_id, &peer);
     let mut flow = ConnectionFlow::resume_from_key_claim(
         local_claim.clone(),
@@ -1131,8 +1426,7 @@ async fn run_establishment(
                     clock,
                     dht,
                     signer,
-                    discovery,
-                    witness,
+                    deps,
                     relay_capable,
                     force_relay,
                 )
@@ -1165,7 +1459,14 @@ async fn run_establishment(
             }
             FlowPhase::WitnessDiscovery => {
                 run_discovery_phase(
-                    driver, peer, clock, discovery, &mut flow, witness,
+                    driver,
+                    peer,
+                    clock,
+                    dht,
+                    deps,
+                    local_claim.node_id,
+                    relay_capable,
+                    &mut flow,
                 )
                 .await;
             }
@@ -1281,6 +1582,15 @@ pub(crate) async fn peer_run<B>(
         return;
     }
 
+    // One bundle of stable references for every inbound path this task
+    // drives: handshake, NAT, discovery, steady state.
+    let deps = InboundDeps {
+        discovery: &discovery,
+        witness: &witness,
+        store: store.as_ref(),
+        signer: &signer,
+    };
+
     // `drive_handshake` returns only after the §16 Key Claim exchange,
     // so both claims are populated. Clone them out before the flow
     // borrows anything; the driver then goes to the steady loop.
@@ -1329,8 +1639,7 @@ pub(crate) async fn peer_run<B>(
         slot,
         &clock,
         &events_tx,
-        &discovery,
-        &witness,
+        &deps,
         &trust,
         &peers,
         &dht,
@@ -1363,18 +1672,15 @@ pub(crate) async fn peer_run<B>(
         peer,
         slot,
         local_id,
-        &store,
+        &deps,
         &clock,
         auto_serve_pins,
         relay_capable,
         &events_tx,
         &mut outbound_rx,
         &dht,
-        &discovery,
         &trust,
         &peers,
-        &witness,
-        &signer,
     )
     .await;
 
@@ -1397,18 +1703,15 @@ async fn run_peer_loop<B>(
     peer: NodeId,
     slot: PeerSlot,
     local_id: NodeId,
-    store: &Mutex<QuipStore<B>>,
+    deps: &InboundDeps<'_, B>,
     clock: &SharedClock,
     auto_serve_pins: bool,
     relay_capable: bool,
     events_tx: &mpsc::Sender<NodeEvent>,
     outbound_rx: &mut mpsc::Receiver<Message>,
     dht: &DhtHandle,
-    discovery: &DiscoveryHandle,
     trust: &SharedTrust,
     peers: &PeerRegistry,
-    witness: &WitnessStore,
-    signer: &SharedSigner,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -1450,7 +1753,7 @@ async fn run_peer_loop<B>(
         let now = clock.now();
         let due = {
             let policy = trust.lock().await;
-            witness.maybe_issue(&policy, now)
+            deps.witness.maybe_issue(&policy, now)
         };
         if !due.is_empty() {
             let senders: Vec<mpsc::Sender<Message>> = {
@@ -1462,12 +1765,12 @@ async fn run_peer_loop<B>(
             };
             for subject in due {
                 let stmt =
-                    issue_statement(subject, [0u8; 32], &**signer, now);
+                    issue_statement(subject, [0u8; 32], deps.signer.as_ref(), now);
                 let msg = Message::AnnounceWitness(stmt);
                 for tx in &senders {
                     let _ = tx.send(msg.clone()).await;
                 }
-                witness.mark_issued(subject, now);
+                deps.witness.mark_issued(subject, now);
             }
         }
 
@@ -1491,92 +1794,42 @@ async fn run_peer_loop<B>(
         for e in events {
             let node_event = match e {
                 Event::Frame { tier, msg, .. } => {
-                    match message::dispatch(&msg.raw, tier) {
+                    match parse_inbound(driver, &msg.raw, tier) {
                         Ok(m) => {
-                            // M9.6a seam 3: a witness statement arriving
-                            // in the steady state is stored node-wide
-                            // and does not surface as a
-                            // `NodeEvent::Message`.
-                            if let Message::AnnounceWitness(stmt) = &m {
-                                if witness.accepts(stmt, now) {
-                                    let _ = witness.ingest(stmt.clone(), now);
-                                }
-                                continue;
-                            }
-                            // M9.5b-c part 6: answer an inbound
-                            // `relay_discovery` before the DHT
-                            // intercept, because the intercept does
-                            // not handle that verb. Only a node with
-                            // `relay_capable` set replies, and only
-                            // when the discovery names this peer as
-                            // its requester and this node as its
-                            // target.
-                            if let Some(reply) = try_serve_relay_discovery(
+                            let opts = InboundOptions {
+                                serve_pins: auto_serve_pins,
+                                ..InboundOptions::STEADY
+                            };
+                            let action = classify_inbound(
                                 &m,
-                                &peer,
+                                opts,
+                                Some(peer),
                                 &local_id,
-                                driver,
                                 relay_capable,
-                                signer,
-                                now,
-                            ) {
-                                if let Err(e) = driver.send(&reply, now).await {
-                                    let _ = events_tx
-                                        .send(NodeEvent::Error {
-                                            peer: Some(peer),
-                                            error: e,
-                                        })
-                                        .await;
+                            );
+                            match apply_inbound(
+                                action,
+                                m,
+                                driver,
+                                clock,
+                                Some(peer),
+                                local_id,
+                                relay_capable,
+                                deps,
+                                None,
+                            )
+                            .await
+                            {
+                                InboundOutcome::Unhandled(m) => {
+                                    NodeEvent::Message { peer, tier, msg: m }
                                 }
-                                continue;
-                            }
-                            // §12 NAT verbs route into the DHT client
-                            // and never surface as a `Message` event.
-                            // `dht_result_from` verifies the signature
-                            // and the claimed NodeId before returning
-                            // a result.
-                            if let Some(result) = dht::dht_result_from(&m, &peer) {
-                                dht.note_peer(peer, slot, None, now);
-                                dht.enqueue(result);
-                                continue;
-                            }
-                            // §13 Coral verbs route into the shared
-                            // discovery handle: as a client, ingest
-                            // responses; as a server, answer the
-                            // peer's own lookups.
-                            if is_coral_verb(&m) {
-                                handle_discovery_event(
-                                    driver,
-                                    clock,
-                                    discovery,
-                                    m,
-                                    None,
-                                    witness,
-                                )
-                                .await;
-                                continue;
-                            }
-                            // Auto-serve eligible verbs from the store.
-                            if auto_serve_pins {
-                                if let Some(reply) =
-                                    try_auto_serve_pins(store, &m, now).await
-                                {
-                                    if let Some(reply) = reply {
-                                        if let Err(e) =
-                                            driver.send(&reply, now).await
-                                        {
-                                            let _ = events_tx
-                                                .send(NodeEvent::Error {
-                                                    peer: Some(peer),
-                                                    error: e,
-                                                })
-                                                .await;
-                                        }
-                                    }
+                                InboundOutcome::Nat(result) => {
+                                    dht.note_peer(peer, slot, None, now);
+                                    dht.enqueue(result);
                                     continue;
                                 }
+                                InboundOutcome::Handled => continue,
                             }
-                            NodeEvent::Message { peer, tier, msg: m }
                         }
                         Err(err) => NodeEvent::Error {
                             peer: Some(peer),
@@ -1585,8 +1838,39 @@ async fn run_peer_loop<B>(
                     }
                 }
                 Event::Datagram { msg } => {
-                    match message::dispatch(&msg.raw, Tier::Event) {
-                        Ok(m) => NodeEvent::Datagram { peer, msg: m },
+                    match parse_inbound(driver, &msg.raw, Tier::Event) {
+                        Ok(m) => {
+                            let action = classify_inbound(
+                                &m,
+                                InboundOptions::DATAGRAM,
+                                Some(peer),
+                                &local_id,
+                                relay_capable,
+                            );
+                            match apply_inbound(
+                                action,
+                                m,
+                                driver,
+                                clock,
+                                Some(peer),
+                                local_id,
+                                relay_capable,
+                                deps,
+                                None,
+                            )
+                            .await
+                            {
+                                InboundOutcome::Unhandled(m) => {
+                                    NodeEvent::Datagram { peer, msg: m }
+                                }
+                                InboundOutcome::Nat(result) => {
+                                    dht.note_peer(peer, slot, None, now);
+                                    dht.enqueue(result);
+                                    continue;
+                                }
+                                InboundOutcome::Handled => continue,
+                            }
+                        }
                         Err(err) => NodeEvent::Error {
                             peer: Some(peer),
                             error: err,
@@ -1653,3 +1937,268 @@ where
     };
     Some(reply)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quip_net::coral::CoralLookup;
+    use quip_net::nat_wire::RelayDiscovery;
+    use quip_net::sync::QueryPins;
+
+    fn t(ms: u64) -> Timestamp {
+        Timestamp::from_millis(ms)
+    }
+
+    fn nid(b: u8) -> NodeId {
+        [b; 32]
+    }
+
+    fn peer_with_seed(seed: u8) -> NodeId {
+        Ed25519Signer::from_seed(&[seed; 32]).public_key()
+    }
+
+    /// A correctly signed `candidate_announce` from `seed`.
+    fn signed_candidate(seed: u8) -> Message {
+        let signer = Ed25519Signer::from_seed(&[seed; 32]);
+        let mut announce = CandidateAnnounce {
+            node_id: signer.public_key(),
+            candidates: Vec::new(),
+            session_id: [0u8; 16],
+            timestamp: t(0),
+            signature: [0u8; 64],
+        };
+        let payload = announce.signing_payload().unwrap();
+        announce.signature = signer.sign_ed25519(&payload);
+        Message::CandidateAnnounce(announce)
+    }
+
+    /// A correctly signed `relay_discovery` addressed to `target`.
+    fn signed_relay(seed: u8, target: NodeId) -> Message {
+        let signer = Ed25519Signer::from_seed(&[seed; 32]);
+        let mut discovery = RelayDiscovery {
+            request_id: [0u8; 16],
+            requester: signer.public_key(),
+            target,
+            max_hops: 1,
+            timestamp: t(0),
+            signature: [0u8; 64],
+        };
+        let payload = discovery.signing_payload().unwrap();
+        discovery.signature = signer.sign_ed25519(&payload);
+        Message::RelayDiscovery(discovery)
+    }
+
+    fn witness_statement() -> Message {
+        Message::AnnounceWitness(WitnessStatement {
+            subject: nid(1),
+            timestamp: t(0),
+            valid_until: t(1_000),
+            ring_id: [0u8; 32],
+            witness: nid(2),
+            signature: [0u8; 64],
+        })
+    }
+
+    fn coral_lookup() -> Message {
+        Message::CoralLookup(CoralLookup {
+            key: nid(1),
+            lookup_paths: Vec::new(),
+            witness_ring_id: [0u8; 32],
+            timestamp: t(0),
+            requester: nid(2),
+            signature: [0u8; 64],
+        })
+    }
+
+    fn pin_query() -> Message {
+        Message::QueryPins(QueryPins {
+            resource_id: None,
+            cid: None,
+        })
+    }
+
+    fn key_claim() -> Message {
+        Message::AnnounceKey(KeyClaim {
+            node_id: nid(1),
+            timestamp: t(0),
+            dht_id: nid(1),
+            signature: [0u8; 64],
+        })
+    }
+
+    fn classify(msg: &Message, opts: InboundOptions, peer: NodeId) -> InboundAction {
+        classify_inbound(msg, opts, Some(peer), &nid(9), true)
+    }
+
+    const PHASES: [InboundOptions; 4] = [
+        InboundOptions::HANDSHAKE,
+        InboundOptions::NAT,
+        InboundOptions::DISCOVERY,
+        InboundOptions::STEADY,
+    ];
+
+    #[test]
+    fn inbound_options_match_the_phase_table() {
+        assert_eq!(
+            InboundOptions::HANDSHAKE,
+            InboundOptions {
+                serve_relay_discovery: false,
+                serve_coral: false,
+                serve_pins: false,
+            },
+        );
+        assert_eq!(
+            InboundOptions::NAT,
+            InboundOptions {
+                serve_relay_discovery: true,
+                serve_coral: true,
+                serve_pins: false,
+            },
+        );
+        assert_eq!(
+            InboundOptions::DISCOVERY,
+            InboundOptions {
+                serve_relay_discovery: true,
+                serve_coral: true,
+                serve_pins: false,
+            },
+        );
+        assert_eq!(
+            InboundOptions::STEADY,
+            InboundOptions {
+                serve_relay_discovery: true,
+                serve_coral: true,
+                serve_pins: true,
+            },
+        );
+        assert_eq!(
+            InboundOptions::DATAGRAM,
+            InboundOptions {
+                serve_relay_discovery: false,
+                serve_coral: false,
+                serve_pins: false,
+            },
+        );
+    }
+
+    #[test]
+    fn announce_witness_is_ingested_in_every_phase() {
+        let msg = witness_statement();
+        for opts in PHASES.into_iter().chain([InboundOptions::DATAGRAM]) {
+            assert_eq!(
+                classify_inbound(&msg, opts, None, &nid(9), false),
+                InboundAction::Witness,
+                "AnnounceWitness must be ingested with {opts:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn relay_discovery_is_served_during_discovery_and_nat() {
+        let seed = 3u8;
+        let peer = peer_with_seed(seed);
+        let msg = signed_relay(seed, nid(9));
+
+        for opts in [
+            InboundOptions::NAT,
+            InboundOptions::DISCOVERY,
+            InboundOptions::STEADY,
+        ] {
+            assert_eq!(
+                classify(&msg, opts, peer),
+                InboundAction::Relay,
+                "relay_discovery must be served with {opts:?}",
+            );
+        }
+        assert_eq!(
+            classify(&msg, InboundOptions::HANDSHAKE, peer),
+            InboundAction::Unhandled,
+            "pre-establishment frames are not answered",
+        );
+        assert_eq!(
+            classify_inbound(
+                &msg,
+                InboundOptions::DISCOVERY,
+                Some(peer),
+                &nid(9),
+                false,
+            ),
+            InboundAction::Unhandled,
+            "a relay-incapable node does not answer",
+        );
+    }
+
+    #[test]
+    fn pins_are_served_only_in_the_steady_state() {
+        let msg = pin_query();
+        let peer = nid(3);
+        assert_eq!(
+            classify(&msg, InboundOptions::STEADY, peer),
+            InboundAction::Pins,
+        );
+        for opts in [
+            InboundOptions::HANDSHAKE,
+            InboundOptions::NAT,
+            InboundOptions::DISCOVERY,
+        ] {
+            assert_eq!(
+                classify(&msg, opts, peer),
+                InboundAction::Unhandled,
+                "pins are not served with {opts:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn nat_verbs_route_to_the_caller() {
+        let seed = 4u8;
+        let peer = peer_with_seed(seed);
+        let msg = signed_candidate(seed);
+        for opts in [
+            InboundOptions::NAT,
+            InboundOptions::DISCOVERY,
+            InboundOptions::STEADY,
+        ] {
+            assert_eq!(
+                classify(&msg, opts, peer),
+                InboundAction::Nat,
+                "a signed NAT verb must classify as Nat with {opts:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn coral_is_served_in_nat_discovery_and_steady() {
+        let msg = coral_lookup();
+        let peer = nid(3);
+        for opts in [
+            InboundOptions::NAT,
+            InboundOptions::DISCOVERY,
+            InboundOptions::STEADY,
+        ] {
+            assert_eq!(
+                classify(&msg, opts, peer),
+                InboundAction::Coral,
+                "coral must be served with {opts:?}",
+            );
+        }
+        assert_eq!(
+            classify(&msg, InboundOptions::HANDSHAKE, peer),
+            InboundAction::Unhandled,
+        );
+    }
+
+    #[test]
+    fn unrelated_verbs_are_unhandled_everywhere() {
+        let msg = key_claim();
+        let peer = nid(3);
+        for opts in PHASES {
+            assert_eq!(
+                classify(&msg, opts, peer),
+                InboundAction::Unhandled,
+                "{opts:?}",
+            );
+        }
+    }
+}
+

@@ -70,7 +70,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~718 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~729 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -106,16 +106,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main` after M9.6a:
+Baseline on `main` after Pre-6b:
 
 ```
 quip-core      74 passed
-quip-net      483 passed
+quip-net      487 passed
 quip-storage   57 passed
-quip-node     104 passed
+quip-node     111 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~718 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~729 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -154,7 +154,7 @@ doc-tests       4 passed (one per crate)
 | BFT-A | BFT correctness: `apply()` contract, prepared/checkpoint carry-forward | not started |
 | BFT-V | BFT validation: adversarial network simulator, property tests | not started |
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
-| Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | not started |
+| Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Membership boundaries and pin authorization model | not started |
 
 ---
@@ -916,6 +916,59 @@ Tests: `six_nodes_reach_verified_after_first_seen_window`,
 `six_nodes_stay_pending_before_first_seen_window`, plus the unit
 tests in `quip-node::witness` and `quip-node::claim_log`.
 
+### Pre-6b — inbound dispatch hoist — LANDED
+
+`message::dispatch` parsed a frame but did not enforce the negotiated
+capability set. `ConnectionDriver::send` did enforce it, so §4's gate
+was real on the way out and advisory on the way in. The node's four
+inbound paths — handshake, NAT, discovery, steady state — also each
+carried their own copy of the verb dispatch, and every copy had at
+least once dropped a verb another copy handled: `relay_discovery`
+during the NAT phase (M9.5b-c part 6), `AnnounceWitness` and Coral
+verbs during the NAT phase (`edef239`).
+
+One boundary and one classifier replace the four copies.
+
+- `quip_net::message::dispatch_inbound(negotiated, bytes, tier)`
+  parses and then calls `Message::check_capability`. `dispatch` is
+  unchanged, so existing callers and tests are untouched; every
+  inbound path calls the new function, and a verb whose capability was
+  not negotiated is rejected with `E_CAPABILITY_VIOLATION` before a
+  handler can act on it.
+- `parse_inbound` reads `driver.agreed()` and calls it. It is the only
+  place `tasks.rs` parses a frame.
+- `classify_inbound` is the single dispatch order — witness, relay,
+  NAT, Coral, pins, unhandled — and `InboundOptions` is the only thing
+  a phase varies: handshake serves none of them, NAT and discovery
+  serve relay and Coral, the steady loop serves relay, Coral and pins,
+  and the datagram path serves none (only witness ingest applies). A
+  flow is present only during discovery.
+- `apply_inbound` performs the action. `InboundOutcome::Nat` means the
+  caller *may* feed a `NatDriver`; `run_nat_phase` does, the other
+  phases enqueue for the DHT router.
+
+Three drops closed, not two. Besides the `relay_discovery`-during-
+discovery and `AnnounceWitness`-during-handshake fixes this refactor
+was for, a §12 result arriving during witness discovery is now enqueued
+for the DHT router instead of being dropped. Each is a behaviour
+change, not a preservation.
+
+Observable change: an un-negotiated verb in the steady loop surfaces as
+`NodeEvent::Error { error: CapabilityViolation }` rather than
+`NodeEvent::Message`. The three establishment loops have no event sink,
+so there the frame is dropped.
+
+A conformant peer never meets the receive-side gate:
+`Handshake::negotiate` returns the intersection and `send` enforces the
+same set. The gate is for a peer that ignores its own negotiation,
+which is why its test injects a frame rather than calling `send`.
+
+Tests: `dispatch_inbound` reject/accept/parse-error (`message.rs`);
+`injected_frame_is_rejected_by_dispatch_inbound` (`transport.rs`, using
+a `cfg(test)`-only frame injection on `ConnectionDriver`);
+`classify_inbound` over the verb × phase matrix and the `InboundOptions`
+values (`tasks.rs`).
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -1267,15 +1320,15 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     timer. Recorded here so the redundancy is not rediscovered as a
     surprise.
 
-20. **Inbound dispatch is duplicated across three phases.** The verb
-    handlers in `run_nat_phase`, `run_discovery_phase` and
-    `run_peer_loop` are three copies of the same dispatch, and each
-    copy has silently dropped a verb the others handle: the relay
-    path in M9.5b-c part 6, `AnnounceWitness` and Coral verbs during
-    the NAT phase in M9.6a's follow-up. The fix is one function that
-    takes the phase as a parameter, called from all three; the three
-    call sites cannot drift. Not 6a's job, but the next instance of
-    this bug is a matter of when, not whether.
+20. **Inbound dispatch is duplicated across three phases — LANDED in
+    Pre-6b.** The verb handlers in `run_nat_phase`, `run_discovery_phase`
+    and `run_peer_loop` were three copies of the same dispatch, and each
+    copy had silently dropped a verb the others handled: the relay path
+    in M9.5b-c part 6, `AnnounceWitness` and Coral verbs during the NAT
+    phase in M9.6a's follow-up. Pre-6b replaced them with one classifier
+    (`classify_inbound`) and one applier (`apply_inbound`), with
+    `InboundOptions` as the only per-phase variation. M9.6b's fourth
+    inbound phase is a parameterised call, not a fourth copy.
 
 ### Interface layer (M10)
 
@@ -1512,6 +1565,10 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/tasks.rs` (`run_discovery_phase` seam 1, 2) | M9.6a | store ingress + requester-side KT wiring |
 | `quip-node/src/tasks.rs` (`run_peer_loop` seam 3) | M9.6a | steady-loop store ingress |
 | `quip-net/src/establishment.rs` (`compute_kt_status`) | M9.6a | verifier independence (excludes local NodeId) |
+| `quip-net/src/message.rs` (`dispatch_inbound`) | Pre-6b | parse + capability check |
+| `quip-node/src/tasks.rs` (`parse_inbound`) | Pre-6b | sole inbound parse site |
+| `quip-node/src/tasks.rs` (`classify_inbound`) | Pre-6b | one dispatch order, phase-parameterised |
+| `quip-node/src/tasks.rs` (`apply_inbound`) | Pre-6b | the action set |
 | `quip-node/src/lib.rs` (`Node::take_events`) | M10.2 | receiver hand-off for the FFI layer |
 | `quip-node/src/trust.rs:1` | M10.3 | trust policy |
 | `quip-node/src/trust.rs` (`PeerTrust`) | M10.3 | five-level trust enum |

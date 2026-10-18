@@ -772,6 +772,29 @@ pub fn dispatch(bytes: &[u8], tier: Tier) -> Result<Message> {
     Ok(msg)
 }
 
+/// Decode one already-deframed message and enforce the negotiated
+/// capability set (spec §4).
+///
+/// [`dispatch`] answers "what verb is this"; this answers "may this peer
+/// send it". Every inbound path uses this rather than `dispatch`, so a
+/// verb whose capability was not negotiated is rejected before any
+/// handler can act on it.
+///
+/// # Errors
+///
+/// Returns the same errors as [`dispatch`], plus
+/// [`Error::CapabilityViolation`] when the message requires a capability
+/// the peer did not advertise.
+pub fn dispatch_inbound(
+    negotiated: crate::handshake::Capabilities,
+    bytes: &[u8],
+    tier: Tier,
+) -> Result<Message> {
+    let msg = dispatch(bytes, tier)?;
+    msg.check_capability(negotiated)?;
+    Ok(msg)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1375,6 +1398,53 @@ mod tests {
             | crate::handshake::Capabilities(crate::handshake::Capabilities::GOVERNANCE);
         assert!(msg.check_capability(baseline).is_err());
         assert!(msg.check_capability(with_gov).is_ok());
+    }
+
+    #[test]
+    fn dispatch_inbound_rejects_a_verb_the_peer_did_not_negotiate() {
+        use crate::handshake::Capabilities;
+        let msg = Message::RegisterTcid(TrustedCidRegistration {
+            cid: cid(10),
+            app_metadata: vec![],
+            owner: nid(1),
+            timestamp: now(),
+            signature: [0xef; 64],
+        });
+        let bytes = msg.to_bytes().unwrap();
+        let err = dispatch_inbound(Capabilities::baseline(), &bytes, Tier::Ctrl)
+            .expect_err("a governance verb under baseline must be rejected");
+        assert!(
+            matches!(err, Error::CapabilityViolation { .. }),
+            "expected CapabilityViolation, got {err:?}",
+        );
+    }
+
+    #[test]
+    fn dispatch_inbound_accepts_a_verb_the_peer_negotiated() {
+        use crate::handshake::Capabilities;
+        let msg = Message::RegisterTcid(TrustedCidRegistration {
+            cid: cid(10),
+            app_metadata: vec![],
+            owner: nid(1),
+            timestamp: now(),
+            signature: [0xef; 64],
+        });
+        let bytes = msg.to_bytes().unwrap();
+        let with_gov =
+            Capabilities::baseline() | Capabilities(Capabilities::GOVERNANCE);
+        let back = dispatch_inbound(with_gov, &bytes, Tier::Ctrl).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn dispatch_inbound_preserves_parse_errors() {
+        use crate::handshake::Capabilities;
+        let bytes =
+            encode(&envelope("not_a_real_verb", vec![CborValue::Int(1)])).unwrap();
+        match dispatch_inbound(Capabilities::baseline(), &bytes, Tier::Ctrl) {
+            Err(Error::UnknownVerb(v)) => assert_eq!(v, "not_a_real_verb"),
+            other => panic!("expected UnknownVerb, got {other:?}"),
+        }
     }
 
     #[test]

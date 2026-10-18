@@ -1265,9 +1265,19 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     timer. Recorded here so the redundancy is not rediscovered as a
     surprise.
 
+20. **Inbound dispatch is duplicated across three phases.** The verb
+    handlers in `run_nat_phase`, `run_discovery_phase` and
+    `run_peer_loop` are three copies of the same dispatch, and each
+    copy has silently dropped a verb the others handle: the relay
+    path in M9.5b-c part 6, `AnnounceWitness` and Coral verbs during
+    the NAT phase in M9.6a's follow-up. The fix is one function that
+    takes the phase as a parameter, called from all three; the three
+    call sites cannot drift. Not 6a's job, but the next instance of
+    this bug is a matter of when, not whether.
+
 ### Interface layer (M10)
 
-20. **M10.4 — platform signer shim.** A `SignerBackend` trait in
+21. **M10.4 — platform signer shim.** A `SignerBackend` trait in
     `quip-node` and one implementation per platform: Kotlin/JNI for
     Android, Swift for iOS, C ABI for Linux/Windows. Hardware-backed
     Ed25519 is available on Android 13+ with TEE or StrongBox,
@@ -1278,13 +1288,13 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     cannot be coerced into `Ed25519Signer::from_seed`'s
     `[u8; 32]` shape — the private bytes never exist.
 
-21. **M10.5 — end-to-end verification on Android.** The smoke tests
+22. **M10.5 — end-to-end verification on Android.** The smoke tests
     from M10.1 through M10.3 re-run against an Android device,
     exercising the platform signer shim.
 
 ### Browser substrate (M11)
 
-22. **Local gateway.** A `quip-daemon` or FFI-exposed server that
+23. **Local gateway.** A `quip-daemon` or FFI-exposed server that
     answers `http://localhost:PORT/quip/<cid>` and
     `http://localhost:PORT/hint/<name>`, so any existing browser can
     resolve QUIP content without a bespoke browser. This is the tier
@@ -1292,20 +1302,20 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     URL shape, content-type negotiation, trust-policy enforcement,
     all reachable from a Firefox tab.
 
-23. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
+24. **Content layer.** Trusted CID wiring (inbound `register_tcid` →
     verify → policy → `GovernanceStore`), a CBOR value-blob schema
     for what responders publish as Coral values, and the name-hint
     mechanism that lets a client go from a hint string to a set of
     CIDs via Coral lookup.
 
-24. **Content-type metadata.** CIDs do not carry MIME types. The
+25. **Content-type metadata.** CIDs do not carry MIME types. The
     options are pin-time metadata, byte sniffing, or address hints.
     Pin-time metadata is cleanest and mirrors how IPFS handles it.
     The alternative is serving everything as
     `application/octet-stream`, which makes the gateway useless for
     anything but downloads.
 
-25. **The VPS tier.** A user-controlled always-on anchor. Not a new
+26. **The VPS tier.** A user-controlled always-on anchor. Not a new
     protocol layer: the same headless build (M9.7), deployed
     differently. Acts as rendezvous point, relay candidate,
     availability anchor, and custodian of witness statements. Also
@@ -1313,7 +1323,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     the VPS is a push provider, using APNs and FCM as
     notification-only channels.
 
-26. **No rendering format.** The browser substrate renders standard
+27. **No rendering format.** The browser substrate renders standard
     web formats (HTML, CSS, JS, images, media) via the existing
     browser engine. QUIP does not define a markup language. Its
     contribution is the resolver, the address scheme, and the trust
@@ -1321,40 +1331,40 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
 
 ### FFI / API stabilization
 
-27. **Node lifecycle.** Duplicate connections, reconnect behavior,
+28. **Node lifecycle.** Duplicate connections, reconnect behavior,
     shutdown ordering, FFI-safe ownership and lifetimes. M9.5b-b
     resolves the peer-generation race; the identity type boundary
     (Spec 14) is still open. The FFI surface should not be frozen
     until both are resolved.
 
-28. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
+29. **`NodeEventFfi::Message` decoding.** `Message` and `Datagram`
     carry `verb: String` + `raw: Vec<u8>`; a typed decoder
     (`decodeMessage(raw)`) is needed so Dart consumers do not
     reimplement CBOR parsing.
 
 ### Housekeeping
 
-29. **Release tag.** `git tag v0.1.0-m9.5b-c && git push origin
+30. **Release tag.** `git tag v0.1.0-m9.5b-c && git push origin
     v0.1.0-m9.5b-c`, then `v0.1.0` once S8 and BFT-A land.
 
-30. **GitHub metadata.** Repository description and topics. The
+31. **GitHub metadata.** Repository description and topics. The
     README currently links to this file; the repo description is
     still blank.
 
-31. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
+32. **Move the `Send + Sync` bound onto `quip_core::time::Clock`.**
     The bound currently sits on `quip-node`'s `SharedClock` alias
     because widening the trait is a breaking change. Every
     reasonable clock satisfies the stronger bound; the alias should
     eventually become unnecessary.
 
-32. **M9.6a note follow-up.** `docs/M9.6a-design.md` predates three
+33. **M9.6a note follow-up.** `docs/M9.6a-design.md` predates three
     things the implementation needed: `WitnessStore::accepts` (split
     out of `ingest` so the KT seam can feed the flow a statement the
     store already holds), `issue_statement` (the statement builder),
     and `WITNESS_VALIDITY_S` (the validity window). A `docs:` commit
     brings §2, §4, and §7 into line.
 
-33. **Draft contribution log.** The reference implementation was
+34. **Draft contribution log.** The reference implementation was
     developed against earlier drafts; the resolutions that became
     revision 03 are documented in the spec-pass section above. A
     short paragraph in the draft's doc history — one line per

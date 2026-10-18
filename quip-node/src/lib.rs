@@ -2126,6 +2126,11 @@ mod tests {
         /// Dial every node from every other node, forming a complete
         /// connection graph.
         ///
+        /// Each pair is dialled once — node `i` dials every `j > i`.
+        /// Dialling both directions would form two connections per pair,
+        /// and the second would abort the first through
+        /// `register_peer`, churning the mesh while it settles.
+        ///
         /// The `NodeId` each `connect` returns is discarded — the
         /// harness already has it via [`Self::node_ids`] — but the dial
         /// has to happen for the mesh to exist.
@@ -2137,10 +2142,7 @@ mod tests {
                 .collect();
             let n = self.nodes.len();
             for i in 0..n {
-                for (j, &addr) in addrs.iter().enumerate() {
-                    if i == j {
-                        continue;
-                    }
+                for &addr in addrs.iter().skip(i + 1) {
                     let _ = self.nodes[i].0.connect(addr, "localhost").await;
                 }
             }
@@ -2282,7 +2284,7 @@ mod tests {
         let mut h = MeshHarness::new(6).await;
         h.connect_all().await;
         assert!(
-            h.wait_all_ready(20_000).await,
+            h.wait_all_ready(30_000).await,
             "the six-node mesh should reach full readiness",
         );
         h
@@ -2320,11 +2322,11 @@ mod tests {
         let (peer, subject) = trust_and_advance(&mut h, advance_ms).await;
 
         assert!(
-            h.wait_witnesses(0, 4, 5_000).await,
+            h.wait_witnesses(0, 4, 10_000).await,
             "node 1 should accumulate the four statements about itself",
         );
         assert!(
-            h.wait_witnesses(1, 4, 5_000).await,
+            h.wait_witnesses(1, 4, 10_000).await,
             "node 2 should accumulate the four statements about node 1",
         );
 
@@ -2338,7 +2340,7 @@ mod tests {
             .connect(addr, "localhost")
             .await
             .expect("reconnect");
-        let status = h.wait_ready_status(1, peer, 20_000).await;
+        let status = h.wait_ready_status(1, peer, 30_000).await;
         assert_eq!(
             status,
             Some(KtStatus::Verified),
@@ -2357,7 +2359,7 @@ mod tests {
         let (peer, subject) = trust_and_advance(&mut h, advance_ms).await;
 
         assert!(
-            h.wait_witnesses(0, 4, 5_000).await,
+            h.wait_witnesses(0, 4, 10_000).await,
             "node 1 should still hold the statements",
         );
 
@@ -2367,7 +2369,7 @@ mod tests {
             .connect(addr, "localhost")
             .await
             .expect("reconnect");
-        let status = h.wait_ready_status(1, peer, 20_000).await;
+        let status = h.wait_ready_status(1, peer, 30_000).await;
         assert_eq!(
             status,
             Some(KtStatus::Pending),

@@ -602,6 +602,8 @@ async fn run_nat_phase(
     clock: &SharedClock,
     dht: &DhtHandle,
     signer: &SharedSigner,
+    discovery: &DiscoveryHandle,
+    witness: &WitnessStore,
     relay_capable: bool,
     force_relay: bool,
 ) -> NatPhaseOutcome {
@@ -799,6 +801,31 @@ async fn run_nat_phase(
                     }
                     if let Some(result) = dht::dht_result_from(&m, &peer) {
                         nat_driver.on_dht_result(result, now);
+                        continue;
+                    }
+                    // M9.6a: a witness statement is node-wide
+                    // corroboration and must not be dropped just because
+                    // this connection is still probing. Issuance fires
+                    // once per re-issue interval, so a dropped statement
+                    // is lost for twelve hours.
+                    if let Message::AnnounceWitness(stmt) = &m {
+                        if witness.accepts(stmt, now) {
+                            let _ = witness.ingest(stmt.clone(), now);
+                        }
+                        continue;
+                    }
+                    // M9.6a: answer §13 Coral lookups during the NAT
+                    // phase too. A requester that finished its own NAT
+                    // phase can reach discovery while this side is still
+                    // probing, and `driver.poll` consumes the frame
+                    // either way — without this branch the lookup is
+                    // dropped and the requester's discovery falls back
+                    // to `Pending` on its 5 s deadline.
+                    if is_coral_verb(&m) {
+                        handle_discovery_event(
+                            driver, clock, discovery, m, None, witness,
+                        )
+                        .await;
                     }
                 }
             }
@@ -1104,6 +1131,8 @@ async fn run_establishment(
                     clock,
                     dht,
                     signer,
+                    discovery,
+                    witness,
                     relay_capable,
                     force_relay,
                 )

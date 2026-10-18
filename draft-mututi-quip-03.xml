@@ -1165,6 +1165,18 @@ WitnessStatement = [
             <li>Witnesses <bcp14>SHOULD</bcp14> re-issue statements every 12 hours</li>
           </ul>
           
+          <t><strong>First Issuance:</strong> This specification does not
+          prescribe a protocol event that triggers a witness's first statement
+          about a subject. First issuance is a local policy decision: a witness
+          <bcp14>MUST</bcp14> hold the subject's Key Claim and <bcp14>MUST</bcp14>
+          have applied its own trust policy to it before issuing.
+          Implementations <bcp14>SHOULD</bcp14> document their first-issuance
+          policy in their deployment documentation. For the purpose of the
+          threshold in this section, a statement issued under such a policy is
+          indistinguishable from a re-issued statement: the recipient applies
+          the validity and first-seen rules above without regard to which
+          issuance was first.</t>
+          
           <t><strong>KT_VERIFIED Status:</strong> The label "verified" describes 
           witness-ring corroboration, not absolute proof of identity — with 
           f=2 Byzantine faults tolerated out of 7 witnesses, VERIFIED status 
@@ -1213,6 +1225,15 @@ WitnessStatement = [
             <li>Each witness's Key Claim must have been first seen 6+ hours ago</li>
             <li>Each witness statement must have valid_until in the future</li>
           </ul>
+          
+          <t><strong>Independence:</strong> A witness is independent of the
+          verifier if its NodeId differs from the verifier's. A verifier's own
+          statement about a subject <bcp14>MUST NOT</bcp14> count toward that
+          verifier's threshold, even if the subject or another party echoes it
+          back. A verifier that receives such an echoed statement
+          <bcp14>MAY</bcp14> store it, but <bcp14>MUST</bcp14> exclude it from
+          the threshold count. The "4+" above therefore means four distinct
+          witness NodeIds, none of them the verifier's own.</t>
         </section>
         
         <!-- ======================================================== -->
@@ -1399,7 +1420,15 @@ FrostRingSig = {
 
           <t><strong>New-view prepared messages:</strong> Each entry in <tt>prepared_messages</tt> is a complete <tt>bft_preprepare</tt> message as it would appear on the wire, including the primary's signature. It is not a digest. The new primary re-proposes these messages, and witnesses re-verify the primary's signature.</t>
 
-          <t><strong>State-transfer signing payload:</strong> For <tt>bft_state_transfer</tt>, the <tt>ring_signature</tt> covers the message array with the <tt>ring_signature</tt> element removed, encoded with QUIP-CBOR. This is consistent with <xref target="signing-convention"/>.</t>
+          <t><strong>State-transfer ring signature:</strong> The
+          <tt>ring_signature</tt> of a <tt>bft_state_transfer</tt> is the
+          checkpoint's signature set, not a signature over the state transfer's
+          own payload. It covers the <tt>bft_checkpoint</tt> signing payload
+          for the checkpoint being transferred — <tt>ring_id</tt>,
+          <tt>sequence</tt>, and <tt>state_digest</tt>, restated in this
+          message as <tt>checkpoint_sequence</tt> and
+          <tt>checkpoint_digest</tt> — encoded with QUIP-CBOR. See
+          <xref target="bft-checkpoint"/>.</t>
           
           <t><strong>BFT Quorum Rules:</strong></t>
           
@@ -1424,14 +1453,16 @@ FrostRingSig = {
           
           <t><strong>Ring Signature Validation:</strong> Recipients of a 
           <tt>bft_state_transfer</tt> <bcp14>MUST</bcp14> validate the 
-          <tt>RingSignature</tt> by either:</t>
+          <tt>RingSignature</tt> against the checkpoint signing payload for
+          <tt>(ring_id, checkpoint_sequence, checkpoint_digest)</tt>, by either:</t>
           
           <ul>
             <li>For <tt>IndividualRingSig</tt>: verifying each signature 
             against the corresponding witness's public key (matched by 
-            position in the <tt>signers</tt> list) and the state digest.</li>
+            position in the <tt>signers</tt> list) and the checkpoint
+            signing payload.</li>
             <li>For <tt>FrostRingSig</tt>: verifying the aggregate signature 
-            against the group public key and the state digest.</li>
+            against the group public key and the checkpoint signing payload.</li>
           </ul>
           
           <t><strong>Consensus Flow:</strong></t>
@@ -1591,12 +1622,25 @@ VIEW_CHANGE_QUORUM = 5     ; Quorum size for view changes and checkpoints
           <ol>
             <li>The lagging witness sends a <tt>bft_state_transfer</tt> request 
             containing its latest known checkpoint sequence.</li>
-            <li>A witness with the stable checkpoint responds with the state 
-            and a <tt>RingSignature</tt> (5 of 7 witnesses).</li>
-            <li>The lagging witness verifies the ring signature and applies 
-            the state.</li>
+            <li>A witness with the stable checkpoint responds with the state
+            and the checkpoint's signature set: the <tt>bft_checkpoint</tt>
+            signatures that made the checkpoint stable. It does not produce a
+            fresh ring signature over the transfer.</li>
+            <li>The lagging witness verifies that set against the
+            <tt>bft_checkpoint</tt> signing payload for
+            <tt>(ring_id, sequence, state_digest)</tt> — restated in this
+            message as <tt>checkpoint_sequence</tt> and
+            <tt>checkpoint_digest</tt> — requiring quorum (5-of-7 for a full
+            ring, 3-of-4 degraded), and verifies that
+            <tt>checkpoint_digest</tt> is the SHA-256 of the transmitted state
+            before applying it.</li>
             <li>The lagging witness resumes participation from the checkpoint.</li>
           </ol>
+
+          <t><em>Rationale:</em> the checkpoint's signature set already binds
+          the state to the ring; a fresh ring signature over the transfer would
+          add a round trip without adding a binding the verifier does not
+          already check.</t>
 
           <t><strong>State Format:</strong> The <tt>state</tt> field is an
           opaque byte string whose internal structure is defined by the

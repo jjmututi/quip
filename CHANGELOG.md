@@ -154,6 +154,7 @@ doc-tests       4 passed (one per crate)
 | BFT-A | BFT correctness: `apply()` contract, prepared/checkpoint carry-forward | not started |
 | BFT-V | BFT validation: adversarial network simulator, property tests | not started |
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
+| Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | not started |
 | Spec | Membership boundaries and pin authorization model | not started |
 
 ---
@@ -1371,6 +1372,15 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     short paragraph in the draft's doc history — one line per
     resolution, no reference to the reference implementation —
     would close the loop between what the draft now says and why.
+
+35. **Outstanding Work cross-references are numeric.** Item numbers
+    shift whenever an item is inserted, and a citation like "item 20"
+    in `docs/M9.6a-design.md` is stale the moment a later commit
+    inserts above it. Move the Outstanding Work list to named anchors
+    (`<a id="ow-inbound-dispatch"></a>` or equivalent) and keep the
+    numbers as display text only. Citations become anchors, which do
+    not shift. Do this before the next milestone that cites an item
+    by number.
 
 ---
 

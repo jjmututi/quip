@@ -822,11 +822,12 @@ the design note's §2a table has admitted since M9.5b-a is now
 reachable from a real peer.
 
 Deliberately not in this commit. `run_nat_phase`'s inbound path
-handles the §12 verbs plus `relay_discovery`; §13 Coral verbs and
-auto-served pin verbs are still handled only in `run_peer_loop` and
-are dropped if they arrive during establishment. A comment at the
-inbound block records this. Cluster merge/split and XOR-distance
-routing remain M9.5b-c's outstanding work.
+handles the §12 verbs plus `relay_discovery`. Auto-served pin verbs
+are still handled only in `run_peer_loop` and are dropped if they
+arrive during establishment. §13 Coral verbs were the other half of
+that gap; M9.6a's follow-up (`edef239`) answers them in `run_nat_phase`
+as well, and ingests `AnnounceWitness` there. Cluster merge/split and
+XOR-distance routing remain M9.5b-c's outstanding work.
 
 Tests: `relay_path_produces_nat_relayed` (lib.rs);
 `on_dht_result_routes_candidates` (nat_driver.rs);
@@ -1529,9 +1530,9 @@ consumed in M9.5b-c), `message.rs` BFT arms (M4), `bft.rs` (M4),
 `xtask/` (M6.2), `.github/workflows/ci.yml` (M6.3). Tagging on the
 next touch is cheap.
 
-**M9.5b-c note.** M9.5b-c now owns partial landed work (gates 5 and
-6, plus parts 2–7). Membership derivation and XOR-distance routing
-are landed; cluster merge/split *execution* — choosing a split target
-and migrating the cluster id — is deferred to M9.6, which is where
-neighbour `ClusterInfo` exchange lands. The milestone row stays `in
-progress` until that migration lands.
+**M9.5b-c note.** M9.5b-c is landed. Its scope included cluster
+membership derivation and XOR-distance routing, both landed in part 7.
+Cluster split *execution* — choosing a split target and migrating the
+cluster id — needs neighbour `ClusterInfo` exchange, which no peer
+reports yet, and is deferred to M9.6b. The deferral is recorded in the
+milestone row's scope cell, not in its status.

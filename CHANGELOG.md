@@ -160,7 +160,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests): seven-field schema, vocabulary and eight rows in `docs/conformance-matrix.md`; remaining rows follow | in progress |
+| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests): seven-field schema, vocabulary and eight rows in `docs/conformance-matrix.md`; row 8 moved to `clear`/`non-blocking` when §5.3.4 specified the execution contract; remaining rows follow | in progress |
 
 ---
 
@@ -1324,12 +1324,17 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    - **(c)** Make the execution result part of the consensus
      decision — commit the state transition, not the request.
 
-   The reference implementation has not chosen. Current code does
-   none of the three and documents the gap. A proposal comparing the
-   three — and recommending (c), explicitly, because the driver already
-   behaves as (c) without its obligations — is in
-   `docs/apply-contract.md`. The conformance matrix records the gap as
-   its first `blocking` row.
+   **Specified in §5.3.4 — implementation pending.** The draft's
+   "Application Execution Contract" now states (c) under the hook
+   reading: `validate` before consensus, `apply` after commitment, the
+   apply output in the state digest, a deterministic context, failures
+   recorded as the application's outcome, and an empty-output default.
+   The reference implementation has not caught up — there is no
+   `validate` hook, `state_digest` does not include the apply output,
+   and a failure is not covered by the checkpoint. The conformance
+   matrix records this as row 8: `FAIL` on the code, `clear` in the
+   draft, `non-blocking` for submission. The note that argued for (c)
+   is `docs/apply-contract.md`, now marked adopted.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

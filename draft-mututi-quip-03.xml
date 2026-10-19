@@ -1580,6 +1580,47 @@ Operation = {
               ]]></artwork>
             </figure>
           </section>
+
+          <section anchor="bft-execution" numbered="true">
+            <name>Application Execution Contract</name>
+
+            <t><strong>The hook.</strong> Applications supply a
+            <tt>validate</tt> hook and an <tt>apply</tt> hook. Both are
+            called by the replica's consensus driver. The <tt>validate</tt>
+            hook runs before the operation enters consensus; the
+            <tt>apply</tt> hook runs after commitment. Neither hook's
+            application semantics are defined by this specification.</t>
+
+            <t><strong>The digest contract.</strong> The state digest a
+            replica commits, and that a checkpoint carries as
+            <tt>checkpoint_digest</tt>, <bcp14>MUST</bcp14> include the
+            output of the <tt>apply</tt> hook. An <tt>apply</tt> hook that
+            produces no output means "no state transition" and is the
+            default for applications with nothing to execute.</t>
+
+            <t><strong>The deterministic context.</strong> The
+            <tt>validate</tt> and <tt>apply</tt> hooks receive a context
+            that includes the operation index, the view, the committed
+            sequence, and the previous state digest. They
+            <bcp14>MUST NOT</bcp14> consult a wall clock, a random source,
+            or any other non-deterministic input. This is the application's
+            obligation, and the determinism guarantee this section relies on
+            depends on it.</t>
+
+            <t><strong>The failure contract.</strong> A <tt>validate</tt>
+            failure rejects the operation before consensus: the
+            <tt>bft_preprepare</tt> is dropped and the operation does not
+            enter. An <tt>apply</tt> failure is recorded as the
+            application's declared outcome, included in the digest, and
+            treated as a state transition like any other. The guarantee is
+            that every honest replica sees the same failure, not that
+            failures cannot happen.</t>
+
+            <t><strong>The empty-output default.</strong> Applications with
+            no execution state produce no output. The digest treats the
+            empty output as unchanged. The <em>sequence</em> of operations
+            is what is agreed; the outputs are the application's.</t>
+          </section>
         </section>
         
         <!-- ========================================================== -->

@@ -1,9 +1,10 @@
 # Conformance matrix
 
 **Status: third delivery.** The seven-field row schema, its vocabulary,
-and eight rows. The third delivery adds §5.3.4's execution contract as
-the first `blocking` value, and the decisive query's answer changes with
-it. The remaining rows follow; the schema is settled.
+and eight rows. §5.3.4's execution contract entered as the first
+`blocking` row and moved to `non-blocking` when the draft specified it;
+the decisive query's answer changed with it and is recorded below. The
+full pass is the next delivery.
 
 ## What this is
 
@@ -271,40 +272,38 @@ enough and the edit has not landed."
 
 ### 8. §5.3.4 — execution contract for committed operations — FAIL
 
-- **Clause.** §5.3.4 fixes ordering, the checkpoint and state-transfer
-  formats, and the quorum that makes a checkpoint stable. It requires
-  the state to be deterministically decodable and requires a recipient
-  to reject an undecodable state. It does not say what happens when an
-  operation commits and then *execution* fails — whether operations are
-  validated before consensus, validated deterministically before
-  consensus, or committed as state transitions.
-- **Requirement.** none stated. The three resolutions are three
-  different protocols: (a) `apply` is infallible by contract and
-  applications validate before an operation enters consensus; (b)
-  validation is deterministic and runs before consensus, so `apply`
-  cannot fail on a committed operation; (c) the execution result is part
-  of the consensus decision — the state transition is committed, not the
-  request.
+- **Clause.** §5.3.4 now specifies the application execution contract.
+  Applications supply `validate` and `apply` hooks; `validate` runs
+  before an operation enters consensus and `apply` after commitment. The
+  committed state digest, and the `checkpoint_digest` a checkpoint
+  carries, `MUST` include the `apply` output. The hooks `MUST NOT`
+  consult a clock, a random source or any other non-deterministic input.
+  A `validate` failure drops the `bft_preprepare` before consensus; an
+  `apply` failure is recorded as the application's outcome, included in
+  the digest, and treated as a state transition like any other.
+- **Requirement.** `MUST` include the hook output in the digest; hooks
+  `MUST NOT` be non-deterministic; `validate` failures `MUST` reject
+  before consensus; `apply` failures `MUST` be recorded and agreed.
 - **Source.** `quip_net::bft_driver::BftHandler::apply -> Result<()>`.
   `BftDriver::apply_current` pushes `BftEvent::ApplyFailed` on `Err` and
-  then advances `sequence` regardless.
+  then advances `sequence`; `BftHandler::state_digest` defaults to
+  all-zeros and does not include the result. There is no `validate` hook.
 - **Test.** `apply_failure_is_an_event_not_an_error` — it asserts that
   the failure is an event and that every driver reaches sequence 1,
-  which documents the divergence rather than preventing it.
-- **Verdict.** **FAIL** — `apply` permits a post-commit failure the
-  driver does not treat as fatal, so two replicas can disagree about
-  state while both advance and both believe consensus progressed. The
-  behaviour is (c)'s shape without (c)'s obligation: it takes the
-  licence to commit a failure and omits the requirement that the failure
-  be identical on every replica.
-- **Specification status.** **incomplete** — "applied" is used and never
-  defined with respect to failure, and the draft selects none of the
-  three protocols. An independent implementer must choose one.
-- **Submission impact.** **`blocking`** — a draft that does not state the
-  execution contract cannot be submitted responsibly. The three
-  resolutions are three protocols, and a reviewer of the draft has no
-  way to know which one is being proposed. This is the first `blocking`
-  row in the matrix.
+  which matches the draft's "failure does not stop the sequence" but not
+  its digest or `validate` requirements.
+- **Verdict.** **FAIL** — the draft now says what execution must do and
+  the implementation does not do it: there is no `validate` hook, the
+  apply output does not enter `state_digest`, and a failure is an event
+  the checkpoint does not cover. The contract is no longer ambiguous;
+  the code is behind it.
+- **Specification status.** clear — §5.3.4's "Application Execution
+  Contract" states the hook, the digest contract, the deterministic
+  context, the failure contract and the empty-output default.
+- **Submission impact.** `non-blocking` — the draft is precise enough
+  for an independent implementer. The remaining gap is in the reference
+  implementation (BFT-A item 1), which does not stop the draft being
+  submitted.
 
 ## What follows
 
@@ -319,12 +318,12 @@ pass is mechanical: the comparison is a check, a row takes minutes, and
 the work parallelises without coordination. Where it is not, the pass is
 **design-time**: the judgement is whether an independent implementer
 would reach the same behaviour from the text, which is a question the
-code can inform and the draft's editor has to answer. Five of the eight
-rows here are design-time (`ambiguous` or `incomplete`); the three
-`incomplete` ones — §5.3.4's execution contract, §13.5's attempt episode
-and §13.4's merge — decide the submission schedule, and only the first
-is `blocking`. The mechanical rows decide only how long the matrix takes
-to finish.
+code can inform and the draft's editor has to answer. Four of the eight
+rows here are design-time (`ambiguous` or `incomplete`); the two
+`incomplete` ones — §13.5's attempt episode and §13.4's merge — decide
+the submission schedule. Row 8 is `clear` and `FAIL`: its draft problem
+is closed, its implementation problem is not. The mechanical rows decide
+only how long the matrix takes to finish.
 
 Two conventions the full pass will keep:
 
@@ -344,11 +343,13 @@ that reads the function instead of its call sites. Two instances so far:
 the sequencing variant of the same failure: `record_split_attempt` is
 called, and the limit it guards cannot be reached.
 
-**The decisive query now returns five rows, one of them `blocking`.**
-Row 8 is the first requirement whose draft edit is a prerequisite for
-submission: until §5.3.4 says which execution contract it proposes, an
-implementer cannot conform and a reviewer cannot tell what is being
-proposed. The answer to the review's decisive question moves from "four
-decisions, none blocking" to "five decisions, one blocking" — and the
-blocking one is not a detail of Coral routing, it is the contract every
-BFT application depends on.
+**The decisive query returns four rows, none `blocking`.** It previously
+returned five with one `blocking`; the row that moved is row 8. §5.3.4's
+"Application Execution Contract" now states what execution must do, so
+the row's specification status is `clear` and its submission impact is
+`non-blocking`. Its verdict stays `FAIL`, and that is the point: the
+draft says what the code must do and the code does not yet do it — an
+implementation gap against a stated obligation, not a draft that cannot
+be conformed to. The four remaining decisions are §13.5's attempt
+episode and §13.4's merge (`incomplete`) and §5.3.3's re-issue and
+§5.3.4's quorum (`ambiguous`).

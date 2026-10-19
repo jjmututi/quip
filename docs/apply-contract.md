@@ -1,8 +1,13 @@
 # The `apply()` contract — proposal
 
-**Status: proposal for BFT-A item 1.** Not a decision. The draft selects
-none of the three resolutions below; this document argues for one, so
-the draft can adopt or reject it with reasons rather than by default.
+**Status: adopted.** §5.3.4's "Application Execution Contract" states
+resolution (c) under the hook reading — the hook, the digest contract,
+the deterministic context, the failure contract and the empty-output
+default. What remains is the implementation: the reference code has no
+`validate` hook, does not include the `apply` output in the digest, and
+records a failure without covering it in the checkpoint (BFT-A item 1).
+The rest of this note is the reasoning that led to the choice, kept as
+the record of what was considered.
 
 ## The gap
 

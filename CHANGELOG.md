@@ -1325,7 +1325,11 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
      decision — commit the state transition, not the request.
 
    The reference implementation has not chosen. Current code does
-   none of the three and documents the gap.
+   none of the three and documents the gap. A proposal comparing the
+   three — and recommending (c), explicitly, because the driver already
+   behaves as (c) without its obligations — is in
+   `docs/apply-contract.md`. The conformance matrix records the gap as
+   its first `blocking` row.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier
@@ -1777,6 +1781,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 | `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
 | `docs/conformance-matrix.md:1` | M9.6b | clause → source → test matrix; seven-field schema, eight rows, submission impact |
+| `docs/apply-contract.md:1` | BFT-A 1 | the three execution contracts, compared, with a recommendation |
 | `quip-node/src/peer.rs:1` | M9.5b-b, M9.5b-c | peer slot and lifecycle vocabulary |
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |

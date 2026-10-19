@@ -158,7 +158,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Membership boundaries and pin authorization model | not started |
-| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests); starts after M9.6b | not started |
+| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests): method, template and three rows in `docs/conformance-matrix.md`; full pass follows | in progress |
 
 ---
 
@@ -1048,16 +1048,15 @@ plan.
   and publishes through the existing tuple-change path. A split *is* a
   tuple change, so it needs no separate send.
 
-**The attempt cap is not reachable in this control flow.** §13.5's
-`MAX_SPLIT_ATTEMPTS` exists to throttle a node that keeps splitting
-without landing somewhere acceptable. The note's own sequence — record
-the attempt, then `migrate`, which clears the counter on success — makes
-every split a success, so the counter is `1` at every evaluation and the
-cap never fires. The code follows the note; the note's throttle is
-therefore inert until "success" means "the new cluster passed
-acceptance", which requires a split episode to outlive the move.
-Recorded rather than redefined: what resets the counter is a design
-decision, not an implementation detail.
+**The attempt cap is inert, and the matrix's third row is where that was
+found.** The note's sequence — record the attempt, then `migrate`, which
+clears the counter — makes every split a success, so §13.5's
+`MAX_SPLIT_ATTEMPTS` cannot fire. The code follows the note; the
+divergence is between the note and the draft's "fails to find an
+acceptable cluster". Recorded as Protocol design item 15a, with three
+candidate readings for what ends an attempt and a recommendation; the
+conformance matrix lists it as row 3 — a `FAIL` whose specification
+status is `incomplete`.
 
 The split is local and uncoordinated, as §13.5 describes: every node
 evaluates the same inputs and may choose differently, and the partition
@@ -1450,6 +1449,43 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     filtered by `TrustPolicy` (and how to resolve the circularity
     that filtering produces the trust that would filter).
 
+15a. **§13.5 split attempt throttle — the cap is unreachable.** The
+    draft says: *"If a node fails to find an acceptable cluster after
+    `MAX_SPLIT_ATTEMPTS` (RECOMMENDED: 3), it `MUST` create a new
+    cluster with a random `cluster_id`."* The implementation never
+    evaluates that condition. Every split ends in `migrate`, `migrate`
+    clears `split_attempts`, and the counter is therefore 1 at every
+    evaluation, so the limit cannot fire and a node can split every
+    `heartbeat * 3` indefinitely. The divergence entered in
+    `docs/M9.6b-design.md` §4, whose sequence — record the attempt, then
+    `migrate`, which clears on success — simplifies the draft's
+    *failure* condition into an unconditional reset. The code follows
+    the note, so this is a draft-and-note gap, not a code bug.
+
+    The undefined term is **what ends an attempt.** Three readings, each
+    coherent:
+
+    a. **The split's aftermath.** Clear the counter when the new
+       cluster's `acceptable` is true on its first `recompute`. Failure
+       preserves the counter, so a node that keeps splitting into
+       unacceptable clusters is throttled. This is the draft read
+       literally: an attempt fails when its result is not acceptable.
+    b. **One attempt per `split_due` transition.** Clear when the timer
+       clears. Simpler, and wrong: a split into an unacceptable cluster
+       still resets the counter if the RTTs recover, which is precisely
+       the case the throttle exists for.
+    c. **One attempt per coordinator term.** Clear on rotation. Ties the
+       throttle to an existing protocol clock, but a fast-rotating
+       coordinator splits faster — the opposite of throttling under
+       stress.
+
+    **Recommendation: (a).** It is the only reading that throttles the
+    case the sentence names, and it needs no new state: `acceptable` is
+    already computed. §13.5 should define the episode, and
+    `docs/M9.6b-design.md` §4 should be corrected with it. Recorded as
+    conformance-matrix row 3: verdict `FAIL`, specification status
+    `incomplete`.
+
 ### Application layer (M9)
 
 16. **M9.5b-c — cluster merge/split and XOR routing.** Parts 2
@@ -1717,6 +1753,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 | `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
+| `docs/conformance-matrix.md:1` | M9.6b | clause → source → test matrix; method, template, first three rows |
 | `quip-node/src/peer.rs:1` | M9.5b-b, M9.5b-c | peer slot and lifecycle vocabulary |
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |

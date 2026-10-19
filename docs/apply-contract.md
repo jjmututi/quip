@@ -36,6 +36,74 @@ The draft's silence does not leave the choice open; it leaves the choice
 to the implementer, which is the definition of an interoperability gap.
 
 
+## The prior question: hook or contract?
+
+Before the three resolutions, the draft has to answer a prior
+question: is `apply` a protocol-defined execution step — the
+reference implementation's `BftHandler` is the definition of what
+execution is — or a per-application hook, where the protocol
+specifies *when* it is called and *what* it returns and the
+application defines the semantics?
+
+Under the first reading, the three resolutions are three contracts
+the protocol imposes on execution. Under the second, they are three
+hook shapes, and the draft's obligation is to pick one and specify
+its signature, its call site, and what the protocol does with its
+return value.
+
+**The note recommends the hook reading.** A draft that says
+"applications must implement `BftHandler`" is a draft that
+specifies a Rust interface, not a protocol. The protocol specifies
+the hook; the reference implementation's `BftHandler` is one hook of
+that shape, not the definition of it.
+
+Under the hook reading, the mechanical surface is small — the
+developer writes `Operation`, `validate`, and `apply` — and the
+protocol supplies everything else. That is the incentive: a
+developer does not write BFT to use QUIP; the developer writes
+operations and the protocol agrees on their sequence. The
+mechanical hook is the boundary where the developer's job begins,
+and it should be as small and as well-primitived as the draft can
+make it.
+
+## What the draft must supply beside the hook
+
+Five paragraphs, not one. The hook alone is mechanical in the bad
+sense — the developer writes everything and the protocol agrees on
+the order of inputs. The primitives around the hook are the value
+the protocol supplies.
+
+1. **The hook.** Applications supply `validate` and `apply`. Both
+   are called by the driver. `validate` runs before the operation
+   enters consensus; `apply` runs after commitment. Neither is
+   defined by the protocol.
+2. **The digest contract.** `state_digest` includes the `apply`
+   output. A `()`-returning `apply` means "no state transition" and
+   is the default for applications with nothing to execute.
+3. **The deterministic context.** `validate` and `apply` receive a
+   context that includes the operation index, the view, the
+   committed sequence, and the previous digest. They must not
+   consult a wall clock, a random source, or any other
+   non-deterministic input. This is the developer's obligation and
+   the protocol's determinism guarantee depends on it.
+4. **The failure contract.** A `validate` failure rejects the
+   operation before consensus — the preprepare is dropped and the
+   operation does not enter. An `apply` failure is recorded as the
+   application's declared outcome, included in the digest, and
+   treated as a state transition like any other. The protocol's
+   guarantee is that every honest replica sees the same failure,
+   not that failures cannot happen.
+5. **The `()` default.** Applications with no execution state
+   return `()`. The digest treats the empty output as unchanged.
+   The *sequence* of operations is what is agreed; the outputs are
+   the application's.
+
+These five paragraphs are the difference between "the developer
+must write BFT" and "the developer writes operations and the
+protocol agrees on them." They are also the difference between the
+draft's current silence on execution and a draft a developer could
+read and use.
+
 ## The three resolutions
 
 ### (a) Infallible apply; applications validate before consensus
@@ -99,6 +167,12 @@ requires the result to be covered by the digest. The current behaviour is
 therefore the least safe reading of (c): it takes the licence to continue
 past a failure and omits the condition that makes continuing safe.
 
+The recommendation is (c) under the hook reading, with the five
+paragraphs above as the draft's obligation. Under the hook reading, (c)
+is the only resolution that lets an application with no execution result
+return `()` while an application with a result has its output enter the
+digest.
+
 Choosing (c) ratifies the shape and adds the missing MUSTs. Choosing (b)
 would be defensible — it is the easier contract to reason about — but it
 requires changing the failure path from "event and advance" to "halt",
@@ -113,7 +187,7 @@ log.
 
 ## What the draft must say
 
-One paragraph in §5.3.4, adopting (c):
+The five paragraphs above, in §5.3.4, with this as their normative core:
 
 > Execution of a committed operation `MUST` be deterministic: the result
 > `MUST NOT` depend on the local clock, on I/O, on iteration order, or on
@@ -137,9 +211,11 @@ One paragraph in §5.3.4, adopting (c):
 
 ## Open questions
 
-1. **Does the execution result enter `state_digest`?** Under (c) it must,
-   or two replicas can diverge in the result and still agree on every
-   checkpoint digest.
+1. **Does the execution result enter `state_digest`?** Under (c) it must.
+   Otherwise two replicas can diverge in the result and agree on every
+   checkpoint digest — a safety hole that would survive every test in the
+   tree. If (c) is adopted without this sentence, the draft states an
+   obligation the implementation cannot meet.
 2. **Is a validation failure ordered?** Under (c) every proposed
    operation is ordered and its rejection is an outcome; under (b) it is
    dropped. The two produce different logs for the same input.

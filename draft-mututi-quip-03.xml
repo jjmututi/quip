@@ -1630,6 +1630,19 @@ Operation = {
             (<xref target="cbor"/>). A success with no payload is
             distinguishable from a success with an empty payload.</t>
 
+            <t><strong>Outcome encoding.</strong>
+            <tt>OperationOutcome</tt> is canonically CBOR-encoded as a map
+            with text keys: <tt>"discriminant"</tt>, a text value of
+            either <tt>"success"</tt> or <tt>"application-failure"</tt>,
+            and, when present, <tt>"payload"</tt>, a byte string of at
+            most 256 bytes. The state digest's map uses the text keys
+            <tt>"operation"</tt>, <tt>"prior_state_digest"</tt> and
+            <tt>"outcome"</tt>, in the canonical map ordering of
+            <xref target="cbor"/>. Neither map carries keys beyond those
+            named; a receiver <bcp14>MUST</bcp14> reject an unknown key
+            with E_BAD_ENCODING, as required by
+            <xref target="cbor"/>.</t>
+
             <t><strong>Digest construction.</strong> The state digest is
             the protocol's hash over a canonical CBOR map with three
             required keys: the operation, in the canonical form the
@@ -2614,6 +2627,16 @@ ThresholdSignature = {
       
       <t>Non-canonical CBOR <bcp14>MUST</bcp14> be rejected with error 
       E_BAD_ENCODING.</t>
+
+      <t><strong>Map keys:</strong> A map whose complete key set is
+      defined by this specification <bcp14>MUST NOT</bcp14> carry keys
+      beyond that set, and a receiver <bcp14>MUST</bcp14> reject a message
+      carrying such a key with E_BAD_ENCODING. Maps declared open with a
+      wildcard key type — <tt>extensions</tt>, <tt>Deps</tt>,
+      <tt>app_metadata</tt> and <tt>app_data</tt> in version 1 — are
+      exempt, and their unknown keys are handled by the rules that define
+      them. Forward compatibility for closed maps comes from version
+      negotiation, not from ignoring unknown fields.</t>
       
       <t><strong>Version Gate:</strong> Implementations that dispatch on 
       element 1 of the top-level array <bcp14>MUST</bcp14> treat element 0 

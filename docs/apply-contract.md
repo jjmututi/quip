@@ -1,16 +1,15 @@
 # The `apply()` contract — proposal
 
-**Status: adopted; digest construction specified in this note, outcome
-wire form and implementation pending.** §5.3.4's "Application Execution
+**Status: adopted; digest construction and outcome wire form specified
+in this note, implementation pending.** §5.3.4's "Application Execution
 Contract" states resolution (c) under the hook reading — the hook, the
 digest contract, the deterministic context, the failure contract, the
-empty-output default and, since this revision, the digest binding. Two
-things remain. The outcome's wire form (discriminant encoding, payload
-bound, map key type) is named as an open item below; and the reference
-code has no `validate` hook, does not include the `apply` output in the
-digest, and records a failure without covering it in the checkpoint
-(BFT-A item 1). The rest of this note is the reasoning that led to the
-choice, kept as the record of what was considered.
+empty-output default, the digest binding and the outcome encoding. What
+remains is the implementation: the reference code has no `validate`
+hook, does not include the `apply` output in the digest, and records a
+failure without covering it in the checkpoint (BFT-A item 1). The rest
+of this note is the reasoning that led to the choice, kept as the record
+of what was considered.
 
 ## The gap
 
@@ -159,17 +158,32 @@ digest is protocol-defined: an application that invents its own outcome
 encoding is not conformant even if it "includes the output", because the
 output's encoding is what the digest covers.
 
-**What this still leaves open.** The three paragraphs fix the
-construction, not every octet of it. The discriminant's encoding (a
-numeric tag or a text string), the payload's bound, and whether the map
-keys are text or integers are still choices, and two implementers could
-diverge on any of them while following the paragraphs above. They must be
-fixed in the draft, not in an implementation note, before the clause is
-implementable — which is why the matrix keeps row 8 `incomplete` after
-the transcription rather than returning it to `clear`. The proposal: text
-keys (`"operation"`, `"prior_state_digest"`, `"outcome"`), a text
-discriminant (`"success"` / `"application-failure"`), and a 256-byte
-payload bound.
+**The three encoding choices.** The construction above is not
+implementable until the encoding is fixed, so the note fixes it.
+
+- **Map keys are text.** Every other closed map in the draft uses text
+  keys (`Candidate`, `RelayEntry`, `RelayHop`, `RelayChain`), and integer
+  keys for the state digest's map alone would be a new convention for a
+  single structure — a defect even where it saves bytes, because a
+  reader's expectation is formed by the rest of the draft.
+- **The discriminant is text** (`"success"` /
+  `"application-failure"`). The draft's existing discriminants are mixed
+  — `nat_type` and `Candidate.type` are integers, the message envelope's
+  verb is text, error codes are integers — so no convention forces the
+  choice. A text discriminant is self-describing where an integer `0`/`1`
+  needs a lookup table, and the outcome is read by a human reviewer of a
+  state digest at least as often as by a machine. The size difference is
+  a few bytes in an input that is hashed anyway.
+- **The payload bound is 256 bytes.** The draft has no outcome bound
+  today. 256 bytes covers a failure reason or a small result; anything
+  larger is a state change that should be modelled as state, not carried
+  as an outcome payload. A future application that needs more is a
+  version-level convention, not a local one.
+
+Both maps are closed: a receiver rejects an unknown key. That rule is
+stated once in §10 (QUIP-CBOR) and cited from §5.3.4, so the handshake's
+open `extensions` map — and `Deps`, `app_metadata` and `app_data` — are
+not accidentally closed by it.
 
 ## The three resolutions
 
@@ -293,9 +307,8 @@ The five paragraphs above, in §5.3.4, with this as their normative core:
 4. **Does `ApplyFailed` feed fault suspicion?** Under (c), persistent
    disagreement about a *result* is evidence of a faulty replica, and the
    draft does not yet say what a ring does with that evidence.
-5. **What is the `OperationOutcome` wire form?** The digest construction
-   is specified; the encoding of the discriminant, the payload bound, and
-   whether the map keys are text or integers are not. The proposal in
-   "The digest binding" is text keys, a text discriminant, and 256 bytes;
-   whichever is chosen has to be in the draft, because the digest covers
-   the encoding.
+5. **The `OperationOutcome` wire form — RESOLVED in §5.3.4.** Text map
+   keys, a text discriminant (`"success"` / `"application-failure"`), and
+   a 256-byte payload bound; the reasons are in "The digest binding"
+   above, and the "unknown keys" rule they rely on is stated once in §10
+   and cited from §5.3.4.

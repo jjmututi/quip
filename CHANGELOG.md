@@ -160,7 +160,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, thirteen rows, and a coverage table for the remaining 146 `MUST` / 104 `SHOULD` statements by section. Row 8 reclassified to `incomplete`/`review required`: the digest construction is specified, the `OperationOutcome` wire form is not | in progress |
+| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, thirteen rows, and a coverage table for the remaining 146 `MUST` / 104 `SHOULD` statements by section. Row 8 moved to `clear`/`non-blocking` after the outcome's wire form was specified in §5.3.4; the verdict stays `FAIL` and the implementation is the next BFT unit | in progress |
 
 ---
 
@@ -1324,23 +1324,27 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    - **(c)** Make the execution result part of the consensus
      decision — commit the state transition, not the request.
 
-   **Specified in §5.3.4 — implementation pending.** The draft's
-   "Application Execution Contract" now states (c) under the hook
-   reading: `validate` before consensus, `apply` after commitment, the
-   apply output in the state digest, a deterministic context, failures
-   recorded as the application's outcome, and an empty-output default.
-   The reference implementation has not caught up — there is no
-   `validate` hook, `state_digest` does not include the apply output,
-   and a failure is not covered by the checkpoint. The conformance
-   matrix records this as row 8: `FAIL` on the code, `clear` in the
-   draft, `non-blocking` for submission. The note that argued for (c)
-   is `docs/apply-contract.md`, now marked adopted. The digest binding —
+   **Specified in §5.3.4 (including the outcome wire form);
+   implementation pending.** The draft's "Application Execution
+   Contract" states (c) under the hook reading: `validate` before
+   consensus, `apply` after commitment, the apply output in the state
+   digest, a deterministic context, failures recorded as the
+   application's outcome, an empty-output default, the digest
+   construction, the checkpoint relation, and the outcome encoding —
+   text map keys, a text discriminant, a 256-byte payload bound. The
+   reference implementation has not caught up — there is no `validate`
+   hook, `state_digest` does not include the apply output, and a failure
+   is not covered by the checkpoint. The conformance matrix records this
+   as row 8: `FAIL` on the code, `clear` in the draft, `non-blocking`
+   for submission. The note that argued for (c) is
+   `docs/apply-contract.md`, now marked adopted with its open questions
+   resolved. The digest binding —
    how the apply output is encoded and bound into the state digest — is
-   now specified in §5.3.4 and in that note's "The digest binding"
-   section. The `OperationOutcome` wire form (discriminant encoding,
-   payload bound, map key type) is the remaining open item; until it is
-   fixed, conformance-matrix row 8 stays `incomplete` and
-   `review required`.
+   specified in §5.3.4 and in that note's "The digest binding" section,
+   as is the `OperationOutcome` wire form (text keys, a text
+   discriminant, a 256-byte payload bound). Row 8 is now `clear` /
+   `non-blocking`; its verdict stays `FAIL` because the implementation
+   is the next BFT unit.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

@@ -1043,6 +1043,21 @@ and rejects the right tuples, the filter excludes a foreign id — but
 not end to end. The split test in part 2 is the first test that
 observes the exchange's *effect*.
 
+**The hoist's first new verb produced one instance of the quiet-drop
+class, caught by unit test before merge.** The first draft of
+`classify_inbound` routed `cluster_info` with no authenticated peer;
+`apply_inbound` would then have failed its `Some(peer)` pattern and
+returned `Handled`, dropping the frame silently. The test
+`cluster_info_is_recorded_after_the_handshake` was written to assert the
+negative case — "no authenticated sender, nothing to record" — and it
+failed. This is the third instance of the class in two milestones
+(`relay_discovery` during the NAT phase at part 6; `AnnounceWitness` and
+the Coral verbs mid-establishment at 6a), and the first caught before
+merge by a test rather than by CI. It is also evidence about the hoist:
+the new verb found the new bug in one classifier, with one test naming
+what the bug would have done — not in one of four copies, where the
+negative case had no home.
+
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 

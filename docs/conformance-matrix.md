@@ -1,9 +1,9 @@
 # Conformance matrix
 
-**Status: second delivery.** The seven-field row schema, its vocabulary,
-and seven rows — the first three with the `Submission impact` field
-added, four more drawn from the clauses that M9.6b and the reconciliation
-made visible. The remaining rows follow; the schema is now settled.
+**Status: third delivery.** The seven-field row schema, its vocabulary,
+and eight rows. The third delivery adds §5.3.4's execution contract as
+the first `blocking` value, and the decisive query's answer changes with
+it. The remaining rows follow; the schema is settled.
 
 ## What this is
 
@@ -269,6 +269,43 @@ enough and the edit has not landed."
   converge to a stable size; leaving it unexecuted and undefined is
   either acceptable at this revision or not, and that is a decision.
 
+### 8. §5.3.4 — execution contract for committed operations — FAIL
+
+- **Clause.** §5.3.4 fixes ordering, the checkpoint and state-transfer
+  formats, and the quorum that makes a checkpoint stable. It requires
+  the state to be deterministically decodable and requires a recipient
+  to reject an undecodable state. It does not say what happens when an
+  operation commits and then *execution* fails — whether operations are
+  validated before consensus, validated deterministically before
+  consensus, or committed as state transitions.
+- **Requirement.** none stated. The three resolutions are three
+  different protocols: (a) `apply` is infallible by contract and
+  applications validate before an operation enters consensus; (b)
+  validation is deterministic and runs before consensus, so `apply`
+  cannot fail on a committed operation; (c) the execution result is part
+  of the consensus decision — the state transition is committed, not the
+  request.
+- **Source.** `quip_net::bft_driver::BftHandler::apply -> Result<()>`.
+  `BftDriver::apply_current` pushes `BftEvent::ApplyFailed` on `Err` and
+  then advances `sequence` regardless.
+- **Test.** `apply_failure_is_an_event_not_an_error` — it asserts that
+  the failure is an event and that every driver reaches sequence 1,
+  which documents the divergence rather than preventing it.
+- **Verdict.** **FAIL** — `apply` permits a post-commit failure the
+  driver does not treat as fatal, so two replicas can disagree about
+  state while both advance and both believe consensus progressed. The
+  behaviour is (c)'s shape without (c)'s obligation: it takes the
+  licence to commit a failure and omits the requirement that the failure
+  be identical on every replica.
+- **Specification status.** **incomplete** — "applied" is used and never
+  defined with respect to failure, and the draft selects none of the
+  three protocols. An independent implementer must choose one.
+- **Submission impact.** **`blocking`** — a draft that does not state the
+  execution contract cannot be submitted responsibly. The three
+  resolutions are three protocols, and a reviewer of the draft has no
+  way to know which one is being proposed. This is the first `blocking`
+  row in the matrix.
+
 ## What follows
 
 The remaining rows are the draft's other normative statements: handshake
@@ -282,11 +319,12 @@ pass is mechanical: the comparison is a check, a row takes minutes, and
 the work parallelises without coordination. Where it is not, the pass is
 **design-time**: the judgement is whether an independent implementer
 would reach the same behaviour from the text, which is a question the
-code can inform and the draft's editor has to answer. Four of the seven
-rows here are design-time (`ambiguous` or `incomplete`); the two
-`incomplete` ones, §13.5 and §13.4, are the ones that decide the
-submission schedule. The mechanical rows decide only how long the
-matrix takes to finish.
+code can inform and the draft's editor has to answer. Five of the eight
+rows here are design-time (`ambiguous` or `incomplete`); the three
+`incomplete` ones — §5.3.4's execution contract, §13.5's attempt episode
+and §13.4's merge — decide the submission schedule, and only the first
+is `blocking`. The mechanical rows decide only how long the matrix takes
+to finish.
 
 Two conventions the full pass will keep:
 
@@ -296,7 +334,21 @@ Two conventions the full pass will keep:
   Protocol design item it became. A failure with no landing place is a
   finding that gets rediscovered.
 
-A third, learned from rows 4 and 7: **a tested function is not an
-enforced clause.** `new_checked` and `should_merge` both have passing
-unit tests and no production caller. Any row whose source is a function
-must say where it is called from, or say that nothing calls it.
+A third convention, and it is normative: **name the caller.** Every row
+whose `Source` is a function MUST name the code that calls it, or state
+that nothing does. A unit-tested function with no caller is a code path
+that exists and does nothing — invisible to a test count and to a review
+that reads the function instead of its call sites. Two instances so far:
+`Capabilities::new_checked` (row 4) and `ClusterState::should_merge`
+(row 7), both with passing unit tests and no production caller. Row 3 is
+the sequencing variant of the same failure: `record_split_attempt` is
+called, and the limit it guards cannot be reached.
+
+**The decisive query now returns five rows, one of them `blocking`.**
+Row 8 is the first requirement whose draft edit is a prerequisite for
+submission: until §5.3.4 says which execution contract it proposes, an
+implementer cannot conform and a reviewer cannot tell what is being
+proposed. The answer to the review's decisive question moves from "four
+decisions, none blocking" to "five decisions, one blocking" — and the
+blocking one is not a detail of Coral routing, it is the contract every
+BFT application depends on.

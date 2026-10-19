@@ -160,7 +160,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests): seven-field schema, vocabulary and seven rows in `docs/conformance-matrix.md`; remaining rows follow | in progress |
+| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests): seven-field schema, vocabulary and eight rows in `docs/conformance-matrix.md`; remaining rows follow | in progress |
 
 ---
 
@@ -1776,7 +1776,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 | `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
-| `docs/conformance-matrix.md:1` | M9.6b | clause → source → test matrix; seven-field schema, seven rows, submission impact |
+| `docs/conformance-matrix.md:1` | M9.6b | clause → source → test matrix; seven-field schema, eight rows, submission impact |
 | `quip-node/src/peer.rs:1` | M9.5b-b, M9.5b-c | peer slot and lifecycle vocabulary |
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |

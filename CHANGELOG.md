@@ -131,7 +131,8 @@ doc-tests       4 passed (one per crate)
 | M7 | Hardening: rate limits, caches, quarantine, state machines | landed |
 | M8 | Range fetch: bao verified streaming | landed |
 | Spec pass | S1–S7 and D4 resolved in the draft | landed |
-| Spec pass | S8–S10 (`bft_state_transfer` ring signature scope; initial witness issuance; verifier independence) | open, spec-only |
+| Spec pass | S8 (`bft_state_transfer` ring signature scope) | decided, draft text landed |
+| Spec pass | S9–S10 (initial witness issuance; verifier independence) | decided, draft text landed |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
@@ -1042,6 +1043,7 @@ and rejects the right tuples, the filter excludes a foreign id — but
 not end to end. The split test in part 2 is the first test that
 observes the exchange's *effect*.
 
+
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
 `quip-node-ffi` is a new workspace member. It exposes a `NodeHandle`
@@ -1179,27 +1181,28 @@ and three open revisions.
   table matching `nat_wire.rs`.
 - **D4 — `T2_MAX_STREAMS`.** §19.4 says 256; `constants.rs` was 16.
   Aligned.
-- **S8 — `bft_state_transfer` ring signature scope — OPEN.** §5.3.4.1
+- **S8 — `bft_state_transfer` ring signature scope.** §5.3.4.1
   says the `ring_signature` covers the state transfer's own signing
   payload. A responder cannot produce a fresh quorum ring signature
   without an extra round trip the spec does not describe. The
   implementation treats the ring signature as the collection of
   `bft_checkpoint` signatures that made the checkpoint stable, and
   verifies it against the `bft_checkpoint` payload for
-  `(ring_id, checkpoint_sequence, checkpoint_digest)`. **Spec
-  revision required**, text-only: §5.3.4.1 should either describe
-  the extra round or adopt the checkpoint-signatures interpretation.
+  `(ring_id, checkpoint_sequence, checkpoint_digest)`. **Resolved** as
+  the checkpoint-signatures interpretation; §5.3.4.1 steps 2–3,
+  §5.3.4's signing-payload paragraph, and §5.3.4's Ring Signature
+  Validation bullets rewritten in `71b52dc`.
 - **S9 — initial witness issuance.** §5.3.3 specifies that a
   witness re-issues every 12 hours, but not what triggers its first
   issuance. The implementation uses a labelled placeholder: a node
   issues about a peer once the peer's claim is `Trusted` and no
-  statement has been issued in the last 12 hours. **Spec revision
-  required**, text-only: §5.3.3 should describe first issuance.
+  statement has been issued in the last 12 hours. **Resolved**; the
+  *First Issuance* block added to §5.3.3 in `71b52dc`.
 - **S10 — verifier independence.** §5.3.3's "4+ independent"
   implies that a node's own statement about a peer does not count
   toward that node's `Verified` verdict, but does not say so.
-  `compute_kt_status` excludes the local NodeId. **Spec revision
-  required**, text-only: §5.3.3 should state the exclusion.
+  `compute_kt_status` excludes the local NodeId. **Resolved**; the
+  *Independence* block added to §5.3.3 in `71b52dc`.
 
 ---
 

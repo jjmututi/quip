@@ -14,10 +14,10 @@ not a status this file recognises.
 ## Current state
 
 Every protocol-level milestone (M1–M8) is landed. The application
-layer (M9.x) is in progress: M9.1 through M9.5a are landed, plus the
-M9.5b-a design contracts and the M9.5b-b shared types; M9.5b-c gates
-5 and 6 are landed. The interface layer (M10.x) has begun: M10.1
-through M10.3 are landed. §16 runs end-to-end through step 8 across
+layer (M9.x) runs through M9.6b: M9.1 through M9.6b are landed, with
+M9.6c (trust bootstrap), M9.7 (headless binary) and M9.8 (peer address
+book) next. The interface layer (M10.x) has begun: M10.1 through M10.3
+are landed. §16 runs end-to-end through step 8 across
 the protocol crates; the `Node` type composes them into a runnable
 peer; a Dart client can bind a node, subscribe to its event stream,
 and make explicit trust decisions about its peers; the node now
@@ -50,8 +50,10 @@ accumulation is now live: a running node stores `WitnessStatement`s
 node-wide, serves them from the Coral responder, and — for the first
 time — feeds them to its own `ConnectionFlow`, so `Ready(Verified)` is
 reachable in a network with four independent, first-seen-matured
-witnesses. The issuance policy that produces those statements is a
-labelled placeholder pending a spec revision.
+witnesses. The issuance policy that produces those statements is still
+a labelled placeholder: the draft's first-issuance rule landed in
+`71b52dc`, but the implementation keeps M9.6a's policy until a
+milestone owns replacing it.
 
 The protocol skeleton is complete. What remains is concentrated in
 two places: making the boundaries rigorous (BFT execution semantics,
@@ -157,7 +159,7 @@ doc-tests       4 passed (one per crate)
 | BFT-V | BFT validation: adversarial network simulator, property tests | not started |
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
-| Spec | Membership boundaries and pin authorization model | not started |
+| Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
 | Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests): method, template and three rows in `docs/conformance-matrix.md`; full pass follows | in progress |
 
 ---
@@ -767,8 +769,8 @@ assertion.
 method has no signer parameter, and threading one through the trait
 is a larger change than the value justifies — the peer's response
 carries its own valid signature and is what advances the session.
-Cluster merge/split and XOR routing remain M9.5b-c's outstanding
-work.
+Cluster merge/split and XOR routing were M9.5b-c's outstanding work; the
+routing landed in part 7 and the split in `0464964`.
 
 Tests: `nat_phase_exchanges_signed_candidates` (lib.rs). The
 existing integration tests are unchanged in intent but now depend
@@ -831,7 +833,9 @@ are still handled only in `run_peer_loop` and are dropped if they
 arrive during establishment. §13 Coral verbs were the other half of
 that gap; M9.6a's follow-up (`edef239`) answers them in `run_nat_phase`
 as well, and ingests `AnnounceWitness` there. Cluster merge/split and
-XOR-distance routing remain M9.5b-c's outstanding work.
+XOR-distance routing were M9.5b-c's outstanding work; the routing landed
+in part 7, the split in `0464964`, and merge is still unexecuted
+(Outstanding Work 16a).
 
 Tests: `relay_path_produces_nat_relayed` (lib.rs);
 `on_dht_result_routes_candidates` (nat_driver.rs);
@@ -1488,30 +1492,49 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
 
 ### Application layer (M9)
 
-16. **M9.5b-c — cluster merge/split and XOR routing.** Parts 2
-    through 5 landed: `NatRelayed` is producible, the peer task
-    drives a per-peer `NatDriver`, candidate exchange is peer-scoped
-    and signed, and probes are real dials. What remains: run
-    `ClusterState` merge/split against the routing-eligible set,
-    replace `LiveDht`'s lookup no-ops with real Coral lookups, and
-    replace the DHT router's broadcast with XOR-distance routing.
-    Producing `NatRelayed` from a real relayed path also requires a
-    network (or a test) where direct candidates fail.
+16. **M9.5b-c — cluster merge/split and XOR routing — RESOLVED in
+    `0464964`.** The sequence completed: parts 2–5 built the NAT and
+    candidate path, part 6 closed the relay branch, part 7 derived
+    cluster membership and XOR routing, and `0464964` executed the
+    split, on top of the cluster-info exchange in `1b0dca5`. Two of the
+    three things this entry used to list as remaining are gone with
+    their subject: `LiveDht` no longer exists — `DhtHandle` implements
+    `DhtClient` directly — and the DHT router routes mesh verbs by XOR
+    distance. Coral lookups have been driven by `WitnessDiscovery`
+    since M9.5a. Merge (§13.4) was never in this entry's scope and is
+    still unexecuted; it is recorded as 16a rather than left as an
+    inference from a missing caller.
 
-17. **M9.6 — witness accumulation and trust bootstrap.** The
-    responder currently answers with no witnesses; when the node
-    accumulates `WitnessStatement`s from its peers, the responder
-    returns real rings and `Ready(Verified)` becomes reachable in a
-    network with at least four independent witnesses. The
-    bootstrapping problem is real: a two-node network can never
-    reach `Verified`, because verification requires third parties.
+16a. **§13.4 cluster merge is not executed.** `ClusterState::should_merge`
+    can return `MergeDecision::Merge`, and no production code calls it:
+    a node never leaves its cluster for a larger neighbour. M9.6b
+    deliberately excluded merge (`docs/M9.6b-design.md` §6), so this is
+    a scope boundary that has been reached, not a regression — but the
+    absence should be findable rather than inferred. What a merge does
+    to the member set, the announced tuple and the coordinator is
+    undefined, and it needs a design pass of the split's shape: decide,
+    move, announce, and let the id filter do the partition. It should
+    reuse the exchange for the same reason the split does — the
+    announcement is what makes the move observable.
+
+17. **M9.6c — trust bootstrap.** Witness accumulation landed in M9.6a:
+    a running node stores `WitnessStatement`s node-wide, serves them
+    from the Coral responder, and feeds them to its own
+    `ConnectionFlow`, so `Ready(Verified)` is reachable in a network
+    with four independent, first-seen-matured witnesses. What remains
+    is how a node gets *into* such a network. The bootstrapping problem
+    is real: a two-node network can never reach `Verified`, because
+    verification requires third parties, so a fresh node needs either a
+    configured witness ring or a discovery path to one. That is M9.6c's
+    scope.
 
 18. **M9.7 — headless node binary and config.** A `quip-node`
     binary that runs without Flutter: config file (bind address,
     seed source, store path, bootstrap peers), logging, graceful
     shutdown. This is the deployment shape the VPS tier, bootstrap
-    nodes, and witness rings depend on. Requires M9.5b-c and M9.6
-    to give it something real to do.
+    nodes, and witness rings depend on. Its prerequisites are met:
+    M9.5b-c and M9.6a are landed, so the binary would have routing,
+    cluster state and witness storage to configure.
 
 19. **M9.6a follow-up — issuance redundancy.** Each peer task runs
     `maybe_issue` on every steady-loop iteration, so an N-node mesh
@@ -1812,6 +1835,7 @@ next touch is cheap.
 **M9.5b-c note.** M9.5b-c is landed. Its scope included cluster
 membership derivation and XOR-distance routing, both landed in part 7.
 Cluster split *execution* — choosing a split target and migrating the
-cluster id — needs neighbour `ClusterInfo` exchange, which no peer
-reports yet, and is deferred to M9.6b. The deferral is recorded in the
-milestone row's scope cell, not in its status.
+cluster id — needed neighbour `ClusterInfo` exchange, which no peer
+reported at the time; it was deferred to M9.6b and landed there
+(`1b0dca5` for the exchange, `0464964` for the split). The deferral was
+recorded in the milestone row's scope cell, not in its status.

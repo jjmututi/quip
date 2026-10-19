@@ -24,6 +24,19 @@ use quip_storage::ContentHasher;
 #[derive(Clone, Debug, Default)]
 pub struct Sha256Hasher;
 
+/// Raw SHA-256 digest of `data`.
+///
+/// The [`ContentHasher`] implementations return these bytes wrapped in a
+/// CID. §13.5's split derivation needs them unwrapped, so the digest gets
+/// a direct entry point rather than a CID round trip.
+pub fn sha256_bytes(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let out = sha2::Sha256::digest(data);
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    arr
+}
+
 impl ContentHasher for Sha256Hasher {
     fn digest(&self, algo: HashAlgo, payload: &[u8]) -> Option<[u8; 32]> {
         match algo {

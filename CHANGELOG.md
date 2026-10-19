@@ -70,7 +70,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~739 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~749 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -106,16 +106,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main` after M9.6b part 1:
+Baseline on `main` after M9.6b:
 
 ```
 quip-core      74 passed
-quip-net      491 passed
+quip-net      495 passed
 quip-storage   57 passed
-quip-node     117 passed
+quip-node     123 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~739 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~749 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -143,7 +143,7 @@ doc-tests       4 passed (one per crate)
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
 | M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster membership and XOR routing; cluster split execution deferred to M9.6b | landed |
 | M9.6a | `quip-node`: witness accumulation, store, responder, issuance policy | landed |
-| M9.6b | `quip-node`: cluster-info exchange and split execution | in progress |
+| M9.6b | `quip-node`: cluster-info exchange and split execution | landed |
 | M9.6c | `quip-node`: trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M9.8 | `quip-node`: peer address book and bootstrap | not started |
@@ -982,14 +982,16 @@ is a larger surface than the frame injection and is not added. A future
 instance of this class that escapes both the unit tests and CI would
 escape for the same reason these did.
 
-### M9.6b part 1 — cluster-info exchange — LANDED (milestone in progress)
+### M9.6b — cluster-info exchange and split execution — LANDED
 
-§13.4's tuple exists as a `ClusterInfo` value and as a split branch; it
-was never on the wire, so a node could not learn a neighbour's cluster
-id and the id filter §13.5 implies had nothing to read. This part puts
-the tuple on the wire and applies the filter. Split *execution* is part
-two; the milestone row stays `in progress` until it lands, because the
-row's scope says "exchange and split execution" and only half is here.
+§13.4's tuple existed as a `ClusterInfo` value and as a split branch,
+but it was never on the wire: a node could not learn a neighbour's
+cluster id, so the id filter §13.5 implies had nothing to read, and a
+split had no observable effect. Part 1 puts the tuple on the wire and
+applies the filter at read time; part 2 executes the split. The order is
+forced: without the filter, a split that changes only the local id
+changes nothing observable, so the split commit would have landed on a
+base where its own test had nothing to assert.
 
 - `quip-net`: `ClusterInfoAnnounce` — `[cluster_id, size, ctime,
   signature]` over `["quip-v1", "cluster_info", …]`. The tuple carries
@@ -1016,6 +1018,53 @@ row's scope says "exchange and split execution" and only half is here.
   `apply_inbound` verifies, records, and replies only when our id
   differs, which converges in at most four messages.
 
+**Part 2 — split execution.** `ClusterHandle::plan_split` evaluates
+§13.5 when `split_due` and changes nothing; `split_if_due` applies the
+plan.
+
+- **Ids.** `cid^N = hash(cid)` is SHA-256 over the 16-byte id truncated
+  to 16 bytes; `cid^F` is `cid^N` with bit 0 of the first byte flipped;
+  `hash(cid^N)` is the full 256-bit center lookup key. The reading is
+  provisional (note §8, question 2) because the draft does not define
+  `hash`; a different definition changes those three functions and
+  nothing else. `CreateNew` derives
+  `SHA-256(node_id || now_ms || attempts)[..16]`.
+- **Center.** The closest *connected* routing-eligible peer, because
+  there is no address book — the note's §6 limitation, deferred to
+  M9.8. `rtt_to_center` is that peer's sample; no peer means
+  `u64::MAX`, so `JoinNear` cannot be taken on a mesh with nothing in
+  it.
+- **Acceptability.** A branch is acceptable when a peer advertises
+  exactly that id, is within the RTT threshold, and reports at least
+  `MIN_CLUSTER_SIZE`.
+- **Attempts.** `record_split_attempt` runs before the move; past
+  `MAX_SPLIT_ATTEMPTS` the plan is `CreateNew` regardless of the branch
+  verdicts. §13.5's rule, and the reason a node cannot ping-pong between
+  two clusters that keep rejecting it.
+- **The move.** `migrate` replaces the id, resets `ctime` and `size`,
+  clears the coordinator, the RTT timer and the attempt counter — a new
+  cluster is not born already due to split.
+- **The announcement.** The heartbeat performs the split, recomputes,
+  and publishes through the existing tuple-change path. A split *is* a
+  tuple change, so it needs no separate send.
+
+**The attempt cap is not reachable in this control flow.** §13.5's
+`MAX_SPLIT_ATTEMPTS` exists to throttle a node that keeps splitting
+without landing somewhere acceptable. The note's own sequence — record
+the attempt, then `migrate`, which clears the counter on success — makes
+every split a success, so the counter is `1` at every evaluation and the
+cap never fires. The code follows the note; the note's throttle is
+therefore inert until "success" means "the new cluster passed
+acceptance", which requires a split episode to outlive the move.
+Recorded rather than redefined: what resets the counter is a design
+decision, not an implementation detail.
+
+The split is local and uncoordinated, as §13.5 describes: every node
+evaluates the same inputs and may choose differently, and the partition
+is the union of their choices. That is why the part-1 filter is
+load-bearing rather than an optimisation — and why the two parts are one
+milestone.
+
 **Record is not member.** The record is written after the signature
 verifies and *without* consulting the id; the filter runs at read time.
 A neighbour announcing a foreign id stays in the store — filtering at
@@ -1023,9 +1072,8 @@ write time would require re-verifying the store after every local-id
 change, which is the bug class the filter exists to prevent, and it
 would make a local split unobservable.
 
-Deliberately not here: split execution; merge; a real DHT lookup for
-the center (deferred to M9.8, the peer address book); sloppy
-replication.
+Deliberately not here: merge (§13.4); a real DHT lookup for the center
+(deferred to M9.8, the peer address book); sloppy replication (§13.5).
 
 Tests: `ClusterInfoAnnounce` roundtrip, verb and arity rejection,
 signature verified against the sender and rejected for another
@@ -1034,14 +1082,38 @@ signature verified against the sender and rejected for another
 signed-tuple verification (`cluster.rs`, `quip-node`); the phase table
 and `cluster_info` per phase (`tasks.rs`).
 
+Split: the derivation pinned to SHA-256 rather than merely "different",
+`cid^F` differing from `cid^N` in exactly bit 0, the center key being
+`hash(cid^N)` and not `cid^N`, `fresh` depending on node, time and
+attempts, and `migrate` resetting what must not carry over
+(`cluster.rs`, `quip-net`). The timer, the three branches with their
+resulting ids, the partition, and `split_if_due` actually migrating —
+six tests, one shared three-peer setup, so the branch inputs are the
+only thing that varies (`split_tests` in `cluster.rs`, `quip-node`).
+
+**The dependency check was run, not assumed.** The partition test was
+run with the read-time filter commented out: it fails at its *first*
+assertion, because without the filter peer 3 is a member — the exchange
+commit's contribution, made falsifiable. The relevant revert is the
+filter rather than `apply_inbound`: the test drives `recompute` directly
+and never opens a connection, so reverting the inbound arm would not
+change its verdict. The edit was manual and restored before committing;
+nothing in CI re-runs it, so a future change that removes the filter
+would be caught by the test, not by the check.
+
 **What the tests do not prove.** No test runs two nodes and waits for a
 heartbeat. The interval is `CLUSTER_HEARTBEAT_S`, so a live test would
 either sleep that long or need an injectable interval; neither is
-added. The exchange is proven piecewise — the wire form round-trips,
-the classifier routes it in three phases and not two, the store accepts
-and rejects the right tuples, the filter excludes a foreign id — but
-not end to end. The split test in part 2 is the first test that
-observes the exchange's *effect*.
+added. The split tests move a `Timestamp` past the timer rather than
+sleeping, and they read the mesh through a `DhtHandle` and a store of
+recorded tuples — the same state a live node would hold, but assembled
+directly. The exchange is proven piecewise — the wire form
+round-trips, the classifier routes it in three phases and not two, the
+store accepts and rejects the right tuples, the filter excludes a
+foreign id, a split partitions the set — but no single test sends a
+`cluster_info` from one node to another and observes the split that
+follows. That end-to-end path is the first thing a live-mesh harness
+should cover when one exists.
 
 **The hoist's first new verb produced one instance of the quiet-drop
 class, caught by unit test before merge.** The first draft of
@@ -1172,8 +1244,10 @@ Tests: `peer_stays_unknown_until_decided`, `trust_change_emits_event`,
 
 ## Spec pass
 
-Seven points where the draft left a choice, one numeric mismatch,
-and three open revisions.
+Decisions the draft has made where the implementation preceded it, plus
+the items still open. The open items are the Category 3 findings recorded
+in Outstanding Work; the Spec pass items below are resolved unless marked
+otherwise.
 
 - **S1 — `RelayHop.encrypted_key`.** §12.2 defines HPKE `mode_base`,
   `DHKEM(X25519, HKDF-SHA256)` / `HKDF-SHA256` / `ChaCha20Poly1305`,
@@ -1266,10 +1340,11 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    ring; the driver does not hold one today. The individual-
    signature path is complete.
 
-5. **S8 spec revision.** Text-only. Decide whether §5.3.4.1
-   describes the extra round trip a fresh quorum ring signature
-   would require, or whether it adopts the checkpoint-signatures
-   interpretation the implementation uses.
+5. **S8 spec revision — RESOLVED in `71b52dc`.** The
+   checkpoint-signatures interpretation is now the draft's text; see the
+   Spec pass section. The FROST gap in item 4 is unaffected: the draft
+   accepts both signature forms, the implementation verifies the
+   individual form only.
 
 ### BFT validation (BFT-V)
 
@@ -1491,7 +1566,9 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
 ### Housekeeping
 
 30. **Release tag.** `git tag v0.1.0-m9.5b-c && git push origin
-    v0.1.0-m9.5b-c`, then `v0.1.0` once S8 and BFT-A land.
+    v0.1.0-m9.5b-c`, then `v0.1.0` once BFT-A lands. S8 was resolved in
+    the draft in `71b52dc` and no longer gates the tag; the FROST
+    implementation gap (BFT-A item 4) remains under BFT-A.
 
 31. **GitHub metadata.** Repository description and topics. The
     README currently links to this file; the repo description is
@@ -1558,12 +1635,19 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-net/src/cluster.rs` (`percentile`) | M9.5b-c | nearest-rank percentile helper |
 | `quip-net/src/cluster.rs` (`ClusterState::update_size`) | M2, M9.5b-c | §13.6 size-estimate input |
 | `quip-net/src/cluster.rs` (`ClusterState::note_rtt_observation`) | M2, M9.5b-c | split-timer input |
+| `quip-net/src/cluster.rs` (`near_cluster_id`, `far_cluster_id`, `center_lookup_key`, `fresh_cluster_id`) | M9.6b | §13.5 id derivation, `crypto`-gated |
+| `quip-net/src/cluster.rs` (`ClusterState::migrate`) | M9.6b | the local move a split performs |
+| `quip-net/src/crypto.rs` (`sha256_bytes`) | M9.6b | unwrapped digest for id derivation |
 | `quip-node/src/dht.rs` (`PeerRecord::rtt_ms`) | M9.5b-c | raw RTT sample field |
 | `quip-node/src/dht.rs` (`DhtHandle::note_rtt`) | M9.5b-c | slot-scoped RTT sample |
 | `quip-node/src/dht.rs` (`DhtHandle::closest_to`) | M9.5b-c | XOR-distance routing selection |
 | `quip-node/src/dht.rs` (`Outbound::key`) | M9.5b-c | mesh-verb routing key |
 | `quip-node/src/cluster.rs` (`ClusterHandle`) | M9.5b-c | node-level cluster state |
 | `quip-node/src/cluster.rs` (`ClusterView`) | M9.5b-c | derived membership snapshot |
+| `quip-node/src/cluster.rs` (`NeighbourClusters`, `is_cluster_member`) | M9.6b | neighbour tuples, read-time id filter |
+| `quip-node/src/cluster.rs` (`SplitPlan`, `plan_split`, `apply_split`, `split_if_due`) | M9.6b | split evaluation and execution |
+| `quip-node/src/dht.rs` (`publish_cluster_info`) | M9.6b | broadcast of the local tuple |
+| `quip-node/src/tasks.rs` (`cluster_task`) | M9.6b | heartbeat, announce, split trigger |
 | `quip-node/src/lib.rs` (`Node::cluster`, `Node::cluster_view`) | M9.5b-c | cluster accessors |
 | `quip-node/src/lib.rs` (`run_nat_phase`) | M9.5b-c | NAT phase driven through `NatDriver` |
 | `quip-node/src/lib.rs` (`NatPhaseOutcome`) | M9.5b-c | NAT phase terminal outcome |

@@ -153,6 +153,8 @@ pub use cluster::{
     ClusterInfoAnnounce, ClusterLevel, ClusterState, MergeDecision, SplitAction,
     ACCEPTANCE_MIN_SAMPLES,
 };
+#[cfg(feature = "crypto")]
+pub use cluster::{center_lookup_key, far_cluster_id, fresh_cluster_id, near_cluster_id};
 pub use discovery::{
     DiscoveryFailure, DiscoveryPhaseKind, DiscoveryStatus, Outbound, SpilloverResponseCache,
     StartOutcome, WitnessDiscovery, DEFAULT_SPILLOVER_CACHE_CAPACITY,

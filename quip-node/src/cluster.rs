@@ -15,9 +15,11 @@ use quip_core::dvv::NodeId;
 use quip_core::messages::Signer;
 use quip_core::time::Timestamp;
 use quip_net::cluster::{
-    estimate_size_from_routing_table, percentile, ClusterConfig, ClusterInfo, ClusterInfoAnnounce,
-    ClusterLevel, ClusterState,
+    center_lookup_key, estimate_size_from_routing_table, far_cluster_id, fresh_cluster_id,
+    near_cluster_id, percentile, ClusterConfig, ClusterInfo, ClusterInfoAnnounce, ClusterLevel,
+    ClusterState, SplitAction,
 };
+use quip_net::MIN_CLUSTER_SIZE;
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -140,6 +142,18 @@ pub struct ClusterView {
     pub split_due: bool,
 }
 
+/// The outcome of one split evaluation (§13.5).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SplitPlan {
+    /// The branch [`ClusterState::choose_split_target`] chose.
+    pub action: SplitAction,
+    /// The id this node moves to if the plan is applied.
+    pub new_id: [u8; 16],
+    /// The peer the center lookup picked, and its RTT sample. `None`
+    /// when there is no routing-eligible peer to be the center.
+    pub center: Option<(NodeId, u64)>,
+}
+
 /// Shared state behind every [`ClusterHandle`] clone.
 struct ClusterInner {
     state: Mutex<ClusterState>,
@@ -205,6 +219,122 @@ impl ClusterHandle {
         let payload = announce.signing_payload()?;
         announce.signature = signer.sign_ed25519(&payload);
         Ok(announce)
+    }
+
+    /// Evaluate the split decision without changing anything (§13.5).
+    ///
+    /// Returns `None` unless `split_due`. The plan is deterministic from
+    /// local state: the same `now`, routing table and neighbour records
+    /// always produce the same action and id.
+    pub fn plan_split(&self, dht: &DhtHandle, now: Timestamp) -> Option<SplitPlan> {
+        let view = self.recompute(dht, now);
+        if !view.split_due {
+            return None;
+        }
+
+        let cfg = self.inner.config;
+        let cid = view.id;
+        let near = near_cluster_id(&cid);
+        let far = far_cluster_id(&cid);
+
+        // §13.5's `get(hash(cid^N))`, served from connected peers: there
+        // is no address book yet (M9.8), so the closest routing-eligible
+        // peer stands in for the cluster center.
+        let records = dht.routing_eligible_records();
+        let center = dht
+            .closest_to(&center_lookup_key(&cid), 1)
+            .into_iter()
+            .next()
+            .map(|peer| {
+                let rtt = records
+                    .iter()
+                    .find(|(id, _)| *id == peer)
+                    .and_then(|(_, r)| r.rtt_ms)
+                    .unwrap_or(u64::MAX);
+                (peer, rtt)
+            });
+        let rtt_to_center = center.map(|(_, rtt)| rtt).unwrap_or(u64::MAX);
+
+        let near_ok = self.candidate_acceptable(&near, &records);
+        let far_ok = self.candidate_acceptable(&far, &records);
+
+        let attempts = {
+            let state = self.inner.state.lock().expect("cluster lock poisoned");
+            state.split_attempts.saturating_add(1)
+        };
+        let action = if attempts > cfg.max_split_attempts {
+            // §13.5: past the attempt limit, take a fresh cluster rather
+            // than retry a branch that keeps failing acceptance.
+            SplitAction::CreateNew
+        } else {
+            let state = self.inner.state.lock().expect("cluster lock poisoned");
+            state.choose_split_target(rtt_to_center, near_ok, far_ok, &cfg)
+        };
+
+        let new_id = match action {
+            SplitAction::JoinNear => near,
+            SplitAction::JoinFar => far,
+            SplitAction::CreateNew => fresh_cluster_id(&dht.local_id(), now, attempts),
+        };
+
+        Some(SplitPlan {
+            action,
+            new_id,
+            center,
+        })
+    }
+
+    /// Apply a plan: record the attempt, move this node, reset the state
+    /// that must not carry over.
+    pub fn apply_split(&self, plan: &SplitPlan, now: Timestamp) -> [u8; 16] {
+        let mut state = self.inner.state.lock().expect("cluster lock poisoned");
+        // `plan_split` already forced `CreateNew` when the cap is
+        // reached, so an `Err` here is the limit firing as designed,
+        // not a failure to act on.
+        let _ = state.record_split_attempt(&self.inner.config);
+        state.migrate(plan.new_id, now);
+        plan.new_id
+    }
+
+    /// Plan and apply a split if one is due.
+    ///
+    /// Returns the new cluster id when the node migrated. Membership is
+    /// recomputed against the new id before returning, so a caller that
+    /// publishes the local tuple immediately announces the new cluster.
+    pub fn split_if_due(&self, dht: &DhtHandle, now: Timestamp) -> Option<[u8; 16]> {
+        let plan = self.plan_split(dht, now)?;
+        let new_id = self.apply_split(&plan, now);
+        // Refresh `size` and the member set against the new id. The RTT
+        // timer restarts here if the samples are still over threshold,
+        // which is correct: the new cluster gets its own episode.
+        let _ = self.recompute(dht, now);
+        Some(new_id)
+    }
+
+    /// Whether `candidate` is acceptable as a split target (§13.5).
+    ///
+    /// At least one routing-eligible peer must advertise exactly that
+    /// cluster id, be within the RTT threshold, and report a cluster at
+    /// least `MIN_CLUSTER_SIZE` large. The size check is the reason a
+    /// split does not just bounce a node between two clusters too small
+    /// to accept it back.
+    fn candidate_acceptable(
+        &self,
+        candidate: &[u8; 16],
+        records: &[(NodeId, crate::dht::PeerRecord)],
+    ) -> bool {
+        let threshold = self.inner.config.rtt_threshold_ms;
+        records.iter().any(|(peer, record)| {
+            let Some(info) = self.inner.neighbours.get(peer) else {
+                return false;
+            };
+            info.id == *candidate
+                && info.size >= MIN_CLUSTER_SIZE as u64
+                && record
+                    .rtt_ms
+                    .map(|ms| ms <= threshold)
+                    .unwrap_or(false)
+        })
     }
 
     /// The cluster's configured level.
@@ -420,3 +550,233 @@ mod tests {
         assert_eq!(n.len(), 1, "only the acceptable tuple was stored");
     }
 }
+
+#[cfg(test)]
+mod split_tests {
+    use super::*;
+    use crate::peer::{PeerLifecycle, PeerSlot};
+
+    fn nid(b: u8) -> NodeId {
+        [b; 32]
+    }
+
+    fn slot(b: u8, g: u64) -> PeerSlot {
+        PeerSlot::new(nid(b), g)
+    }
+
+    fn t(ms: u64) -> Timestamp {
+        Timestamp::from_millis(ms)
+    }
+
+    /// Test peers are `[b; 32]`, so the first byte identifies the slot
+    /// the peer was registered under.
+    struct Mesh {
+        dht: DhtHandle,
+        cluster: ClusterHandle,
+        local: NodeId,
+    }
+
+    const CID: [u8; 16] = [0x11; 16];
+
+    /// Three routing-eligible peers and a cluster at the local tier.
+    /// The RTT samples are left to each test: they are the input that
+    /// decides both `split_due` and the branch, and nothing else varies.
+    fn mesh() -> Mesh {
+        let local = nid(0);
+        let (dht, _rx) = DhtHandle::new(local);
+        for i in 1..=3u8 {
+            dht.note_peer(nid(i), slot(i, 1), None, t(0));
+            dht.update_lifecycle(&nid(i), &slot(i, 1), PeerLifecycle::NatDirect);
+        }
+        let cluster = ClusterHandle::new(CID, ClusterLevel::Local, t(0));
+        Mesh { dht, cluster, local }
+    }
+
+    fn set_rtt(m: &Mesh, peer: &NodeId, ms: u64) {
+        m.dht.note_rtt(peer, &slot(peer[0], 1), ms);
+    }
+
+    fn announce(m: &Mesh, peer: NodeId, id: [u8; 16], size: u64) {
+        assert!(m.cluster.observe_cluster_info(
+            peer,
+            ClusterInfo {
+                id,
+                size,
+                ctime: t(0),
+            },
+            t(0),
+        ));
+    }
+
+    /// 181 s after the first over-threshold observation, i.e. past
+    /// `heartbeat * 3` for the local tier.
+    fn split_due_at() -> Timestamp {
+        t(181_000)
+    }
+
+    /// Start the over-threshold timer: three samples at 200 ms against a
+    /// 30 ms threshold.
+    fn prime_split_timer(m: &Mesh) {
+        for i in 1..=3u8 {
+            set_rtt(m, &nid(i), 200);
+        }
+        m.cluster.recompute(&m.dht, t(0));
+    }
+
+    #[test]
+    fn no_split_before_the_timer_fires() {
+        let m = mesh();
+        prime_split_timer(&m);
+        assert!(
+            m.cluster.plan_split(&m.dht, t(60_000)).is_none(),
+            "60 s of over-threshold RTT is not yet `heartbeat * 3`"
+        );
+    }
+
+    /// The near branch: the center is close and some peer advertises
+    /// `cid^N` at an acceptable size. The new id is asserted against the
+    /// derivation, not merely as "different": if `hash` changed, this
+    /// test fails rather than passing on an arbitrary id.
+    #[test]
+    fn split_joins_near_when_the_center_is_close_and_near_is_acceptable() {
+        let m = mesh();
+        prime_split_timer(&m);
+
+        // The center is whichever peer is closest to hash(cid^N); give
+        // that peer the close sample so `rtt_to_center` is within
+        // threshold.
+        let center = m.dht.closest_to(&center_lookup_key(&CID), 1)[0];
+        set_rtt(&m, &center, 5);
+        announce(&m, center, near_cluster_id(&CID), 40);
+
+        let plan = m
+            .cluster
+            .plan_split(&m.dht, split_due_at())
+            .expect("split due");
+
+        assert_eq!(plan.action, SplitAction::JoinNear);
+        assert_eq!(plan.new_id, near_cluster_id(&CID));
+        assert_eq!(
+            plan.center,
+            Some((center, 5)),
+            "the center is the close peer"
+        );
+    }
+
+    /// The far branch: the center is too far, so `JoinNear` cannot be
+    /// taken even though a peer is close to us; `cid^F` is acceptable.
+    #[test]
+    fn split_joins_far_when_the_center_is_distant() {
+        let m = mesh();
+        prime_split_timer(&m);
+
+        let far = far_cluster_id(&CID);
+        // One close peer advertising the far id. If that peer happens to
+        // be the center, `rtt_to_center` is small but `near_acceptable`
+        // is false, so the branch is still far.
+        set_rtt(&m, &nid(2), 5);
+        announce(&m, nid(2), far, 40);
+
+        let plan = m
+            .cluster
+            .plan_split(&m.dht, split_due_at())
+            .expect("split due");
+
+        assert_eq!(plan.action, SplitAction::JoinFar);
+        assert_eq!(plan.new_id, far_cluster_id(&CID));
+        assert_ne!(plan.new_id, near_cluster_id(&CID));
+    }
+
+    /// Neither branch is acceptable: the node takes a fresh id, derived
+    /// from its identity, the time and the attempt count.
+    #[test]
+    fn split_creates_a_new_cluster_when_neither_branch_is_acceptable() {
+        let m = mesh();
+        prime_split_timer(&m);
+
+        let plan = m
+            .cluster
+            .plan_split(&m.dht, split_due_at())
+            .expect("split due");
+
+        assert_eq!(plan.action, SplitAction::CreateNew);
+        assert_eq!(
+            plan.new_id,
+            fresh_cluster_id(&m.local, split_due_at(), 1),
+            "the id is the documented derivation, not an arbitrary value"
+        );
+    }
+
+    /// The milestone's purpose: peers that announce a different cluster
+    /// id leave the member set when the local id moves, with no change
+    /// to the transport and no peer disconnecting.
+    #[test]
+    fn a_split_partitions_the_member_set_through_the_exchanged_tuple() {
+        let m = mesh();
+        for i in 1..=3u8 {
+            set_rtt(&m, &nid(i), 10); // within threshold: all three are members
+        }
+        // Peers 1 and 2 claim our cluster; peer 3 claims another.
+        announce(&m, nid(1), CID, 40);
+        announce(&m, nid(2), CID, 40);
+        announce(&m, nid(3), [0xEE; 16], 40);
+
+        let before = m.cluster.recompute(&m.dht, t(0));
+        assert_eq!(before.members, vec![nid(1), nid(2)]);
+
+        let table_before: Vec<NodeId> = m
+            .dht
+            .table_snapshot()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Exactly what `split_if_due` does, minus the timer: the only
+        // input that changes is the local id.
+        let plan = SplitPlan {
+            action: SplitAction::JoinNear,
+            new_id: near_cluster_id(&CID),
+            center: None,
+        };
+        m.cluster.apply_split(&plan, t(1_000));
+
+        let after = m.cluster.recompute(&m.dht, t(1_000));
+        assert_eq!(after.id, plan.new_id, "the node moved");
+        assert!(
+            after.members.is_empty(),
+            "every peer still advertises the old id: {after:?}"
+        );
+
+        let table_after: Vec<NodeId> = m
+            .dht
+            .table_snapshot()
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(
+            table_after, table_before,
+            "no peer left the routing table; the partition is the tuple's doing"
+        );
+    }
+
+    /// `split_if_due` is the whole operation, not just the plan: it
+    /// moves the node and returns the id the heartbeat will announce.
+    #[test]
+    fn split_if_due_migrates_and_reports_the_new_id() {
+        let m = mesh();
+        prime_split_timer(&m);
+        assert!(m.cluster.plan_split(&m.dht, t(60_000)).is_none());
+
+        let new_id = m
+            .cluster
+            .split_if_due(&m.dht, split_due_at())
+            .expect("split due");
+        assert_eq!(m.cluster.info().id, new_id);
+        assert_eq!(
+            new_id,
+            fresh_cluster_id(&m.local, split_due_at(), 1),
+            "with no acceptable branch the node takes a fresh id"
+        );
+    }
+}
+

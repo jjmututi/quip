@@ -120,7 +120,15 @@ pub(crate) async fn cluster_task(
     let mut last: Option<([u8; 16], u64)> = None;
     loop {
         tick.tick().await;
-        let view = cluster.recompute(&dht, clock.now());
+        let now = clock.now();
+        let mut view = cluster.recompute(&dht, now);
+        // A split changes the id, which is itself a tuple change, so the
+        // publish below is the announcement — no separate send. The view
+        // is recomputed rather than reused because membership is
+        // filtered against the *new* id.
+        if view.split_due && cluster.split_if_due(&dht, now).is_some() {
+            view = cluster.recompute(&dht, now);
+        }
         let tuple = (view.id, view.size);
         if last == Some(tuple) {
             continue;

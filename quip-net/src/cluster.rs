@@ -206,6 +206,62 @@ pub enum MergeDecision {
 }
 
 // -------------------------------------------------------------------------
+// Split id derivation (§13.5)
+// -------------------------------------------------------------------------
+
+/// `hash` from §13.5, truncated to an id: SHA-256 over `data`, first 16
+/// bytes.
+#[cfg(feature = "crypto")]
+fn hash16(data: &[u8]) -> ClusterId {
+    let digest = crate::crypto::sha256_bytes(data);
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&digest[..16]);
+    out
+}
+
+/// The "near" branch's id: `cid^N = hash(cid)` (§13.5).
+///
+/// 6b's reading of §13.5's undefined `hash` is recorded in
+/// `docs/M9.6b-design.md` §8 and is provisional until the draft defines
+/// it: SHA-256 over the 16-byte id, truncated to 16 bytes.
+#[cfg(feature = "crypto")]
+pub fn near_cluster_id(cid: &ClusterId) -> ClusterId {
+    hash16(cid)
+}
+
+/// The "far" branch's id: `cid^N` with bit 0 of the first byte flipped.
+#[cfg(feature = "crypto")]
+pub fn far_cluster_id(cid: &ClusterId) -> ClusterId {
+    let mut far = near_cluster_id(cid);
+    far[0] ^= 0x01;
+    far
+}
+
+/// The key §13.5 looks up to find the cluster center: `hash(cid^N)`.
+///
+/// A full 256-bit XOR key, not a truncated id: it is a lookup key, not a
+/// cluster identifier.
+#[cfg(feature = "crypto")]
+pub fn center_lookup_key(cid: &ClusterId) -> NodeId {
+    crate::crypto::sha256_bytes(&near_cluster_id(cid))
+}
+
+/// A fresh cluster id for [`SplitAction::CreateNew`].
+///
+/// `SHA-256(local_node_id || now_ms || attempts)[..16]`. Not
+/// cryptographically random — there is no `rand` in the workspace and
+/// `quip-core` is `no_std` — but unpredictable to a remote peer and
+/// re-validated by acceptance on the far side.
+#[cfg(feature = "crypto")]
+pub fn fresh_cluster_id(node: &NodeId, now: Timestamp, attempts: u32) -> ClusterId {
+    let mut buf = Vec::with_capacity(44);
+    buf.extend_from_slice(node);
+    buf.extend_from_slice(&now.as_millis().to_be_bytes());
+    buf.extend_from_slice(&attempts.to_be_bytes());
+    hash16(&buf)
+}
+
+// -------------------------------------------------------------------------
 // Split decision (§13.5)
 // -------------------------------------------------------------------------
 
@@ -471,6 +527,23 @@ impl ClusterState {
         } else {
             SplitAction::CreateNew
         }
+    }
+
+    /// Move this node to a different cluster (§13.5).
+    ///
+    /// A new id and creation time; the member count resets to this node
+    /// alone; the coordinator is cleared, because a coordinator elected
+    /// by the old cluster does not lead the new one; and both the RTT
+    /// timer and the attempt counter reset, so the new cluster is not
+    /// born already due to split.
+    pub fn migrate(&mut self, new_id: ClusterId, now: Timestamp) {
+        self.id = new_id;
+        self.ctime = now;
+        self.size = 1;
+        self.coordinator = None;
+        self.coordinator_since = now;
+        self.rtt_exceeded_since = None;
+        self.split_attempts = 0;
     }
 
     /// Record a split attempt.
@@ -1021,4 +1094,78 @@ mod cluster_info_wire_tests {
     }
 }
 
+}
+
+#[cfg(test)]
+mod split_id_tests {
+    use super::*;
+
+    fn cid(b: u8) -> ClusterId {
+        [b; 16]
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn near_is_sha256_truncated_and_far_flips_bit_zero() {
+        let id = cid(0x21);
+        let near = near_cluster_id(&id);
+        let far = far_cluster_id(&id);
+
+        // Positive assertion, not `near != id`: the test is meaningful
+        // only if it pins the derivation to the hash it claims to use.
+        let digest = crate::crypto::sha256_bytes(&id);
+        assert_eq!(near, digest[..16], "near is hash(cid)[..16]");
+        assert_ne!(near, id, "the derivation actually moves the id");
+
+        assert_eq!(far[1..], near[1..], "only the first byte differs");
+        assert_eq!(near[0] ^ far[0], 0x01, "exactly bit 0 is flipped");
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn center_key_is_the_hash_of_the_near_id() {
+        let id = cid(0x42);
+        assert_eq!(
+            center_lookup_key(&id),
+            crate::crypto::sha256_bytes(&near_cluster_id(&id)),
+            "the lookup key is hash(cid^N), not cid^N"
+        );
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn fresh_id_depends_on_node_time_and_attempts() {
+        let node = [7u8; 32];
+        let a = fresh_cluster_id(&node, Timestamp::from_millis(1_000), 1);
+        assert_eq!(a, fresh_cluster_id(&node, Timestamp::from_millis(1_000), 1));
+
+        assert_ne!(a, fresh_cluster_id(&node, Timestamp::from_millis(1_001), 1));
+        assert_ne!(a, fresh_cluster_id(&node, Timestamp::from_millis(1_000), 2));
+        assert_ne!(
+            a,
+            fresh_cluster_id(&[8u8; 32], Timestamp::from_millis(1_000), 1)
+        );
+    }
+
+    #[test]
+    fn migrate_resets_the_state_that_must_not_carry_over() {
+        let cfg = ClusterConfig::for_level(ClusterLevel::Local);
+        let mut c = ClusterState::new(cid(1), cfg.level, Timestamp::from_secs(0));
+        c.update_size(40);
+        c.elect_coordinator([9u8; 32], Timestamp::from_secs(0));
+        c.note_rtt_observation(200, Timestamp::from_secs(0), &cfg);
+        c.split_attempts = 2;
+
+        c.migrate(cid(2), Timestamp::from_secs(500));
+
+        assert_eq!(c.id, cid(2));
+        assert_eq!(c.ctime, Timestamp::from_secs(500));
+        assert_eq!(c.size, 1, "a migrated cluster starts alone");
+        assert_eq!(c.coordinator, None, "the old coordinator does not lead");
+        assert_eq!(
+            c.rtt_exceeded_since, None,
+            "the new cluster is not born due to split"
+        );
+        assert_eq!(c.split_attempts, 0, "a successful move clears the counter");
+    }
 }

@@ -1,10 +1,9 @@
 # Conformance matrix
 
-**Status: third delivery.** The seven-field row schema, its vocabulary,
-and eight rows. §5.3.4's execution contract entered as the first
-`blocking` row and moved to `non-blocking` when the draft specified it;
-the decisive query's answer changed with it and is recorded below. The
-full pass is the next delivery.
+**Status: fourth delivery.** The eight-field schema, its vocabulary, and
+thirteen rows. The full pass is in progress: "What follows" inventories
+the sections still to convert, with their statement counts, so the
+remaining work is a list rather than an estimate.
 
 ## What this is
 
@@ -23,7 +22,7 @@ code or the text.
 
 ## Method
 
-Each row has seven fields:
+Each row has eight fields:
 
 | Field | Meaning |
 |---|---|
@@ -34,11 +33,12 @@ Each row has seven fields:
 | Verdict | `PASS` / `FAIL` / `PARTIAL` / `UNTESTED` |
 | Specification status | `clear` / `incomplete` / `ambiguous` / `silent` |
 | Submission impact | `blocking` / `review required` / `non-blocking` |
+| Depends on | The rows whose `Source` must exist for this row's `Source` to work; empty for a leaf |
 
 The first four are evidence: they are what makes the judgements
-checkable. The last three are judgements: does the code enforce the
+checkable. The next three are judgements: does the code enforce the
 sentence, is the sentence sufficient, and does the sentence stop the
-draft being submitted.
+draft being submitted. The last is structure: what this row stands on.
 
 Verdict vocabulary:
 
@@ -111,6 +111,7 @@ enough and the edit has not landed."
 - **Submission impact.** `non-blocking` — the code enforces the clause,
   the clause is clear, and the closure of the review's finding is
   evidence that it is workable as written.
+- **Depends on.** none (leaf).
 
 ### 2. §5.3.3 — witness independence — PASS
 
@@ -126,6 +127,7 @@ enough and the edit has not landed."
 - **Specification status.** clear — S10 was resolved in `71b52dc`.
 - **Submission impact.** `non-blocking` — resolved text and conformant
   code.
+- **Depends on.** none (leaf).
 
 ### 3. §13.5 — split attempt throttle — FAIL
 
@@ -157,6 +159,9 @@ enough and the edit has not landed."
   throttle matters; whether it blocks submission depends on whether the
   draft's editor considers the throttle essential. That is a decision,
   not a fact.
+- **Depends on.** none for the counter; the split's observable effect
+  depends on the cluster-info exchange (§3 of the M9.6b note), which has
+  no row of its own.
 
 ### 4. §4 — capability dependency closure — PARTIAL
 
@@ -194,6 +199,8 @@ enough and the edit has not landed."
 - **Submission impact.** `non-blocking` — the text is adequate; the gap
   is in the reference implementation, and it is a `PARTIAL` rather than
   a `FAIL` because the observable guarantee holds.
+- **Depends on.** row 1 — the negotiated set row 1's gate reads is the
+  same set this closure validates.
 
 ### 5. §5.3.3 — re-issue after expiry — PARTIAL
 
@@ -219,6 +226,7 @@ enough and the edit has not landed."
 - **Submission impact.** `review required` — the interoperability
   question (may a verifier treat an expired statement as a liveness
   signal?) is a decision.
+- **Depends on.** none (leaf).
 
 ### 6. §5.3.4 — checkpoint quorum — PARTIAL
 
@@ -240,6 +248,7 @@ enough and the edit has not landed."
 - **Submission impact.** `review required` — the difference between "5
   of 7" and "⌈2n/3⌉" is invisible at n = 7 and material at n = 5, which
   is a decision about whether other ring sizes are legal.
+- **Depends on.** none (leaf).
 
 ### 7. §13.4 — cluster merging — FAIL
 
@@ -269,6 +278,9 @@ enough and the edit has not landed."
 - **Submission impact.** `review required` — merge is how clusters
   converge to a stable size; leaving it unexecuted and undefined is
   either acceptable at this revision or not, and that is a decision.
+- **Depends on.** row 13 (the size estimate merge compares). A `FAIL`
+  dependency would leave merge's decision input unverified even if merge
+  had a caller.
 
 ### 8. §5.3.4 — execution contract for committed operations — FAIL
 
@@ -304,26 +316,155 @@ enough and the edit has not landed."
   for an independent implementer. The remaining gap is in the reference
   implementation (BFT-A item 1), which does not stop the draft being
   submitted.
+- **Depends on.** row 6 — a checkpoint is only stable at quorum, so a
+  divergent execution result is detected (if at all) at row 6's check.
+
+### 9. §10.1 — signing convention — PASS
+
+- **Clause.** A signature covers the message array with the signature
+  field removed, encoded with QUIP-CBOR.
+- **Requirement.** `MUST` sign the payload without the signature.
+- **Source.** `signing_payload()` on each wire type in
+  `quip-net/src/nat_wire.rs`, `quip-net/src/coral.rs` and
+  `quip-net/src/cluster.rs`. Called by each type's `verify`, and by the
+  senders that fill the signature (`dht_result_from`, the relay
+  responder, the cluster heartbeat).
+- **Test.** `connectivity_announce_signing_payload_excludes_signature`,
+  `relay_discovery_signing_payload_excludes_signature`,
+  `signing_payload_excludes_signature` (`cluster_info`), plus the
+  `*_verify_*` tests that fail when a covered field changes.
+- **Verdict.** PASS.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf).
+
+### 10. §5.3.3 — witness validity — PASS
+
+- **Clause.** "A witness statement is valid for 24 hours from
+  timestamp."
+- **Requirement.** `MUST` not count an expired statement.
+- **Source.** `ConnectionFlow::compute_kt_status` filters
+  `stmt.valid_until > now`; `WitnessStore::ingest` rejects an expired
+  statement on receipt. `compute_kt_status` is called by
+  `ConnectionFlow::on_discovery_complete`; `ingest` by `apply_inbound`'s
+  witness action.
+- **Test.** `expired_witnesses_do_not_count`,
+  `ingest_rejects_expired_statement`.
+- **Verdict.** PASS.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf).
+
+### 11. §5.3.3 — six-hour first-seen rule — PASS
+
+- **Clause.** "Each witness's Key Claim must have been first seen 6+
+  hours ago."
+- **Requirement.** `MUST` exclude a witness whose claim is younger than
+  six hours from the corroboration set.
+- **Source.** `WitnessStore::statements_for`, called by
+  `DiscoveryHandle::respond_to_lookup` (`quip-node/src/discovery.rs`).
+- **Test.** `statements_for_excludes_witnesses_younger_than_the_6h_window`,
+  `statements_for_includes_witnesses_past_the_6h_window`,
+  `statements_for_excludes_witnesses_without_first_seen`,
+  `statements_for_caps_at_the_statement_cap`; and end to end by
+  `six_nodes_stay_pending_before_first_seen_window` versus
+  `six_nodes_reach_verified_after_first_seen_window`.
+- **Verdict.** PASS.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf).
+
+### 12. §13.2 — cluster acceptance test — PASS
+
+- **Clause.** Obtain a random subset of at least 20 nodes and accept the
+  cluster when the 90th-percentile RTT is within the level's threshold.
+- **Requirement.** `MUST` run the test against at least 20 samples and
+  use the 90th percentile.
+- **Source.** `ClusterState::is_acceptable` and
+  `ACCEPTANCE_MIN_SAMPLES` (`quip-net/src/cluster.rs`), driven by
+  `ClusterHandle::recompute` (`quip-node/src/cluster.rs`), which
+  collects the RTT samples from the routing-eligible records.
+- **Test.** `acceptance_rejects_too_few_samples`,
+  `acceptance_accepts_all_within_threshold`,
+  `acceptance_rejects_when_p90_above_threshold`,
+  `acceptance_accepts_when_only_far_outliers`.
+- **Verdict.** PASS. Note that the sample source is the routing table,
+  not a random subset of the DHT; the test is on the local view, which
+  is what §13.2's members can observe.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf).
+
+### 13. §13.6 — cluster size estimate — PASS
+
+- **Clause.** "Nodes `MUST` maintain an estimate of their cluster size
+  for merging decisions", `size = 2^(average routing-table size)`.
+- **Requirement.** `MUST` maintain the estimate.
+- **Source.** `estimate_size_from_routing_table`
+  (`quip-net/src/cluster.rs`), called from
+  `ClusterHandle::recompute`, which feeds `ClusterState::update_size`.
+- **Test.** `estimate_size_from_routing_table_saturates`; the cluster
+  tests that assert `size` after `recompute`.
+- **Verdict.** PASS for the estimate; the decision that consumes it
+  (merge) is row 7 and does not run.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf); row 7 depends on this row.
 
 ## What follows
 
-The remaining rows are the draft's other normative statements: handshake
-and capability negotiation (§4, §16), the §10.1 signing conventions, the
-§12 NAT verbs and their limits, §13.2's acceptance test, §13.7–§13.8
-lookup and spillover, §5.3.4's BFT rounds and checkpoints, and §19.4's
-stream limits.
+**Coverage: 13 rows against 146 `MUST` and 104 `SHOULD` statements in
+104 sections.** The rows cover the decision points where the reference
+implementation gives a source to check against — the capability surface,
+the witness threshold, the BFT quorum and execution contract, the cluster
+acceptance and size rules, and the Coral merge/split decisions.
+Everything else is inventoried, not guessed: the counts come from a
+mechanical scan of `<bcp14>` tags per section, so the remaining work is a
+list rather than an estimate.
+
+Rows by section:
+
+| Section | Rows |
+|---|---|
+| §4 Handshake and profile negotiation | 1, 4 |
+| §5.3.3 Witness statements | 2, 5, 10, 11 |
+| §5.3.4 BFT consensus, operations, execution | 6, 8 |
+| §10.1 Signing convention | 9 |
+| §13.2 Cluster acceptance | 12 |
+| §13.4 Cluster merging | 7 |
+| §13.5 Cluster splitting | 3 |
+| §13.6 Cluster size estimation | 13 |
+
+Not yet covered, in the order the next passes should take them:
+
+1. **§4's remaining `MUST`s** — version negotiation, ALPN, the
+   capability-bit registry, extension handling. Mechanical (`clear`)
+   except the registry, which is `silent` where the draft names bits the
+   code does not use.
+2. **§5.3.4's remaining `MUST`s** — preprepare/prepare/precommit
+   ordering, view change, the `new_view` form, the checkpoint format.
+   This is BFT-A's remaining items and the most design-heavy group.
+3. **§8 CIDs and merkle range** — 16 `MUST`s, mostly `clear` and backed
+   by `quip-storage` tests.
+4. **§12 NAT** — 6 `MUST`s, backed by `nat.rs` / `nat_driver.rs` tests.
+5. **§7 governance and §14 sync verbs** — 15 `MUST`s, partly
+   unimplemented (quarantine, Trusted CID registration).
+6. **The capability registry, security considerations and appendices** —
+   mostly implementation guidance rather than interoperable behaviour;
+   they need a decision about whether they belong in a conformance
+   matrix at all.
 
 The estimate is **two passes, not one.** Where the draft is `clear`, the
 pass is mechanical: the comparison is a check, a row takes minutes, and
 the work parallelises without coordination. Where it is not, the pass is
 **design-time**: the judgement is whether an independent implementer
 would reach the same behaviour from the text, which is a question the
-code can inform and the draft's editor has to answer. Four of the eight
-rows here are design-time (`ambiguous` or `incomplete`); the two
-`incomplete` ones — §13.5's attempt episode and §13.4's merge — decide
-the submission schedule. Row 8 is `clear` and `FAIL`: its draft problem
-is closed, its implementation problem is not. The mechanical rows decide
-only how long the matrix takes to finish.
+code can inform and the draft's editor has to answer. Four of the
+thirteen rows are design-time (`ambiguous` or `incomplete`) — rows 3, 5,
+6 and 7; the two `incomplete` ones, §13.5's attempt episode and §13.4's
+merge, decide the submission schedule. Row 8 is `clear` and `FAIL`: its
+draft problem is closed, its implementation problem is not. The
+mechanical rows decide only how long the matrix takes to finish.
 
 Two conventions the full pass will keep:
 
@@ -342,6 +483,18 @@ that reads the function instead of its call sites. Two instances so far:
 (row 7), both with passing unit tests and no production caller. Row 3 is
 the sequencing variant of the same failure: `record_split_attempt` is
 called, and the limit it guards cannot be reached.
+
+A fourth: **name the dependency.** Every row names the rows whose
+`Source` it depends on. A row whose dependency is a `FAIL` is
+transitively at risk unless the dependency is optional; the risk is
+named in the row's `Verdict` field, not inferred by a reader.
+
+**Two views, one file.** The flat table is the matrix: the content, one
+row per clause. The topological sort of `Depends on` is the dependency
+tree: a derived view, not a separate artifact. When a row's dependency
+fails, the tree shows what is downstream of it; the flat table is where
+the row itself is read. The tree is not maintained separately, because a
+second copy of the edges would be wrong the first time a row is edited.
 
 **The decisive query returns four rows, none `blocking`.** It previously
 returned five with one `blocking`; the row that moved is row 8. §5.3.4's

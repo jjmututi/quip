@@ -1,13 +1,16 @@
 # The `apply()` contract — proposal
 
-**Status: adopted.** §5.3.4's "Application Execution Contract" states
-resolution (c) under the hook reading — the hook, the digest contract,
-the deterministic context, the failure contract and the empty-output
-default. What remains is the implementation: the reference code has no
-`validate` hook, does not include the `apply` output in the digest, and
-records a failure without covering it in the checkpoint (BFT-A item 1).
-The rest of this note is the reasoning that led to the choice, kept as
-the record of what was considered.
+**Status: adopted; digest construction specified in this note, outcome
+wire form and implementation pending.** §5.3.4's "Application Execution
+Contract" states resolution (c) under the hook reading — the hook, the
+digest contract, the deterministic context, the failure contract, the
+empty-output default and, since this revision, the digest binding. Two
+things remain. The outcome's wire form (discriminant encoding, payload
+bound, map key type) is named as an open item below; and the reference
+code has no `validate` hook, does not include the `apply` output in the
+digest, and records a failure without covering it in the checkpoint
+(BFT-A item 1). The rest of this note is the reasoning that led to the
+choice, kept as the record of what was considered.
 
 ## The gap
 
@@ -108,6 +111,65 @@ must write BFT" and "the developer writes operations and the
 protocol agrees on them." They are also the difference between the
 draft's current silence on execution and a draft a developer could
 read and use.
+
+## The digest binding
+
+The five paragraphs say the digest includes the `apply` output. They do
+not say how the output is canonically encoded or how it is bound into
+the digest, and without that, two independent implementations can both
+comply and compute different digests for the same state. Three
+paragraphs close the construction gap.
+
+**Canonical outcome.** The `apply` hook returns a protocol-defined
+`OperationOutcome`, not an application-defined `Result`. It has a
+discriminant — success or application-failure — and an optional bounded
+payload, and it is canonically CBOR-encoded under the draft's existing
+rules. A success with no payload is distinguishable from a success with
+an empty payload; a failure with a code is distinguishable from a
+failure with a message. Error strings are not the payload; a string
+would not encode identically across implementations and would make the
+digest platform-dependent.
+
+**Digest construction.** The state digest is computed as the protocol's
+hash over a canonical CBOR map with three required keys: the operation
+(the same canonical form the preprepare's digest uses), the prior state
+digest — carried as `state_digest` in `bft_checkpoint` and restated as
+`checkpoint_digest` in `bft_state_transfer` — and the `OperationOutcome`.
+Keys are ordered by the draft's canonical map ordering. The resulting
+digest is the new state commitment. This is the same shape as the
+preprepare's existing
+`SHA-256(ring_id || view || sequence || QUIP-CBOR(operation))`; the state
+digest should match the draft's existing digest conventions rather than
+introduce new ones.
+
+**Checkpoint relation.** `checkpoint_digest` is the state digest. A
+checkpoint carries it as `state_digest`; `bft_state_transfer` restates it
+as `checkpoint_digest`. Neither re-derives a different digest from the
+state. That is what makes "the state digest" in §5.3.4 mean a specific
+quantity rather than a family of them.
+
+Two consequences follow and should be named in the draft. First,
+divergence is detected at checkpoint quorum, not repaired — the
+protocol's answer to a failed quorum is a view change, and the
+view-change protocol's handling of divergent replicas is BFT-A items 2
+and 3. The draft should say the protocol detects and does not repair, so
+a reader does not assume the checkpoint heals state it finds
+inconsistent. Second, the outcome type is protocol-defined because the
+digest is protocol-defined: an application that invents its own outcome
+encoding is not conformant even if it "includes the output", because the
+output's encoding is what the digest covers.
+
+**What this still leaves open.** The three paragraphs fix the
+construction, not every octet of it. The discriminant's encoding (a
+numeric tag or a text string), the payload's bound, and whether the map
+keys are text or integers are still choices, and two implementers could
+diverge on any of them while following the paragraphs above. They must be
+fixed in the draft, not in an implementation note, before the clause is
+implementable — which is why the matrix keeps row 8 `incomplete` after
+the transcription rather than returning it to `clear`. The proposal: text
+keys (`"operation"`, `"prior_state_digest"`, `"outcome"`), a text
+discriminant (`"success"` / `"application-failure"`), and a 256-byte
+payload bound.
 
 ## The three resolutions
 
@@ -231,3 +293,9 @@ The five paragraphs above, in §5.3.4, with this as their normative core:
 4. **Does `ApplyFailed` feed fault suspicion?** Under (c), persistent
    disagreement about a *result* is evidence of a faulty replica, and the
    draft does not yet say what a ring does with that evidence.
+5. **What is the `OperationOutcome` wire form?** The digest construction
+   is specified; the encoding of the discriminant, the payload bound, and
+   whether the map keys are text or integers are not. The proposal in
+   "The digest binding" is text keys, a text discriminant, and 256 bytes;
+   whichever is chosen has to be in the draft, because the digest covers
+   the encoding.

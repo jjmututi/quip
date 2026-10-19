@@ -309,13 +309,20 @@ enough and the edit has not landed."
   apply output does not enter `state_digest`, and a failure is an event
   the checkpoint does not cover. The contract is no longer ambiguous;
   the code is behind it.
-- **Specification status.** clear — §5.3.4's "Application Execution
-  Contract" states the hook, the digest contract, the deterministic
-  context, the failure contract and the empty-output default.
-- **Submission impact.** `non-blocking` — the draft is precise enough
-  for an independent implementer. The remaining gap is in the reference
-  implementation (BFT-A item 1), which does not stop the draft being
-  submitted.
+- **Specification status.** **incomplete** — the draft specifies what the
+  digest must contain and, since the digest-binding paragraphs, how it is
+  constructed. It does not fix the `OperationOutcome` wire form: the
+  discriminant's encoding, the payload's bound, and whether the map keys
+  are text or integers are still choices. Two independent implementers
+  could both comply and compute different digests for the same state, and
+  their checkpoints would never reach quorum. The three paragraphs in
+  `docs/apply-contract.md` §"The digest binding" are the construction fix;
+  the wire form is the remaining open item (that note's question 5).
+- **Submission impact.** `review required` — the construction is stated
+  and the remaining question is a decision about encoding, not a fact
+  about the code. Until it is made, two parties cannot implement the
+  clause identically; whether that blocks submission is the draft
+  editor's call.
 - **Depends on.** row 6 — a checkpoint is only stable at quorum, so a
   divergent execution result is detected (if at all) at row 6's check.
 
@@ -459,12 +466,13 @@ pass is mechanical: the comparison is a check, a row takes minutes, and
 the work parallelises without coordination. Where it is not, the pass is
 **design-time**: the judgement is whether an independent implementer
 would reach the same behaviour from the text, which is a question the
-code can inform and the draft's editor has to answer. Four of the
+code can inform and the draft's editor has to answer. Five of the
 thirteen rows are design-time (`ambiguous` or `incomplete`) — rows 3, 5,
-6 and 7; the two `incomplete` ones, §13.5's attempt episode and §13.4's
-merge, decide the submission schedule. Row 8 is `clear` and `FAIL`: its
-draft problem is closed, its implementation problem is not. The
-mechanical rows decide only how long the matrix takes to finish.
+6, 7 and 8; the three `incomplete` ones — §5.3.4's digest binding,
+§13.5's attempt episode and §13.4's merge — decide the submission
+schedule. Row 8 is `FAIL` on the code and `incomplete` in the draft: two
+gaps in one row. The mechanical rows decide only how long the matrix
+takes to finish.
 
 Two conventions the full pass will keep:
 
@@ -496,13 +504,12 @@ fails, the tree shows what is downstream of it; the flat table is where
 the row itself is read. The tree is not maintained separately, because a
 second copy of the edges would be wrong the first time a row is edited.
 
-**The decisive query returns four rows, none `blocking`.** It previously
-returned five with one `blocking`; the row that moved is row 8. §5.3.4's
-"Application Execution Contract" now states what execution must do, so
-the row's specification status is `clear` and its submission impact is
-`non-blocking`. Its verdict stays `FAIL`, and that is the point: the
-draft says what the code must do and the code does not yet do it — an
-implementation gap against a stated obligation, not a draft that cannot
-be conformed to. The four remaining decisions are §13.5's attempt
-episode and §13.4's merge (`incomplete`) and §5.3.3's re-issue and
-§5.3.4's quorum (`ambiguous`).
+**The decisive query returns five rows, none `blocking`; all five are
+`review required`.** It previously returned four — rows 3, 5, 6 and 7.
+Row 8 re-entered it: the digest-binding paragraphs state how the state
+digest is constructed, but the `OperationOutcome` wire form is still a
+choice, so the clause cannot be implemented identically by two parties
+yet. The row did not return to `blocking` because what remains is an
+encoding decision rather than a missing contract, and it did not stay
+`non-blocking` because "two implementers could diverge" is exactly what
+`non-blocking` promises cannot happen.

@@ -160,7 +160,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests): eight-field schema (with `Depends on`), vocabulary and thirteen rows in `docs/conformance-matrix.md`; coverage table inventories the remaining 146 `MUST` / 104 `SHOULD` statements by section | in progress |
+| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, thirteen rows, and a coverage table for the remaining 146 `MUST` / 104 `SHOULD` statements by section. Row 8 reclassified to `incomplete`/`review required`: the digest construction is specified, the `OperationOutcome` wire form is not | in progress |
 
 ---
 
@@ -1334,7 +1334,13 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    and a failure is not covered by the checkpoint. The conformance
    matrix records this as row 8: `FAIL` on the code, `clear` in the
    draft, `non-blocking` for submission. The note that argued for (c)
-   is `docs/apply-contract.md`, now marked adopted.
+   is `docs/apply-contract.md`, now marked adopted. The digest binding —
+   how the apply output is encoded and bound into the state digest — is
+   now specified in §5.3.4 and in that note's "The digest binding"
+   section. The `OperationOutcome` wire form (discriminant encoding,
+   payload bound, map key type) is the remaining open item; until it is
+   fixed, conformance-matrix row 8 stays `incomplete` and
+   `review required`.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

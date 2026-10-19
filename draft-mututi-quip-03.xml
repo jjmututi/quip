@@ -1592,8 +1592,9 @@ Operation = {
             application semantics are defined by this specification.</t>
 
             <t><strong>The digest contract.</strong> The state digest a
-            replica commits, and that a checkpoint carries as
-            <tt>checkpoint_digest</tt>, <bcp14>MUST</bcp14> include the
+            replica commits, which <tt>bft_checkpoint</tt> carries as
+            <tt>state_digest</tt> and <tt>bft_state_transfer</tt> restates
+            as <tt>checkpoint_digest</tt>, <bcp14>MUST</bcp14> include the
             output of the <tt>apply</tt> hook. An <tt>apply</tt> hook that
             produces no output means "no state transition" and is the
             default for applications with nothing to execute.</t>
@@ -1620,6 +1621,35 @@ Operation = {
             no execution state produce no output. The digest treats the
             empty output as unchanged. The <em>sequence</em> of operations
             is what is agreed; the outputs are the application's.</t>
+
+            <t><strong>The outcome.</strong> The <tt>apply</tt> hook
+            returns a protocol-defined <tt>OperationOutcome</tt>, not an
+            application-defined result. It has a discriminant for success
+            and application-failure, and an optional bounded payload, and
+            it is canonically CBOR-encoded
+            (<xref target="cbor"/>). A success with no payload is
+            distinguishable from a success with an empty payload.</t>
+
+            <t><strong>Digest construction.</strong> The state digest is
+            the protocol's hash over a canonical CBOR map with three
+            required keys: the operation, in the canonical form the
+            preprepare digest above uses; the prior state digest, carried
+            as <tt>state_digest</tt> in <tt>bft_checkpoint</tt> and
+            restated as <tt>checkpoint_digest</tt> in
+            <tt>bft_state_transfer</tt>; and the
+            <tt>OperationOutcome</tt>. Keys are ordered by the canonical
+            map ordering this specification uses. The construction follows
+            the preprepare digest above: SHA-256 over a canonical
+            QUIP-CBOR encoding.</t>
+
+            <t><strong>Checkpoint relation.</strong>
+            <tt>checkpoint_digest</tt> is the state digest. A checkpoint
+            carries it as <tt>state_digest</tt> and
+            <tt>bft_state_transfer</tt> restates it as
+            <tt>checkpoint_digest</tt>; neither re-derives a different
+            digest from the state. Divergence is detected at checkpoint
+            quorum and is not repaired by the checkpoint mechanism: the
+            protocol's answer to a failed quorum is a view change.</t>
           </section>
         </section>
         

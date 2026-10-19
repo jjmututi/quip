@@ -97,7 +97,7 @@
 
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
-use quip_net::cluster::ClusterInfo;
+use quip_net::cluster::{ClusterInfo, ClusterInfoAnnounce};
 use quip_net::coral::select_witness_ring;
 use quip_net::crypto::Ed25519Verifier;
 use quip_net::dht::RttClass;
@@ -383,6 +383,21 @@ impl DhtHandle {
     ///
     /// A send failure means the handle is being dropped; losing the
     /// result then is fine.
+    /// Announce this node's cluster tuple to every connected peer
+    /// (§13.4).
+    ///
+    /// Broadcast, not mesh-routed: the tuple describes the sender, so
+    /// every neighbour is an interested party. `target: None, key: None`
+    /// is the router's broadcast arm.
+    pub fn publish_cluster_info(&self, announce: ClusterInfoAnnounce) {
+        let _ = self.inner.outbound_tx.send(Outbound {
+            target: None,
+            key: None,
+            msg: Message::ClusterInfo(announce),
+        });
+    }
+
+    /// Enqueue a routed [`DhtResult`] for the node's inbound handler.
     pub fn enqueue(&self, result: DhtResult) {
         let _ = self.inner.inbound_tx.send(result);
     }

@@ -476,6 +476,10 @@ pub struct Node<B = MemoryBlobStore> {
     /// The DHT router task, draining the DHT's outbound queue and
     /// forwarding each message to connected peers. Aborted on `Drop`.
     dht_task: Option<JoinHandle<()>>,
+    /// The cluster heartbeat task, announcing this node's `cluster_info`
+    /// when its tuple changes (§13.4). Aborted on `Drop`: it would
+    /// otherwise keep publishing into a DHT whose router has gone.
+    heartbeat_task: Option<JoinHandle<()>>,
     /// The node's shared Coral discovery client.
     discovery: DiscoveryHandle,
     /// The node's trust policy. Shared with every peer task and with
@@ -562,6 +566,15 @@ where
         cluster_id.copy_from_slice(&local_id[..16]);
         let cluster = ClusterHandle::new(cluster_id, ClusterLevel::Local, clock.now());
 
+        // The heartbeat task needs the cluster handle, so it is spawned
+        // here rather than beside the DHT router above.
+        let heartbeat_task = tokio::spawn(tasks::cluster_task(
+            cluster.clone(),
+            dht.clone(),
+            Arc::clone(&clock),
+            Arc::clone(&signer),
+        ));
+
         let accept_endpoint = Arc::clone(&endpoint);
         let accept_peers = Arc::clone(&peers);
         let accept_tasks = Arc::clone(&peer_tasks);
@@ -573,6 +586,7 @@ where
         let accept_trust = Arc::clone(&trust);
         let accept_witness = witness.clone();
         let accept_signer = Arc::clone(&signer);
+        let accept_cluster = cluster.clone();
         let auto_serve = config.auto_serve_pins;
         let relay_capable = config.relay_capable;
         let force_relay = config.force_relay;
@@ -592,6 +606,7 @@ where
                 accept_trust,
                 accept_witness,
                 accept_signer,
+                accept_cluster,
             )
             .await;
         });
@@ -612,6 +627,7 @@ where
             accept_task: Some(accept_task),
             dht,
             dht_task: Some(dht_task),
+            heartbeat_task: Some(heartbeat_task),
             discovery,
             trust,
             claim_log,
@@ -657,6 +673,7 @@ where
             &self.witness,
             self.store.as_ref(),
             &self.signer,
+            &self.cluster,
         )
         .await?;
 
@@ -704,6 +721,7 @@ where
         let witness = self.witness.clone();
         let task_peers = Arc::clone(&peers);
         let signer = Arc::clone(&self.signer);
+        let cluster = self.cluster.clone();
         let local_id = self.local_claim.node_id;
         let handle = tokio::spawn(async move {
             // The client endpoint must outlive the connection, so it
@@ -728,6 +746,7 @@ where
                 witness,
                 task_peers,
                 signer,
+                cluster,
             )
             .await;
             unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
@@ -1071,6 +1090,9 @@ impl<B> Drop for Node<B> {
             task.abort();
         }
         if let Some(task) = self.dht_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.heartbeat_task.take() {
             task.abort();
         }
         // Abort peer tasks. `try_lock` is safe inside a Drop that may

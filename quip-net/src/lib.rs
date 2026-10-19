@@ -149,8 +149,9 @@ pub use coral::{
     SpilloverRequest, SpilloverResponse,
 };
 pub use cluster::{
-    estimate_size_from_routing_table, ClusterConfig, ClusterId, ClusterInfo, ClusterLevel,
-    ClusterState, MergeDecision, SplitAction, ACCEPTANCE_MIN_SAMPLES,
+    estimate_size_from_routing_table, ClusterConfig, ClusterId, ClusterInfo,
+    ClusterInfoAnnounce, ClusterLevel, ClusterState, MergeDecision, SplitAction,
+    ACCEPTANCE_MIN_SAMPLES,
 };
 pub use discovery::{
     DiscoveryFailure, DiscoveryPhaseKind, DiscoveryStatus, Outbound, SpilloverResponseCache,

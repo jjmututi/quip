@@ -30,7 +30,7 @@ use quip_net::nat_wire::{
 use quip_net::transport::{
     ClientConfig, ConnectionDriver, Endpoint, Event,
 };
-use quip_net::{Error, GATEWAY_ROUTER_COUNT, Result};
+use quip_net::{Error, GATEWAY_ROUTER_COUNT, Result, CLUSTER_HEARTBEAT_S};
 use quip_storage::blob::BlobStore;
 use quip_storage::QuipStore;
 
@@ -39,6 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
+use crate::cluster::ClusterHandle;
 use crate::dht;
 use crate::dht::DhtHandle;
 use crate::discovery::DiscoveryHandle;
@@ -94,6 +95,45 @@ pub(crate) async fn dht_router_task(
     }
 }
 
+/// Publish this node's `cluster_info` when its tuple changes (§13.4).
+///
+/// The first background task in `quip-node` not tied to a peer
+/// connection: it owns no socket and touches only the cluster handle and
+/// the DHT outbound queue. [`crate::Node`]'s `Drop` aborts it. Without
+/// that abort it would keep publishing into a DHT channel whose router
+/// is gone; the send is fallible and the failure silent, which is the
+/// same leak the peer-task aborts prevent.
+///
+/// The tick is `CLUSTER_HEARTBEAT_S`, which is also the design note's
+/// "at most once per heartbeat per peer" bound. A tuple is re-announced
+/// only when `(id, size)` changes, so a quiet mesh stays quiet, and a
+/// newly connected peer is picked up because the routing table — and
+/// therefore the size estimate — changed.
+pub(crate) async fn cluster_task(
+    cluster: ClusterHandle,
+    dht: DhtHandle,
+    clock: SharedClock,
+    signer: SharedSigner,
+) {
+    let mut tick = tokio::time::interval(Duration::from_secs(CLUSTER_HEARTBEAT_S));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last: Option<([u8; 16], u64)> = None;
+    loop {
+        tick.tick().await;
+        let view = cluster.recompute(&dht, clock.now());
+        let tuple = (view.id, view.size);
+        if last == Some(tuple) {
+            continue;
+        }
+        // A signing failure leaves `last` unset, so the next tick
+        // retries rather than treating the failed announce as sent.
+        if let Ok(announce) = cluster.signed_info(signer.as_ref()) {
+            dht.publish_cluster_info(announce);
+            last = Some(tuple);
+        }
+    }
+}
+
 /// Accept inbound connections, drive each handshake, spawn a peer loop.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn accept_loop<B>(
@@ -111,6 +151,7 @@ pub(crate) async fn accept_loop<B>(
     trust: SharedTrust,
     witness: WitnessStore,
     signer: SharedSigner,
+    cluster: ClusterHandle,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -135,6 +176,7 @@ pub(crate) async fn accept_loop<B>(
         let trust = Arc::clone(&trust);
         let witness = witness.clone();
         let signer = Arc::clone(&signer);
+        let cluster = cluster.clone();
 
         // The accept loop cannot know the peer's NodeId until the
         // handshake completes, so the peer task registers itself under
@@ -150,6 +192,7 @@ pub(crate) async fn accept_loop<B>(
                 &witness,
                 store.as_ref(),
                 &signer,
+                &cluster,
             )
             .await
             {
@@ -219,6 +262,7 @@ pub(crate) async fn accept_loop<B>(
                 witness,
                 task_peers,
                 signer,
+                cluster,
             )
             .await;
             unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
@@ -238,6 +282,7 @@ pub(crate) async fn drive_handshake<B>(
     witness: &WitnessStore,
     store: &Mutex<QuipStore<B>>,
     signer: &SharedSigner,
+    cluster: &ClusterHandle,
 ) -> Result<NodeId>
 where
     B: BlobStore + Send + Sync + 'static,
@@ -247,6 +292,7 @@ where
         witness,
         store,
         signer,
+        cluster,
     };
     loop {
         let now = clock.now();
@@ -369,6 +415,12 @@ struct InboundOptions {
     serve_relay_discovery: bool,
     serve_coral: bool,
     serve_pins: bool,
+    /// Record a peer's `cluster_info` (§13.4). Never enabled during the
+    /// handshake: the tuple describes membership, and a node that has
+    /// not finished establishing is not yet a neighbour — recording it
+    /// would file a claim before either side had an authenticated peer
+    /// id to file it under.
+    serve_cluster_info: bool,
 }
 
 impl InboundOptions {
@@ -377,30 +429,35 @@ impl InboundOptions {
         serve_relay_discovery: false,
         serve_coral: false,
         serve_pins: false,
+        serve_cluster_info: false,
     };
     /// §12 NAT phase: relay and Coral are served; pins are not.
     const NAT: Self = Self {
         serve_relay_discovery: true,
         serve_coral: true,
         serve_pins: false,
+        serve_cluster_info: true,
     };
     /// Witness discovery: relay and Coral are served; pins are not.
     const DISCOVERY: Self = Self {
         serve_relay_discovery: true,
         serve_coral: true,
         serve_pins: false,
+        serve_cluster_info: true,
     };
     /// Established: everything this layer owns.
     const STEADY: Self = Self {
         serve_relay_discovery: true,
         serve_coral: true,
         serve_pins: true,
+        serve_cluster_info: true,
     };
     /// T3 datagrams carry no §12/§13 verbs; only witness ingest applies.
     const DATAGRAM: Self = Self {
         serve_relay_discovery: false,
         serve_coral: false,
         serve_pins: false,
+        serve_cluster_info: false,
     };
 }
 
@@ -416,6 +473,9 @@ enum InboundAction {
     Nat,
     /// A §13 Coral verb: serve or ingest it.
     Coral,
+    /// A `cluster_info` from the connection's peer: verify, record, and
+    /// answer if our tuple differs (§13.4).
+    ClusterInfo,
     /// An auto-served pin verb.
     Pins,
     /// Nothing this layer owns.
@@ -450,6 +510,12 @@ fn classify_inbound(
     }
     if opts.serve_coral && is_coral_verb(msg) {
         return InboundAction::Coral;
+    }
+    // A `cluster_info` is only meaningful against an authenticated
+    // sender: the tuple carries no node id, so with no peer there is
+    // nothing to record it under.
+    if opts.serve_cluster_info && peer.is_some() && matches!(msg, Message::ClusterInfo(_)) {
+        return InboundAction::ClusterInfo;
     }
     if opts.serve_pins && is_pin_verb(msg) {
         return InboundAction::Pins;
@@ -487,6 +553,9 @@ struct InboundDeps<'a, B> {
     witness: &'a WitnessStore,
     store: &'a Mutex<QuipStore<B>>,
     signer: &'a SharedSigner,
+    /// Read for the local tuple and written for a verified neighbour
+    /// announcement (§13.4).
+    cluster: &'a ClusterHandle,
 }
 
 /// The outcome of applying an [`InboundAction`].
@@ -572,6 +641,29 @@ where
                 deps.witness,
             )
             .await;
+            InboundOutcome::Handled
+        }
+        InboundAction::ClusterInfo => {
+            if let (Message::ClusterInfo(announce), Some(peer)) = (&msg, peer) {
+                // Three steps, in this order: verify against the
+                // authenticated sender, record unconditionally, and only
+                // then decide about a reply. The id filter runs at read
+                // time in `recompute`; applying it here would hide the
+                // announcement and require re-verification after every
+                // local-id change.
+                if matches!(announce.verify(&peer, &Ed25519Verifier), Ok(true))
+                    && deps
+                        .cluster
+                        .observe_cluster_info(peer, announce.info.clone(), now)
+                {
+                    let local = deps.cluster.info();
+                    if local.id != announce.info.id {
+                        if let Ok(reply) = deps.cluster.signed_info(deps.signer.as_ref()) {
+                            let _ = driver.send(&Message::ClusterInfo(reply), now).await;
+                        }
+                    }
+                }
+            }
             InboundOutcome::Handled
         }
         InboundAction::Pins => {
@@ -1573,6 +1665,7 @@ pub(crate) async fn peer_run<B>(
     witness: WitnessStore,
     peers: PeerRegistry,
     signer: SharedSigner,
+    cluster: ClusterHandle,
 ) where
     B: BlobStore + Send + Sync + 'static,
 {
@@ -1589,6 +1682,7 @@ pub(crate) async fn peer_run<B>(
         witness: &witness,
         store: store.as_ref(),
         signer: &signer,
+        cluster: &cluster,
     };
 
     // `drive_handshake` returns only after the §16 Key Claim exchange,
@@ -2045,6 +2139,7 @@ mod tests {
                 serve_relay_discovery: false,
                 serve_coral: false,
                 serve_pins: false,
+                serve_cluster_info: false,
             },
         );
         assert_eq!(
@@ -2053,6 +2148,7 @@ mod tests {
                 serve_relay_discovery: true,
                 serve_coral: true,
                 serve_pins: false,
+                serve_cluster_info: true,
             },
         );
         assert_eq!(
@@ -2061,6 +2157,7 @@ mod tests {
                 serve_relay_discovery: true,
                 serve_coral: true,
                 serve_pins: false,
+                serve_cluster_info: true,
             },
         );
         assert_eq!(
@@ -2069,6 +2166,7 @@ mod tests {
                 serve_relay_discovery: true,
                 serve_coral: true,
                 serve_pins: true,
+                serve_cluster_info: true,
             },
         );
         assert_eq!(
@@ -2077,6 +2175,7 @@ mod tests {
                 serve_relay_discovery: false,
                 serve_coral: false,
                 serve_pins: false,
+                serve_cluster_info: false,
             },
         );
     }
@@ -2091,6 +2190,44 @@ mod tests {
                 "AnnounceWitness must be ingested with {opts:?}",
             );
         }
+    }
+
+    /// `cluster_info` is recorded in every phase that has an established
+    /// membership. Not a handshake verb — the claim would arrive before
+    /// both sides had negotiated capabilities — and not a datagram verb.
+    #[test]
+    fn cluster_info_is_recorded_after_the_handshake() {
+        let msg = Message::ClusterInfo(quip_net::cluster::ClusterInfoAnnounce {
+            info: quip_net::cluster::ClusterInfo {
+                id: [1u8; 16],
+                size: 2,
+                ctime: t(0),
+            },
+            signature: [0u8; 64],
+        });
+        let peer = nid(4);
+
+        for opts in [
+            InboundOptions::NAT,
+            InboundOptions::DISCOVERY,
+            InboundOptions::STEADY,
+        ] {
+            assert_eq!(
+                classify(&msg, opts, peer),
+                InboundAction::ClusterInfo,
+                "cluster_info must be recorded with {opts:?}",
+            );
+        }
+        assert_eq!(
+            classify(&msg, InboundOptions::HANDSHAKE, peer),
+            InboundAction::Unhandled,
+            "pre-establishment frames are not recorded",
+        );
+        assert_eq!(
+            classify_inbound(&msg, InboundOptions::STEADY, None, &nid(9), true),
+            InboundAction::Unhandled,
+            "no authenticated sender, nothing to record",
+        );
     }
 
     #[test]

@@ -70,7 +70,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~729 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~739 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -106,16 +106,16 @@ RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
 cargo build -p quip-core -p quip-storage -p quip-net --no-default-features
 ```
 
-Baseline on `main` after Pre-6b:
+Baseline on `main` after M9.6b part 1:
 
 ```
 quip-core      74 passed
-quip-net      487 passed
+quip-net      491 passed
 quip-storage   57 passed
-quip-node     111 passed
+quip-node     117 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~729 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~739 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -142,9 +142,10 @@ doc-tests       4 passed (one per crate)
 | M9.5b-b | `quip-node`: `PeerSlot`, `PeerLifecycle`, `ConnectionDriver::rtt()` | landed |
 | M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster membership and XOR routing; cluster split execution deferred to M9.6b | landed |
 | M9.6a | `quip-node`: witness accumulation, store, responder, issuance policy | landed |
-| M9.6b | `quip-node`: cluster-info exchange and split execution | not started |
+| M9.6b | `quip-node`: cluster-info exchange and split execution | in progress |
 | M9.6c | `quip-node`: trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
+| M9.8 | `quip-node`: peer address book and bootstrap | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
 | M10.2 | `quip-node-ffi`: event stream across the FFI boundary | landed |
 | M10.3 | `quip-node-ffi`: explicit trust policy and peer trust events | landed |
@@ -156,6 +157,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Membership boundaries and pin authorization model | not started |
+| Conformance | Draft-clause conformance matrix (draft ↔ code ↔ tests); starts after M9.6b | not started |
 
 ---
 
@@ -978,6 +980,67 @@ drops: that requires a test-only gate that parks a peer mid-phase, which
 is a larger surface than the frame injection and is not added. A future
 instance of this class that escapes both the unit tests and CI would
 escape for the same reason these did.
+
+### M9.6b part 1 — cluster-info exchange — LANDED (milestone in progress)
+
+§13.4's tuple exists as a `ClusterInfo` value and as a split branch; it
+was never on the wire, so a node could not learn a neighbour's cluster
+id and the id filter §13.5 implies had nothing to read. This part puts
+the tuple on the wire and applies the filter. Split *execution* is part
+two; the milestone row stays `in progress` until it lands, because the
+row's scope says "exchange and split execution" and only half is here.
+
+- `quip-net`: `ClusterInfoAnnounce` — `[cluster_id, size, ctime,
+  signature]` over `["quip-v1", "cluster_info", …]`. The tuple carries
+  no node id: `verify(sender, v)` takes the authenticated peer id, the
+  shape `RelayResponse` already uses. New T0 verb; capability
+  `DHT_DISCOVERY`, which is in the baseline set, so no new bit.
+- `quip-node::cluster`: `NeighbourClusters`, keyed by the authenticated
+  sender, last write wins, bounded at `MAX_NEIGHBOUR_CLUSTERS`.
+  `observe` rejects `size == 0` and a `ctime` more than
+  `MAX_CTIME_SKEW_MS` ahead; the signature check is the caller's.
+- `is_cluster_member(neighbours, peer, local_id)` — unknown is a
+  member, a different advertised id is not. `recompute` filters with
+  it. `is_routing_eligible` is unchanged: the conjunct belongs at the
+  call sites that mean "member", not in the predicate that means
+  "reachable".
+- `cluster_task` publishes on `(id, size)` change, once per
+  `CLUSTER_HEARTBEAT_S`, as a broadcast. `Node` holds its `JoinHandle`
+  and `Drop` aborts it — the first background task in the crate not
+  tied to a peer connection, so the abort had to be added rather than
+  inherited.
+- Inbound: `serve_cluster_info` is on for NAT, discovery and steady,
+  off for handshake and datagrams; `classify_inbound` also requires an
+  authenticated peer, because the tuple has no id to file it under.
+  `apply_inbound` verifies, records, and replies only when our id
+  differs, which converges in at most four messages.
+
+**Record is not member.** The record is written after the signature
+verifies and *without* consulting the id; the filter runs at read time.
+A neighbour announcing a foreign id stays in the store — filtering at
+write time would require re-verifying the store after every local-id
+change, which is the bug class the filter exists to prevent, and it
+would make a local split unobservable.
+
+Deliberately not here: split execution; merge; a real DHT lookup for
+the center (deferred to M9.8, the peer address book); sloppy
+replication.
+
+Tests: `ClusterInfoAnnounce` roundtrip, verb and arity rejection,
+signature verified against the sender and rejected for another
+(`cluster.rs`, `quip-net`); the verb in the all-variants roundtrip
+(`message.rs`); unknown/foreign/boundary filter behaviour and
+signed-tuple verification (`cluster.rs`, `quip-node`); the phase table
+and `cluster_info` per phase (`tasks.rs`).
+
+**What the tests do not prove.** No test runs two nodes and waits for a
+heartbeat. The interval is `CLUSTER_HEARTBEAT_S`, so a live test would
+either sleep that long or need an injectable interval; neither is
+added. The exchange is proven piecewise — the wire form round-trips,
+the classifier routes it in three phases and not two, the store accepts
+and rejects the right tuples, the filter excludes a foreign id — but
+not end to end. The split test in part 2 is the first test that
+observes the exchange's *effect*.
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 

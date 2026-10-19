@@ -56,6 +56,7 @@
 //! the spec instead intended to inline the inner fields, the wire shape
 //! would have to change in both this crate and `quip-core`.
 
+use crate::cluster::ClusterInfoAnnounce;
 use crate::codec::{as_bytes, as_u64, envelope, fields, verb_of};
 use crate::coral::{
     CoralLookup, CrossPathResult, CrossPathValidation, LookupResponse, SpilloverRequest,
@@ -363,6 +364,8 @@ pub enum Message {
     CrossPathValidation(CrossPathValidation),
     /// `cross_path_result` — the outcome of cross-path validation (§13.8).
     CrossPathResult(CrossPathResult),
+    /// `cluster_info` — a neighbour's cluster tuple (§13.4, §13.5).
+    ClusterInfo(ClusterInfoAnnounce),
     /// `connectivity_announce` — DHT connectivity advertisement (§12.1).
     ConnectivityAnnounce(ConnectivityAnnounce),
     /// `candidate_announce` — ICE-like candidate offer (§12.3).
@@ -450,6 +453,7 @@ impl Message {
             Message::SpilloverResponse(_) => "spillover_response",
             Message::CrossPathValidation(_) => "cross_path_validation",
             Message::CrossPathResult(_) => "cross_path_result",
+            Message::ClusterInfo(_) => "cluster_info",
             Message::ConnectivityAnnounce(_) => "connectivity_announce",
             Message::CandidateAnnounce(_) => "candidate_announce",
             Message::RelayDiscovery(_) => "relay_discovery",
@@ -503,6 +507,7 @@ impl Message {
             | Message::SpilloverResponse(_)
             | Message::CrossPathValidation(_)
             | Message::CrossPathResult(_)
+            | Message::ClusterInfo(_)
             | Message::ConnectivityAnnounce(_)
             | Message::CandidateAnnounce(_)
             | Message::RelayDiscovery(_)
@@ -555,7 +560,8 @@ impl Message {
             | Message::Spillover(_)
             | Message::SpilloverResponse(_)
             | Message::CrossPathValidation(_)
-            | Message::CrossPathResult(_) => {
+            | Message::CrossPathResult(_)
+            | Message::ClusterInfo(_) => {
                 Some(crate::handshake::Capabilities::DHT_DISCOVERY)
             }
             Message::ConnectivityAnnounce(_)
@@ -619,6 +625,7 @@ impl Message {
             Message::SpilloverResponse(m) => m.to_bytes(),
             Message::CrossPathValidation(m) => m.to_bytes(),
             Message::CrossPathResult(m) => m.to_bytes(),
+            Message::ClusterInfo(m) => m.to_bytes(),
             Message::ConnectivityAnnounce(m) => m.to_bytes(),
             Message::CandidateAnnounce(m) => m.to_bytes(),
             Message::RelayDiscovery(m) => m.to_bytes(),
@@ -714,6 +721,7 @@ pub fn dispatch(bytes: &[u8], tier: Tier) -> Result<Message> {
         "cross_path_result" => {
             Message::CrossPathResult(CrossPathResult::from_bytes(bytes)?)
         }
+        "cluster_info" => Message::ClusterInfo(ClusterInfoAnnounce::from_bytes(bytes)?),
         "connectivity_announce" => {
             Message::ConnectivityAnnounce(ConnectivityAnnounce::from_bytes(bytes)?)
         }
@@ -994,6 +1002,17 @@ mod tests {
                 validator: nid(3),
                 timestamp: now(),
                 signature: [0xff; 64],
+            }),
+            Tier::Ctrl,
+        );
+        assert_roundtrip(
+            Message::ClusterInfo(ClusterInfoAnnounce {
+                info: crate::cluster::ClusterInfo {
+                    id: [0x11; 16],
+                    size: 5,
+                    ctime: now(),
+                },
+                signature: [0xab; 64],
             }),
             Tier::Ctrl,
         );

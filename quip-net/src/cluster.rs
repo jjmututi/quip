@@ -26,6 +26,7 @@
 //! [`crate::dht::REGIONAL_CLUSTER`] / [`crate::dht::GLOBAL_CLUSTER`]
 //! constants use the same convention, so the two are interchangeable.
 
+use crate::codec::{as_bytes_n, as_u64, envelope, fields, verb_of};
 use crate::constants::{
     CLUSTER_ACCEPTANCE_PERCENTILE, CLUSTER_HEARTBEAT_S, CLUSTER_LEVELS,
     COORDINATOR_INTERVAL_S, MAX_CLUSTER_SIZE, MAX_SPLIT_ATTEMPTS,
@@ -34,7 +35,9 @@ use crate::constants::{
 };
 use crate::error::{Error, Result};
 use alloc::vec::Vec;
+use quip_core::cbor::{decode, encode, CborValue};
 use quip_core::dvv::NodeId;
+use quip_core::messages::Verifier;
 use quip_core::time::Timestamp;
 
 /// A 16-byte Coral cluster identifier (§13).
@@ -117,6 +120,76 @@ pub struct ClusterInfo {
     pub size: u64,
     /// The cluster's creation time.
     pub ctime: Timestamp,
+}
+
+/// A signed cluster-information announcement (§13.4, §13.5).
+///
+/// The tuple carries no node id: the signer is the connection peer, and
+/// [`verify`](Self::verify) takes that authenticated id explicitly. That
+/// is what stops a peer from announcing a cluster id on another's
+/// behalf — the same shape as `connectivity_announce`'s self-signed id
+/// and `RelayResponse`'s explicit responder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterInfoAnnounce {
+    /// The announced tuple.
+    pub info: ClusterInfo,
+    /// Ed25519 signature by the announcing node.
+    pub signature: [u8; 64],
+}
+
+impl ClusterInfoAnnounce {
+    /// Encode to QUIP-CBOR bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_info",
+            alloc::vec![
+                CborValue::Bytes(self.info.id.to_vec()),
+                CborValue::Int(self.info.size as i128),
+                CborValue::Int(self.info.ctime.as_millis() as i128),
+                CborValue::Bytes(self.signature.to_vec()),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Decode from QUIP-CBOR bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let v = decode(bytes)?;
+        if verb_of(&v)? != "cluster_info" {
+            return Err(Error::BadFrame("not a cluster_info"));
+        }
+        let f = fields(&v, "cluster_info")?;
+        if f.len() != 4 {
+            return Err(Error::BadFrame("cluster_info arity"));
+        }
+        Ok(Self {
+            info: ClusterInfo {
+                id: as_bytes_n::<16>(&f[0])?,
+                size: as_u64(&f[1])?,
+                ctime: Timestamp::from_millis(as_u64(&f[2])?),
+            },
+            signature: as_bytes_n::<64>(&f[3])?,
+        })
+    }
+
+    /// Bytes covered by `signature`.
+    pub fn signing_payload(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_info",
+            alloc::vec![
+                CborValue::Bytes(self.info.id.to_vec()),
+                CborValue::Int(self.info.size as i128),
+                CborValue::Int(self.info.ctime.as_millis() as i128),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Verify the signature against `sender`, the authenticated peer id.
+    pub fn verify(&self, sender: &NodeId, v: &impl Verifier) -> Result<bool> {
+        let payload = self.signing_payload()?;
+        Ok(v.verify_ed25519(sender, &payload, &self.signature))
+    }
 }
 
 // -------------------------------------------------------------------------
@@ -852,4 +925,100 @@ mod tests {
         assert_eq!(estimate_size_from_routing_table(64), u64::MAX);
         assert_eq!(estimate_size_from_routing_table(1000), u64::MAX);
     }
+
+#[cfg(test)]
+mod cluster_info_wire_tests {
+    use super::*;
+
+    #[cfg(feature = "crypto")]
+    use quip_core::messages::Signer;
+
+    fn cid(b: u8) -> ClusterId {
+        [b; 16]
+    }
+
+    fn sample() -> ClusterInfo {
+        ClusterInfo {
+            id: cid(0x33),
+            size: 42,
+            ctime: Timestamp::from_secs(1_000),
+        }
+    }
+
+    #[test]
+    fn roundtrips_and_rejects_other_verbs() {
+        let a = ClusterInfoAnnounce {
+            info: sample(),
+            signature: [9u8; 64],
+        };
+        let bytes = a.to_bytes().unwrap();
+        assert_eq!(ClusterInfoAnnounce::from_bytes(&bytes).unwrap(), a);
+
+        // The verb is checked, not ignored: a `cluster_info` decoder given
+        // a `coral_lookup` frame must refuse it rather than read fields
+        // positionally out of a foreign message.
+        let foreign = envelope("coral_lookup", alloc::vec![CborValue::Int(1)]);
+        let encoded = encode(&foreign).unwrap();
+        assert!(ClusterInfoAnnounce::from_bytes(&encoded).is_err());
+    }
+
+    #[test]
+    fn arity_is_enforced() {
+        let short = envelope(
+            "cluster_info",
+            alloc::vec![CborValue::Bytes(cid(1).to_vec())],
+        );
+        let encoded = encode(&short).unwrap();
+        assert!(ClusterInfoAnnounce::from_bytes(&encoded).is_err());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn signature_verifies_against_the_sender_only() {
+        use crate::crypto::{Ed25519Signer, Ed25519Verifier};
+
+        let signer = Ed25519Signer::from_seed(&[7u8; 32]);
+        let sender: NodeId = signer.public_key();
+        let mut a = ClusterInfoAnnounce {
+            info: sample(),
+            signature: [0u8; 64],
+        };
+        a.signature = signer.sign_ed25519(&a.signing_payload().unwrap());
+        let v = Ed25519Verifier;
+
+        assert!(a.verify(&sender, &v).unwrap(), "authentic sender verifies");
+
+        // A different node cannot announce on the signer's behalf: the
+        // payload carries no node id, so the id must come from the
+        // authenticated connection and be part of the check.
+        let mut other: NodeId = sender;
+        other[0] ^= 0xff;
+        assert!(!a.verify(&other, &v).unwrap(), "wrong sender must not verify");
+
+        // Any field the signature covers is covered in fact.
+        let mut tampered = a.clone();
+        tampered.info.size = 43;
+        assert!(!tampered.verify(&sender, &v).unwrap());
+    }
+
+    #[cfg(feature = "crypto")]
+    #[test]
+    fn signing_payload_excludes_signature() {
+        use crate::crypto::Ed25519Signer;
+
+        let signer = Ed25519Signer::from_seed(&[3u8; 32]);
+        let mut a = ClusterInfoAnnounce {
+            info: sample(),
+            signature: [0u8; 64],
+        };
+        let payload = a.signing_payload().unwrap();
+        a.signature = signer.sign_ed25519(&payload);
+        assert_eq!(
+            a.signing_payload().unwrap(),
+            payload,
+            "signing the payload must not change it"
+        );
+    }
+}
+
 }

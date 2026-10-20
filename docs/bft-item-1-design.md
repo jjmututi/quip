@@ -2,9 +2,9 @@
 
 **Status: design contract for BFT-A item 1.** Written before the code, as
 the milestone contract: what it lands, what it depends on, what it defers,
-and what the test proves. §5.3.4 is specified (`6c5d12f`); one dependency
-below is not resolved, and the note says so rather than designing around
-it.
+and what the test proves. §5.3.4 is specified (`6c5d12f`), and the
+two-digest conflict this note surfaced is resolved in the draft amendment
+recorded under "What it depends on".
 
 ## What it lands
 
@@ -46,30 +46,30 @@ it.
   map, text keys, text discriminant, 256-byte bound, closed maps.
 - **`quip-core`'s CBOR** (`quip-core::cbor`) and the driver's existing
   round state machine.
-- **An unresolved conflict between §5.3.4 and §5.3.4.1.** §5.3.4 says
-  `checkpoint_digest` *is* the state digest; §5.3.4.1 says "The
-  `checkpoint_digest` field `MUST` be the SHA-256 of the `state` bytes as
-  transmitted." Those are different quantities: one is a hash chain over
-  operations and outcomes, the other is a hash of the serialized
-  application state. Both cannot be true, and the code implements the
-  second (`bft_driver.rs` computes SHA-256 of the transmitted bytes and
-  compares).
+- **The two-digest split, resolved in the draft.** §5.3.4 previously said
+  `checkpoint_digest` *is* the state digest, while §5.3.4.1 says the field
+  `MUST` be the SHA-256 of the state bytes as transmitted. Those are
+  different quantities: one commits to what was applied, the other to what
+  the state is. The draft amendment now distinguishes them —
+  `bft_checkpoint`'s `state_digest` is the chain digest over the committed
+  sequence; `bft_state_transfer`'s `checkpoint_digest` is the SHA-256 of
+  the transferred bytes, which a receiver must verify before applying.
 
-  **Recommendation: two digests, because they answer two questions.**
-  `bft_checkpoint.state_digest` is the execution chain digest — it
-  detects diverged execution among honest replicas. The `checkpoint_digest`
-  a `bft_state_transfer` carries is the SHA-256 of the transferred state
-  bytes — it detects substituted or corrupted state. Dropping either
-  loses a property: without the chain digest a divergent replica is
-  undetectable at checkpoint quorum; without the byte digest a state
-  transfer cannot be verified against the message that carries it.
+  They answer different questions and neither substitutes for the other.
+  The chain digest detects diverged execution among honest replicas at
+  checkpoint quorum: two replicas that applied the same committed sequence
+  and diverged in a hook's output produce different chain digests. The
+  byte digest detects a substituted or corrupted state transfer: bytes
+  that do not hash to the announced digest are untrustworthy. Dropping
+  either loses a property — without the chain digest a divergent replica
+  is undetectable at quorum; without the byte digest a transfer cannot be
+  verified against the message that carries it.
 
-  This requires a one-sentence draft amendment — the "restated as
-  `checkpoint_digest`" phrasing in §5.3.4 becomes "carried alongside
-  `checkpoint_digest`, which binds the transferred bytes" — and item 1's
-  implementation should not start until it lands. The §5.3.4 matrix pass
-  (the next commit) is where the §5.3.4.1 row is added and this conflict
-  becomes a matrix finding rather than a note paragraph.
+  **The genesis is `[0u8; 32]` and is provisional.** The draft now states
+  the all-zero 32-byte value; if it later chooses a different one (the
+  ring id, or a per-checkpoint sentinel), the implementation changes with
+  the draft. That is the S9/S10 pattern: the code chooses, the draft
+  ratifies or corrects, and the CHANGELOG records which state is current.
 
 ## What it defers
 
@@ -83,9 +83,9 @@ it.
   reordering, outcome fuzzing, digest collision assumptions.
 - **Application state serialization** — still opaque to the protocol and
   the application's choice (§5.3.4.1).
-- **The genesis digest.** `[0u8; 32]` is this implementation's choice;
-  the draft should say it, or two implementations will start their
-  chains differently and never agree on their first checkpoint.
+- **The genesis digest's final value.** The draft states the all-zero
+  32-byte value and this note records it as provisional; ratifying it is
+  a draft decision, not an implementation one.
 
 ## What the test proves
 

@@ -1,7 +1,7 @@
 # Conformance matrix
 
 **Status: fourth delivery.** The eight-field schema, its vocabulary, and
-thirteen rows. The full pass is in progress: "What follows" inventories
+fourteen rows. The full pass is in progress: "What follows" inventories
 the sections still to convert, with their statement counts, so the
 remaining work is a list rather than an estimate.
 
@@ -321,8 +321,10 @@ enough and the edit has not landed."
   specified in §5.3.4; the implementation of `OperationOutcome`,
   `BftHandler::validate` and the state digest over the three-key map is
   the next BFT unit.
-- **Depends on.** row 6 — a checkpoint is only stable at quorum, so a
-  divergent execution result is detected (if at all) at row 6's check.
+- **Depends on.** rows 6 and 14 — a checkpoint is only stable at quorum
+  (row 6), and the chain digest cannot be checked against a state
+  transfer whose byte digest is wrong (row 14). The two digests are a
+  pair: one commits to what was applied, the other to what the state is.
 
 ### 9. §10.1 — signing convention — PASS
 
@@ -416,9 +418,28 @@ enough and the edit has not landed."
 - **Submission impact.** `non-blocking`.
 - **Depends on.** none (leaf); row 7 depends on this row.
 
+### 14. §5.3.4.1 — byte digest for state transfer — PASS
+
+- **Clause.** "The `checkpoint_digest` field `MUST` be the SHA-256 of the
+  `state` bytes as transmitted."
+- **Requirement.** `MUST` bind the transferred bytes; a receiver `MUST`
+  verify it before applying the state.
+- **Source.** `BftDriver::handle_state_transfer_response`
+  (`quip-net/src/bft_driver.rs`): it computes SHA-256 over the message's
+  `state` bytes, compares the result with `checkpoint_digest`, and only
+  then calls `BftHandler::apply_state`.
+- **Test.** `state_transfer_rejects_digest_mismatch`,
+  `state_transfer_roundtrip`.
+- **Verdict.** PASS.
+- **Specification status.** clear — unambiguous after the amendment that
+  distinguishes this byte digest from the chain digest a checkpoint
+  carries.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf); row 8 depends on this row.
+
 ## What follows
 
-**Coverage: 13 rows against 146 `MUST` and 104 `SHOULD` statements in
+**Coverage: 14 rows against 146 `MUST` and 104 `SHOULD` statements in
 104 sections.** The rows cover the decision points where the reference
 implementation gives a source to check against — the capability surface,
 the witness threshold, the BFT quorum and execution contract, the cluster
@@ -439,6 +460,7 @@ Rows by section:
 | §13.4 Cluster merging | 7 |
 | §13.5 Cluster splitting | 3 |
 | §13.6 Cluster size estimation | 13 |
+| §5.3.4.1 BFT checkpointing (byte digest) | 14 |
 
 Not yet covered, in the order the next passes should take them:
 

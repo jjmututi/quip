@@ -1655,14 +1655,20 @@ Operation = {
             the preprepare digest above: SHA-256 over a canonical
             QUIP-CBOR encoding.</t>
 
-            <t><strong>Checkpoint relation.</strong>
-            <tt>checkpoint_digest</tt> is the state digest. A checkpoint
-            carries it as <tt>state_digest</tt> and
-            <tt>bft_state_transfer</tt> restates it as
-            <tt>checkpoint_digest</tt>; neither re-derives a different
-            digest from the state. Divergence is detected at checkpoint
-            quorum and is not repaired by the checkpoint mechanism: the
-            protocol's answer to a failed quorum is a view change.</t>
+            <t><strong>Checkpoint relation.</strong> The
+            <tt>state_digest</tt> a checkpoint carries is the chain digest
+            over the committed operation sequence, computed as above from
+            the all-zero 32-byte genesis value. The
+            <tt>checkpoint_digest</tt> a <tt>bft_state_transfer</tt>
+            carries is a different quantity: the SHA-256 of the state
+            bytes as transmitted, which a receiver
+            <bcp14>MUST</bcp14> verify against the received state before
+            applying it (<xref target="bft-checkpoint"/>). Neither digest
+            substitutes for the other — one commits to what was applied,
+            the other to what the state is. Divergence is detected at
+            checkpoint quorum and is not repaired by the checkpoint
+            mechanism: the protocol's answer to a failed quorum is a view
+            change.</t>
           </section>
         </section>
         

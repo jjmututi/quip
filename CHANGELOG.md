@@ -160,7 +160,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, thirteen rows, and a coverage table for the remaining 146 `MUST` / 104 `SHOULD` statements by section. Row 8 moved to `clear`/`non-blocking` after the outcome's wire form was specified in §5.3.4; the verdict stays `FAIL` and the implementation is the next BFT unit | in progress |
+| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, fourteen rows, and a coverage table for the remaining 146 `MUST` / 104 `SHOULD` statements by section. Row 8 (`apply()` execution contract) is `FAIL`/`clear`/`non-blocking` and depends on rows 6 and 14; row 14 records the byte digest for state transfer | in progress |
 
 ---
 
@@ -1345,13 +1345,16 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    discriminant, a 256-byte payload bound). Row 8 is now `clear` /
    `non-blocking`; its verdict stays `FAIL` because the implementation
    is the next BFT unit. The design contract for that unit is
-   `docs/bft-item-1-design.md`, and it records one unresolved dependency
-   before the code can start: §5.3.4.1 says `checkpoint_digest` is the
-   SHA-256 of the transferred state bytes, while §5.3.4 says it is the
-   execution-state digest — both cannot hold, and the code implements
-   the older one. The note recommends two digests and a one-sentence
-   amendment; the §5.3.4 matrix pass is where the conflicting row is
-   added.
+   `docs/bft-item-1-design.md`. It surfaced a conflict — §5.3.4.1 says
+   `checkpoint_digest` is the SHA-256 of the transferred state bytes,
+   while §5.3.4 said the same field was the execution-state digest — and
+   the draft amendment resolves it by keeping both quantities under the
+   names the CDDL already gives them: `bft_checkpoint`'s `state_digest`
+   is the chain digest, `bft_state_transfer`'s `checkpoint_digest` is the
+   byte digest, verified before the state is applied. The chain's genesis
+   is the all-zero 32-byte value, stated in the draft and provisional.
+   The matrix records the byte digest as row 14 and row 8 now depends on
+   it.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

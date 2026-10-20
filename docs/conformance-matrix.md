@@ -129,36 +129,37 @@ enough and the edit has not landed."
   code.
 - **Depends on.** none (leaf).
 
-### 3. §13.5 — split attempt throttle — FAIL
+### 3. §13.5 — split attempt throttle — PASS
 
-- **Clause.** "If a node fails to find an acceptable cluster after
-  `MAX_SPLIT_ATTEMPTS` (RECOMMENDED: 3), it `MUST` create a new cluster
-  with a random `cluster_id`."
-- **Requirement.** `MUST` create a new cluster once the attempt limit is
-  reached.
-- **Source.** `quip_net::cluster::ClusterState::record_split_attempt`
-  and `ClusterState::migrate`, driven by
-  `quip_node::cluster::ClusterHandle::plan_split` / `apply_split`.
-- **Test.** none. The limit is unreachable as the code is sequenced, so
-  a test would have to assert a state the implementation cannot enter.
-- **Verdict.** **FAIL** — the `MUST` is not enforced. Every split ends
-  in `migrate`, `migrate` clears `split_attempts`, and the counter is
-  therefore `1` at every evaluation. The draft's condition is "fails to
-  find an acceptable cluster"; the code never evaluates whether the new
-  cluster is acceptable, so it cannot detect the failure the sentence is
-  conditioned on.
-- **Specification status.** **incomplete** — the draft does not say what
-  ends an attempt, and "acceptable" is not defined at the point the
-  counter would be read. The design note's §4 sequence (record, then
-  `migrate`, which clears on success) is where the divergence entered:
-  it simplified the draft's failure condition into an unconditional
-  reset. Recorded as Protocol design item 15a, with three candidate
-  readings and a recommendation.
-- **Submission impact.** `review required` — an unbounded split rate is
-  a resource-exhaustion and convergence-stability concern, so the
-  throttle matters; whether it blocks submission depends on whether the
-  draft's editor considers the throttle essential. That is a decision,
-  not a fact.
+- **Clause.** "A split attempt is successful when the new cluster's first
+  post-migration member-set computation reports the new cluster
+  acceptable per §13.2. It is a failure when that computation reports the
+  new cluster not acceptable. The split-attempt counter `MUST` be reset
+  on success and `MUST NOT` be reset on failure; the limit applies to
+  consecutive failures" — the limit being "if a node fails to find an
+  acceptable cluster after `MAX_SPLIT_ATTEMPTS` (RECOMMENDED: 3), it
+  `MUST` create a new cluster with a random `cluster_id`."
+- **Requirement.** `MUST` reset on success, `MUST NOT` on failure,
+  `MUST` create a new cluster after `MAX_SPLIT_ATTEMPTS` consecutive
+  failures.
+- **Source.** `ClusterState::migrate` no longer clears the counter;
+  `ClusterHandle::note_split_outcome` clears it on the first
+  post-migration acceptance test, which `split_if_due` supplies from its
+  recompute; `plan_split` forces `CreateNew` once the consecutive count
+  passes the cap.
+- **Test.** `migrate_preserves_the_attempt_counter`,
+  `consecutive_failures_reach_the_split_cap` (`quip-net`);
+  `a_failed_split_keeps_the_attempt_counter`,
+  `note_split_outcome_clears_only_on_success`,
+  `the_cap_forces_a_new_cluster_even_when_a_branch_is_acceptable`
+  (`quip-node`, `split_tests`). The last drives three acceptable-branch
+  failures and asserts the fourth plan is `CreateNew` with the
+  attempt-indexed fresh id, which is what distinguishes the cap from "no
+  branch was acceptable".
+- **Verdict.** PASS.
+- **Specification status.** clear — the episode is defined in terms of
+  the §13.2 test the implementation already runs.
+- **Submission impact.** `non-blocking`.
 - **Depends on.** none for the counter; the split's observable effect
   depends on the cluster-info exchange (§3 of the M9.6b note), which has
   no row of its own.
@@ -202,52 +203,51 @@ enough and the edit has not landed."
 - **Depends on.** row 1 — the negotiated set row 1's gate reads is the
   same set this closure validates.
 
-### 5. §5.3.3 — re-issue after expiry — PARTIAL
+### 5. §5.3.3 — re-issue after expiry — PASS
 
 - **Clause.** "After `valid_until` expires, the witness `MUST` be
-  re-issued"; "Witnesses `SHOULD` re-issue statements every 12 hours."
-- **Requirement.** `MUST` re-issue on expiry; `SHOULD` every 12 hours.
-- **Source.** `quip_node::witness::WitnessStore::maybe_issue`, called by
-  every peer task's steady loop.
-- **Test.** `maybe_issue_enforces_the_12h_cadence`,
+  re-issued"; "Witnesses `SHOULD` re-issue statements every 12 hours";
+  and "A statement whose `valid_until` has passed no longer counts toward
+  the verification threshold, regardless of whether the issuing witness
+  has since re-issued. The obligation to re-issue is the witness's; the
+  filter on expiry is the recipient's."
+- **Requirement.** `MUST` re-issue on expiry (witness); `MUST NOT` count
+  an expired statement (recipient); `SHOULD` re-issue every 12 hours.
+- **Source.** `quip_node::witness::WitnessStore::statements_for` filters
+  `stmt.valid_until > now`; `WitnessStore::maybe_issue` re-issues on the
+  12-hour cadence, driven by every peer task's steady loop.
+- **Test.** `statements_for_excludes_statements_past_valid_until` (the
+  recipient's filter: valid statement counts, the same statement past
+  `valid_until` does not); `maybe_issue_enforces_the_12h_cadence`,
   `maybe_issue_skips_untrusted_subjects`; the `six_nodes_*` tests
   observe the effect on `KtStatus`.
-- **Verdict.** PARTIAL — the 12-hour cadence re-issues while the witness
-  is running, which satisfies the `MUST` whenever the witness is alive
-  at expiry (12 h is earlier than 24 h, so the code enforces the
-  `SHOULD` strictly enough to imply the `MUST`). Nothing detects an
-  expired statement whose witness has gone, and the draft does not say
-  who re-issues in that case.
-- **Specification status.** ambiguous — "the witness `MUST` be
-  re-issued" has no subject: the original witness, any holder, or the
-  verifier. The two sentences also interact: the `SHOULD` at 12 h is
-  what makes the `MUST` reachable, so an implementation that follows
-  only the `MUST` may never re-issue proactively.
-- **Submission impact.** `review required` — the interoperability
-  question (may a verifier treat an expired statement as a liveness
-  signal?) is a decision.
+- **Verdict.** PASS. The two obligations now have two sides: the witness
+  re-issues on the 12-hour cadence (which is earlier than expiry, so the
+  `MUST` is reachable), and the recipient's threshold excludes an expired
+  statement regardless of what the witness did.
+- **Specification status.** clear — the expiry paragraph separates the
+  obligation from the filter, which is what the clause lacked.
+- **Submission impact.** `non-blocking`.
 - **Depends on.** none (leaf).
 
-### 6. §5.3.4 — checkpoint quorum — PARTIAL
+### 6. §5.3.4 — checkpoint quorum — PASS
 
-- **Clause.** Checkpoint verification requires quorum: "5-of-7 for a
-  full ring, 3-of-4 degraded".
+- **Clause.** "A quorum is `n - f` distinct ring members, where `n` is
+  the ring size and `f` is the maximum number of Byzantine members
+  tolerated… `n - f` is the general rule; specific ring sizes follow from
+  it." A checkpoint is stable when signed by at least `n - f` members.
 - **Requirement.** `MUST` verify a checkpoint signature set against the
   ring's quorum before treating the checkpoint as stable.
-- **Source.** `quip_core::constants::{QUORUM, DEGRADED_QUORUM}` used by
-  `quip_net::bft_driver`'s checkpoint verification; ring size comes from
-  `WITNESS_COUNT = 7` and `MIN_WITNESSES = 4`.
-- **Test.** `checkpoint_reaches_stability_at_quorum`.
-- **Verdict.** PARTIAL — both stated sizes are enforced (5 for a full
-  ring, 3 for a degraded four). The code uses two absolute constants, so
-  a ring of five or six would require five signatures; whether that is
-  the intended threshold is not derivable from the text.
-- **Specification status.** ambiguous — the draft states two instances
-  of a quorum and no rule. An independent implementer with a five-member
-  ring cannot compute its threshold.
-- **Submission impact.** `review required` — the difference between "5
-  of 7" and "⌈2n/3⌉" is invisible at n = 7 and material at n = 5, which
-  is a decision about whether other ring sizes are legal.
+- **Source.** `RingMembership::quorum` (`quip-net/src/bft_driver.rs`)
+  returns `n - f` with `f = (n - 1) / 3`; `maybe_emit_new_view` gates on
+  it and checkpoint stability is computed from it.
+- **Test.** `checkpoint_reaches_stability_at_quorum`,
+  `view_change_promotes_new_primary`.
+- **Verdict.** PASS — the code already computes the general rule; the
+  draft now states it, so a five- or six-member ring has a derivable
+  threshold.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
 - **Depends on.** none (leaf).
 
 ### 7. §13.4 — cluster merging — FAIL
@@ -626,20 +626,20 @@ three would have survived every test in the tree, because in each case
 both behaviours were correct. That is why the design notes precede the
 matrix passes rather than following them.
 
-**The decisive query returns four rows, all `review required`, none
-`blocking`.** It returned five in the previous revision; row 8 left the
-query because §5.3.4 now fixes the outcome's wire form as well as the
-digest construction — text keys, a text discriminant, a 256-byte bound,
-and a closed-map rule — so two implementers can compute the same digest.
-The remaining four are §13.5's attempt episode and §13.4's merge
-(`incomplete`) and §5.3.3's re-issue and §5.3.4's quorum (`ambiguous`).
-Row 8 is still `FAIL`, but on the code alone: the implementation is the
-next BFT unit, not a draft edit.
+Rows 5 and 6 are the first instances where the finding was resolved by a
+draft edit and a test rather than by a design note; they are the cheaper
+half of the class.
 
-The §5.3.4/§5.3.4.1 pass added rows 14–18. Two are `FAIL` on `clear`
-clauses — row 14 (the transfer carries no `state_hash`, and the code
-binds the bytes to the field the amended draft reserves for the chain
-digest) and row 18 (the driver has no degraded-mode gate, so a key
-rotation can commit on a 3-of-4 ring). Both are code gaps behind clear
-text, so neither enters this query; they are tracked as BFT-A item 1 and
-the new item 5a.
+**The decisive query returns one row, `review required`, none
+`blocking`.** Rows 3, 5 and 6 left it in this revision, each by a
+different route: §13.5's attempt episode and §5.3.3's expiry filter were
+resolved by a draft decision plus a test, and §5.3.4's quorum by stating
+`n - f` as the rule the code already implements. What remains is §13.4's
+merge, which needs a design note before any code — the draft does not
+define what "join" does to the cluster id, the member set or the
+coordinator.
+
+Rows 8 and 14–18 are `FAIL` on `clear` clauses — the `apply()` contract,
+the transfer's missing `state_hash`, and the degraded-mode gate. Those
+are code gaps behind adequate text, so they do not enter this query; they
+are tracked as BFT-A item 1 and item 5a.

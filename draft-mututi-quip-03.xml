@@ -1165,6 +1165,12 @@ WitnessStatement = [
             <li>Witnesses <bcp14>SHOULD</bcp14> re-issue statements every 12 hours</li>
           </ul>
           
+          <t><strong>Expiry:</strong> A statement whose <tt>valid_until</tt>
+          has passed no longer counts toward the verification threshold,
+          regardless of whether the issuing witness has since re-issued.
+          The obligation to re-issue is the witness's; the filter on expiry
+          is the recipient's.</t>
+
           <t><strong>First Issuance:</strong> This specification does not
           prescribe a protocol event that triggers a witness's first statement
           about a subject. First issuance is a local policy decision: a witness
@@ -1434,11 +1440,18 @@ FrostRingSig = {
           <t><strong>BFT Quorum Rules:</strong></t>
           
           <ul>
-            <li>A quorum is 5 of 7 witnesses (VIEW_CHANGE_QUORUM = 5).</li>
+            <li>A quorum is <tt>n - f</tt> distinct ring members, where
+            <tt>n</tt> is the ring size and <tt>f</tt> is the maximum number
+            of Byzantine members tolerated. For a full ring of seven
+            <tt>f = 2</tt> and the quorum is five
+            (<tt>VIEW_CHANGE_QUORUM = 5</tt>); for a degraded ring of four
+            <tt>f = 1</tt> and the quorum is three (<tt>DEGRADED_QUORUM</tt>).
+            <tt>n - f</tt> is the general rule; specific ring sizes follow
+            from it.</li>
             <li>A <tt>bft_new_view</tt> message <bcp14>MUST</bcp14> contain 
-            at least VIEW_CHANGE_QUORUM (5) valid view-change messages.</li>
+            at least <tt>n - f</tt> valid view-change messages.</li>
             <li>A checkpoint <bcp14>MUST</bcp14> be signed by at least 
-            VIEW_CHANGE_QUORUM (5) witnesses to be considered stable.</li>
+            <tt>n - f</tt> distinct ring members to be considered stable.</li>
             <li>
               <t>A state transfer <bcp14>MUST</bcp14> include a 
               <tt>RingSignature</tt> that is either:</t>
@@ -3739,6 +3752,14 @@ CANDIDATE_TTL = 30  ; seconds
         </ul>
 
         <t><strong>Split Limit:</strong> If a node fails to find an acceptable cluster after <strong>MAX_SPLIT_ATTEMPTS</strong> (RECOMMENDED: 3), it <bcp14>MUST</bcp14> create a new cluster with a random <tt>cluster_id</tt>. Except in the case of pathological network topologies, a small number of splits should suffice to reach a stable state.</t>
+
+        <t><strong>Attempt Outcome:</strong> A split attempt is successful
+        when the new cluster's first post-migration member-set computation
+        reports the new cluster acceptable per <xref target="coral-acceptance"/>.
+        It is a failure when that computation reports the new cluster not
+        acceptable. The split-attempt counter <bcp14>MUST</bcp14> be reset
+        on success and <bcp14>MUST NOT</bcp14> be reset on failure; the
+        limit above applies to consecutive failures.</t>
       </section>
 
       <!-- ========================================================== -->

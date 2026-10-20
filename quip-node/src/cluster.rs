@@ -286,6 +286,11 @@ impl ClusterHandle {
 
     /// Apply a plan: record the attempt, move this node, reset the state
     /// that must not carry over.
+    ///
+    /// The attempt counter is **not** cleared here. §13.5 makes the new
+    /// cluster's first post-migration acceptance test the outcome of the
+    /// attempt, so `split_if_due` calls [`Self::note_split_outcome`] with
+    /// that test's verdict.
     pub fn apply_split(&self, plan: &SplitPlan, now: Timestamp) -> [u8; 16] {
         let mut state = self.inner.state.lock().expect("cluster lock poisoned");
         // `plan_split` already forced `CreateNew` when the cap is
@@ -296,18 +301,39 @@ impl ClusterHandle {
         plan.new_id
     }
 
+    /// Record the outcome of a split attempt (§13.5).
+    ///
+    /// Success — the new cluster's first post-migration member-set
+    /// computation reports it acceptable — clears the counter. Failure
+    /// leaves it, so consecutive failures accumulate until
+    /// `MAX_SPLIT_ATTEMPTS` and `plan_split` forces `CreateNew`.
+    pub fn note_split_outcome(&self, acceptable: bool) {
+        if acceptable {
+            let mut state = self.inner.state.lock().expect("cluster lock poisoned");
+            state.clear_split_attempts();
+        }
+    }
+
+    /// Consecutive split failures recorded so far.
+    pub fn split_attempts(&self) -> u32 {
+        let state = self.inner.state.lock().expect("cluster lock poisoned");
+        state.split_attempts
+    }
+
     /// Plan and apply a split if one is due.
     ///
-    /// Returns the new cluster id when the node migrated. Membership is
-    /// recomputed against the new id before returning, so a caller that
-    /// publishes the local tuple immediately announces the new cluster.
+    /// Returns the new cluster id when the node migrated. The first
+    /// recompute after the move is the attempt's outcome: if the new
+    /// cluster is acceptable the counter clears, otherwise it stays and
+    /// the next evaluation counts as another failure.
     pub fn split_if_due(&self, dht: &DhtHandle, now: Timestamp) -> Option<[u8; 16]> {
         let plan = self.plan_split(dht, now)?;
         let new_id = self.apply_split(&plan, now);
         // Refresh `size` and the member set against the new id. The RTT
         // timer restarts here if the samples are still over threshold,
         // which is correct: the new cluster gets its own episode.
-        let _ = self.recompute(dht, now);
+        let view = self.recompute(dht, now);
+        self.note_split_outcome(view.acceptable);
         Some(new_id)
     }
 
@@ -777,6 +803,104 @@ mod split_tests {
             fresh_cluster_id(&m.local, split_due_at(), 1),
             "with no acceptable branch the node takes a fresh id"
         );
+    }
+
+    // ---- §13.5 attempt episode ----
+
+    /// §13.5: a split succeeds or fails at the new cluster's first
+    /// post-migration acceptance test, not when `migrate` completes.
+    #[test]
+    fn a_failed_split_keeps_the_attempt_counter() {
+        let m = mesh();
+        prime_split_timer(&m); // three samples: below the §13.2 minimum of 20
+        let before = m.cluster.info().id;
+
+        let new_id = m
+            .cluster
+            .split_if_due(&m.dht, split_due_at())
+            .expect("split due");
+
+        assert_ne!(new_id, before, "the node moved");
+        assert_eq!(
+            m.cluster.split_attempts(),
+            1,
+            "an unacceptable first recompute is a failure, so the counter stays"
+        );
+    }
+
+    #[test]
+    fn note_split_outcome_clears_only_on_success() {
+        let m = mesh();
+        let plan = SplitPlan {
+            action: SplitAction::JoinNear,
+            new_id: near_cluster_id(&CID),
+            center: None,
+        };
+        m.cluster.apply_split(&plan, t(1_000));
+
+        m.cluster.note_split_outcome(false);
+        assert_eq!(
+            m.cluster.split_attempts(),
+            1,
+            "failure keeps the counter for the next attempt to add to"
+        );
+
+        m.cluster.note_split_outcome(true);
+        assert_eq!(m.cluster.split_attempts(), 0, "success clears it");
+    }
+
+    /// Three consecutive failures with `MAX_SPLIT_ATTEMPTS = 3` force
+    /// `CreateNew` on the next evaluation — even when a branch would
+    /// otherwise be acceptable, which is what distinguishes the cap from
+    /// "no branch was acceptable".
+    #[test]
+    fn the_cap_forces_a_new_cluster_even_when_a_branch_is_acceptable() {
+        let m = mesh();
+        prime_split_timer(&m);
+
+        for i in 1..=3u64 {
+            let now = t(181_000 + i * 200_000);
+            // Keep the p90 over threshold so the split stays due, then
+            // give the center a close sample so the near branch is
+            // acceptable.
+            for j in 1..=3u8 {
+                set_rtt(&m, &nid(j), 200);
+            }
+            let cid = m.cluster.info().id;
+            let center = m.dht.closest_to(&center_lookup_key(&cid), 1)[0];
+            set_rtt(&m, &center, 5);
+            announce(&m, center, near_cluster_id(&cid), 40);
+
+            let plan = m.cluster.plan_split(&m.dht, now).expect("due");
+            assert_eq!(
+                plan.action,
+                SplitAction::JoinNear,
+                "a branch is acceptable on attempt {i}"
+            );
+
+            m.cluster.apply_split(&plan, now);
+            let view = m.cluster.recompute(&m.dht, now);
+            assert!(!view.acceptable, "three samples is below §13.2's minimum");
+            m.cluster.note_split_outcome(view.acceptable);
+            assert_eq!(m.cluster.split_attempts(), i as u32);
+        }
+
+        let now = t(181_000 + 4 * 200_000);
+        for j in 1..=3u8 {
+            set_rtt(&m, &nid(j), 200);
+        }
+        let cid = m.cluster.info().id;
+        let center = m.dht.closest_to(&center_lookup_key(&cid), 1)[0];
+        set_rtt(&m, &center, 5);
+        announce(&m, center, near_cluster_id(&cid), 40);
+
+        let plan = m.cluster.plan_split(&m.dht, now).expect("due");
+        assert_eq!(
+            plan.action,
+            SplitAction::CreateNew,
+            "MAX_SPLIT_ATTEMPTS consecutive failures force a new cluster"
+        );
+        assert_eq!(plan.new_id, fresh_cluster_id(&m.local, now, 4));
     }
 }
 

@@ -533,9 +533,13 @@ impl ClusterState {
     ///
     /// A new id and creation time; the member count resets to this node
     /// alone; the coordinator is cleared, because a coordinator elected
-    /// by the old cluster does not lead the new one; and both the RTT
-    /// timer and the attempt counter reset, so the new cluster is not
-    /// born already due to split.
+    /// by the old cluster does not lead the new one; and the RTT timer
+    /// resets, so the new cluster is not born already due to split.
+    ///
+    /// The split-attempt counter is deliberately **not** reset here. Under
+    /// §13.5 an attempt succeeds or fails at the new cluster's first
+    /// post-migration acceptance test, not when the move completes, so the
+    /// caller resets it on success — see `ClusterHandle::note_split_outcome`.
     pub fn migrate(&mut self, new_id: ClusterId, now: Timestamp) {
         self.id = new_id;
         self.ctime = now;
@@ -543,7 +547,6 @@ impl ClusterState {
         self.coordinator = None;
         self.coordinator_since = now;
         self.rtt_exceeded_since = None;
-        self.split_attempts = 0;
     }
 
     /// Record a split attempt.
@@ -1148,7 +1151,7 @@ mod split_id_tests {
     }
 
     #[test]
-    fn migrate_resets_the_state_that_must_not_carry_over() {
+    fn migrate_preserves_the_attempt_counter() {
         let cfg = ClusterConfig::for_level(ClusterLevel::Local);
         let mut c = ClusterState::new(cid(1), cfg.level, Timestamp::from_secs(0));
         c.update_size(40);
@@ -1166,6 +1169,26 @@ mod split_id_tests {
             c.rtt_exceeded_since, None,
             "the new cluster is not born due to split"
         );
-        assert_eq!(c.split_attempts, 0, "a successful move clears the counter");
+        assert_eq!(
+            c.split_attempts, 2,
+            "§13.5: the move is not the attempt's outcome; the caller resets it"
+        );
+    }
+
+    #[test]
+    fn consecutive_failures_reach_the_split_cap() {
+        let cfg = ClusterConfig::for_level(ClusterLevel::Local);
+        let mut c = ClusterState::new(cid(1), cfg.level, Timestamp::from_secs(0));
+
+        for expected in 1..=cfg.max_split_attempts {
+            c.record_split_attempt(&cfg).expect("under the cap");
+            c.migrate(cid(expected as u8), Timestamp::from_secs(1));
+            assert_eq!(c.split_attempts, expected, "failures accumulate");
+        }
+
+        assert!(
+            c.record_split_attempt(&cfg).is_err(),
+            "one more failure is past the cap: the node must create a new cluster"
+        );
     }
 }

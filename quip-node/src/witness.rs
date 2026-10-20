@@ -453,6 +453,30 @@ mod tests {
     }
 
     #[test]
+    fn statements_for_excludes_statements_past_valid_until() {
+        let store = WitnessStore::new();
+        store.ingest(statement(1, 2, 1_000), t(2_000));
+        let log = claim_log_with(&[2], 1_500);
+
+        // Mature but still valid: the 6-hour rule is satisfied and the
+        // statement counts.
+        let mature_ms = 1_500 + WITNESS_FIRST_SEEN_SECONDS * 1_000 + 1;
+        assert_eq!(
+            store.statements_for(&nid(1), &log, t(mature_ms)).len(),
+            1,
+            "a valid statement counts"
+        );
+
+        // Past `valid_until` (issued_at + 100_000_000 in the helper): it
+        // no longer counts, whether or not the witness has re-issued.
+        let expired_ms = 100_001_000;
+        assert!(
+            store.statements_for(&nid(1), &log, t(expired_ms)).is_empty(),
+            "§5.3.3: a statement past valid_until no longer counts"
+        );
+    }
+
+    #[test]
     fn maybe_issue_skips_untrusted_subjects() {
         let store = WitnessStore::new();
         let trust = TrustPolicy::new();

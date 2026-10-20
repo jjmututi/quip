@@ -135,6 +135,7 @@ doc-tests       4 passed (one per crate)
 | Spec pass | S1–S7 and D4 resolved in the draft | landed |
 | Spec pass | S8 (`bft_state_transfer` ring signature scope) | decided, draft text landed |
 | Spec pass | S9–S10 (initial witness issuance; verifier independence) | decided, draft text landed |
+| Spec pass | S11–S13 (split attempt episode; expiry filter; quorum as `n - f`) | resolved, draft text landed |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
@@ -1295,6 +1296,23 @@ otherwise.
   toward that node's `Verified` verdict, but does not say so.
   `compute_kt_status` excludes the local NodeId. **Resolved**; the
   *Independence* block added to §5.3.3 in `71b52dc`.
+- **S11 — split attempt episode.** §13.5 conditioned the
+  `MAX_SPLIT_ATTEMPTS` limit on "fails to find an acceptable cluster"
+  without saying when an attempt ends, and `migrate` cleared the counter
+  unconditionally, so the failure state never existed. **Resolved** in
+  this commit: an attempt succeeds or fails at the new cluster's first
+  post-migration §13.2 test, the counter resets only on success, and
+  `ClusterState::migrate` no longer clears it.
+- **S12 — expiry filter.** §5.3.3 required re-issue after `valid_until`
+  without saying whether an expired statement still counts.
+  **Resolved** in this commit: it no longer counts, the obligation to
+  re-issue being the witness's and the filter the recipient's.
+  `WitnessStore::statements_for` already filtered on expiry; the new test
+  `statements_for_excludes_statements_past_valid_until` proves it.
+- **S13 — quorum as a rule.** §5.3.4 stated the quorum as "5 of 7" and
+  "3 of 4" without the rule behind them. **Resolved** in this commit: the
+  quorum is `n - f`, with those two sizes as specific cases.
+  `RingMembership::quorum` already computed `n - f`; no code changed.
 
 ---
 
@@ -1364,12 +1382,15 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    primary does not re-propose operations prepared in an earlier
    view; `bft_new_view.prepared_messages` is emitted empty. A proper
    view change must carry a prepared certificate so the operation
-   remains eligible for commitment.
+   remains eligible for commitment. Its prerequisite is now clear: the
+   quorum rule is stated as `n - f` in §5.3.4, so the certificate's
+   threshold is derivable rather than an instance.
 
 3. **Checkpoint carry-forward on view change.**
    `bft_new_view.checkpoint_messages` is emitted empty. The driver
    already retains `stable_checkpoint`, but `maybe_emit_new_view`
-   does not encode it. Same shape as (2).
+   does not encode it. Same shape as (2), and the same clear quorum rule
+   applies to the checkpoint it carries.
 
 4. **FROST ring signature verification** in
    `verify_checkpoint_ring_sig`. Requires a group public key on the

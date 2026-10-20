@@ -346,6 +346,21 @@ pub struct ClusterState {
     pub rtt_exceeded_since: Option<Timestamp>,
     /// Number of split attempts made so far in the current episode.
     pub split_attempts: u32,
+    /// The attempt in flight, if any (§13.5).
+    ///
+    /// Set by [`Self::migrate`], cleared only when an *eligible*
+    /// recompute decides the attempt. A pending attempt has no outcome
+    /// yet, so it neither counts against the cap nor clears the counter.
+    pub pending_split: Option<PendingSplit>,
+}
+
+/// An attempt whose outcome has not yet been decided (§13.5).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PendingSplit {
+    /// When the migration completed.
+    pub migrated_at: Timestamp,
+    /// The cluster id the node moved to.
+    pub new_id: ClusterId,
 }
 
 impl ClusterState {
@@ -363,6 +378,7 @@ impl ClusterState {
             last_heartbeat: now,
             rtt_exceeded_since: None,
             split_attempts: 0,
+            pending_split: None,
         }
     }
 
@@ -536,10 +552,13 @@ impl ClusterState {
     /// by the old cluster does not lead the new one; and the RTT timer
     /// resets, so the new cluster is not born already due to split.
     ///
-    /// The split-attempt counter is deliberately **not** reset here. Under
-    /// §13.5 an attempt succeeds or fails at the new cluster's first
-    /// post-migration acceptance test, not when the move completes, so the
-    /// caller resets it on success — see `ClusterHandle::note_split_outcome`.
+    /// The split-attempt counter is deliberately **not** reset here, and
+    /// the migration does not decide the attempt either. §13.5 makes the
+    /// attempt *pending* from the move until the first eligible
+    /// post-migration acceptance test — one taken at least
+    /// `CLUSTER_HEARTBEAT` later, so a peer has had the chance to
+    /// advertise the new id and the member set is non-empty. A pending
+    /// attempt neither counts against the cap nor clears the counter.
     pub fn migrate(&mut self, new_id: ClusterId, now: Timestamp) {
         self.id = new_id;
         self.ctime = now;
@@ -547,6 +566,52 @@ impl ClusterState {
         self.coordinator = None;
         self.coordinator_since = now;
         self.rtt_exceeded_since = None;
+        self.pending_split = Some(PendingSplit {
+            migrated_at: now,
+            new_id,
+        });
+    }
+
+    /// Whether a split attempt is in flight (§13.5).
+    pub fn split_attempt_pending(&self) -> bool {
+        self.pending_split.is_some()
+    }
+
+    /// Whether the pending attempt has had a full heartbeat interval to
+    /// settle, so a recompute may decide it.
+    ///
+    /// Before this is true the new cluster has had no opportunity to
+    /// accumulate members: no peer has re-announced its cluster id yet,
+    /// so a recompute would see an empty member set and call every
+    /// attempt a failure by construction.
+    pub fn pending_split_settled(&self, now: Timestamp, config: &ClusterConfig) -> bool {
+        match self.pending_split {
+            None => false,
+            Some(p) => {
+                let elapsed_ms = now.as_millis().saturating_sub(p.migrated_at.as_millis());
+                elapsed_ms >= config.heartbeat_s.saturating_mul(1000)
+            }
+        }
+    }
+
+    /// Decide the pending attempt at the first eligible recompute
+    /// (§13.5).
+    ///
+    /// Success clears the counter; failure increments it, which is what
+    /// makes `MAX_SPLIT_ATTEMPTS` reachable. Either way the attempt
+    /// stops being pending. Calling this with no attempt in flight is a
+    /// no-op, so a caller that recomputes more often than once per
+    /// heartbeat cannot decide the same attempt twice.
+    pub fn note_split_outcome(&mut self, acceptable: bool, config: &ClusterConfig) {
+        if self.pending_split.is_none() {
+            return;
+        }
+        if acceptable {
+            self.clear_split_attempts();
+        } else {
+            let _ = self.record_split_attempt(config);
+        }
+        self.pending_split = None;
     }
 
     /// Record a split attempt.

@@ -131,34 +131,41 @@ enough and the edit has not landed."
 
 ### 3. §13.5 — split attempt throttle — PASS
 
-- **Clause.** "A split attempt is successful when the new cluster's first
-  post-migration member-set computation reports the new cluster
-  acceptable per §13.2. It is a failure when that computation reports the
-  new cluster not acceptable. The split-attempt counter `MUST` be reset
-  on success and `MUST NOT` be reset on failure; the limit applies to
-  consecutive failures" — the limit being "if a node fails to find an
-  acceptable cluster after `MAX_SPLIT_ATTEMPTS` (RECOMMENDED: 3), it
-  `MUST` create a new cluster with a random `cluster_id`."
-- **Requirement.** `MUST` reset on success, `MUST NOT` on failure,
-  `MUST` create a new cluster after `MAX_SPLIT_ATTEMPTS` consecutive
-  failures.
-- **Source.** `ClusterState::migrate` no longer clears the counter;
-  `ClusterHandle::note_split_outcome` clears it on the first
-  post-migration acceptance test, which `split_if_due` supplies from its
-  recompute; `plan_split` forces `CreateNew` once the consecutive count
-  passes the cap.
-- **Test.** `migrate_preserves_the_attempt_counter`,
-  `consecutive_failures_reach_the_split_cap` (`quip-net`);
-  `a_failed_split_keeps_the_attempt_counter`,
+- **Clause.** "A split attempt is pending from the moment the migration
+  completes until the first §13.2 member-set computation that is eligible
+  to decide it. An attempt is eligible to be decided once the new cluster
+  has accumulated at least one `CLUSTER_HEARTBEAT` since the migration…
+  A pending attempt `MUST NOT` count against `MAX_SPLIT_ATTEMPTS`. When
+  the first eligible computation runs, the attempt is successful if the
+  new cluster is acceptable per §13.2 and failed if it is not… A
+  CreateNew decision ends the previous episode and begins a new pending
+  attempt; the new attempt's outcome is decided by the first eligible
+  computation, not by the first computation after the migration."
+- **Requirement.** `MUST NOT` count a pending attempt; `MUST` reset on an
+  eligible acceptable verdict; `MUST NOT` reset on an eligible
+  unacceptable one; `MUST` create a new cluster after
+  `MAX_SPLIT_ATTEMPTS` consecutive failures.
+- **Source.** `ClusterState::migrate` starts `pending_split`;
+  `ClusterState::note_split_outcome(acceptable, config)` decides only an
+  attempt that is in flight; `ClusterHandle::recompute` decides once
+  `pending_split_settled` is true (one `CLUSTER_HEARTBEAT` after the
+  move); `plan_split` forces `CreateNew` when the consecutive count
+  passes the cap. `apply_split` counts nothing.
+- **Test.** `pending_attempt_does_not_count_against_the_cap`,
+  `create_new_begins_a_fresh_pending_attempt`,
+  `the_cap_is_reachable_after_the_settle_interval`,
+  `a_pending_attempt_that_becomes_acceptable_clears_the_counter`,
+  `a_failed_attempt_counts_only_after_the_settle_interval`,
   `note_split_outcome_clears_only_on_success`,
   `the_cap_forces_a_new_cluster_even_when_a_branch_is_acceptable`
-  (`quip-node`, `split_tests`). The last drives three acceptable-branch
-  failures and asserts the fourth plan is `CreateNew` with the
-  attempt-indexed fresh id, which is what distinguishes the cap from "no
-  branch was acceptable".
-- **Verdict.** PASS.
+  (`quip-node`, `split_tests`); `migrate_preserves_the_attempt_counter`,
+  `consecutive_failures_reach_the_split_cap` (`quip-net`).
+- **Verdict.** PASS. The pending-then-decided distinction is what the
+  four new tests prove: a migration does not count, a `CreateNew`
+  decision does not count, three settled failures reach the cap, and a
+  settled acceptable verdict clears the counter.
 - **Specification status.** clear — the episode is defined in terms of
-  the §13.2 test the implementation already runs.
+  the §13.2 test and the `CLUSTER_HEARTBEAT` the draft already defines.
 - **Submission impact.** `non-blocking`.
 - **Depends on.** none for the counter; the split's observable effect
   depends on the cluster-info exchange (§3 of the M9.6b note), which has
@@ -629,6 +636,11 @@ matrix passes rather than following them.
 Rows 5 and 6 are the first instances where the finding was resolved by a
 draft edit and a test rather than by a design note; they are the cheaper
 half of the class.
+
+A fourth trap kind was identified here: a draft whose own definition
+makes a correct implementation produce a state the same definition calls
+wrong. When the code agrees with the draft and the result is a latch, the
+draft's definition is the defect, not the code.
 
 **The decisive query returns one row, `review required`, none
 `blocking`.** Rows 3, 5 and 6 left it in this revision, each by a

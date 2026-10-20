@@ -1368,7 +1368,7 @@ bft_view_change = [
   new_view: uint,
   last_sequence: uint,
   prepared_digests: [* bytes .size 32],
-  checkpoint_digest: bytes .size 32,  ; Latest stable checkpoint
+  checkpoint_digest: bytes .size 32,  ; The checkpoint's state_digest (chain digest)
   witness_sig: bytes .size 64
 ]
 
@@ -3753,13 +3753,24 @@ CANDIDATE_TTL = 30  ; seconds
 
         <t><strong>Split Limit:</strong> If a node fails to find an acceptable cluster after <strong>MAX_SPLIT_ATTEMPTS</strong> (RECOMMENDED: 3), it <bcp14>MUST</bcp14> create a new cluster with a random <tt>cluster_id</tt>. Except in the case of pathological network topologies, a small number of splits should suffice to reach a stable state.</t>
 
-        <t><strong>Attempt Outcome:</strong> A split attempt is successful
-        when the new cluster's first post-migration member-set computation
-        reports the new cluster acceptable per <xref target="coral-acceptance"/>.
-        It is a failure when that computation reports the new cluster not
-        acceptable. The split-attempt counter <bcp14>MUST</bcp14> be reset
-        on success and <bcp14>MUST NOT</bcp14> be reset on failure; the
-        limit above applies to consecutive failures.</t>
+        <t><strong>Attempt Outcome:</strong> A split attempt is pending
+        from the moment the migration completes until the first
+        <xref target="coral-acceptance"/> member-set computation that is
+        eligible to decide it. An attempt is eligible to be decided once
+        the new cluster has accumulated at least one
+        <strong>CLUSTER_HEARTBEAT</strong> since the migration, so that at
+        least one peer has had the opportunity to advertise the new
+        <tt>cluster_id</tt> and the computation can see a member set. A
+        pending attempt <bcp14>MUST NOT</bcp14> count against
+        <strong>MAX_SPLIT_ATTEMPTS</strong>. When the first eligible
+        computation runs, the attempt is successful if the new cluster is
+        acceptable per §13.2 and failed if it is not; the split-attempt
+        counter <bcp14>MUST</bcp14> be reset on success and
+        <bcp14>MUST NOT</bcp14> be reset on failure, and the failure limit
+        applies to consecutive failures. A CreateNew decision ends the
+        previous episode and begins a new pending attempt; the new
+        attempt's outcome is decided by the first eligible computation, not
+        by the first computation after the migration.</t>
       </section>
 
       <!-- ========================================================== -->

@@ -72,7 +72,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~749 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~758 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -112,12 +112,12 @@ Baseline on `main` after M9.6b:
 
 ```
 quip-core      74 passed
-quip-net      495 passed
+quip-net      496 passed
 quip-storage   57 passed
-quip-node     123 passed
+quip-node     131 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~749 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~758 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -135,7 +135,7 @@ doc-tests       4 passed (one per crate)
 | Spec pass | S1–S7 and D4 resolved in the draft | landed |
 | Spec pass | S8 (`bft_state_transfer` ring signature scope) | decided, draft text landed |
 | Spec pass | S9–S10 (initial witness issuance; verifier independence) | decided, draft text landed |
-| Spec pass | S11–S13 (split attempt episode; expiry filter; quorum as `n - f`) | resolved, draft text landed |
+| Spec pass | S11–S14 (split attempt episode; expiry filter; quorum as `n - f`; pending split attempts) | resolved, draft text landed |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
@@ -1300,9 +1300,13 @@ otherwise.
   `MAX_SPLIT_ATTEMPTS` limit on "fails to find an acceptable cluster"
   without saying when an attempt ends, and `migrate` cleared the counter
   unconditionally, so the failure state never existed. **Resolved** in
-  this commit: an attempt succeeds or fails at the new cluster's first
+  `3a8ae49`: an attempt succeeds or fails at the new cluster's first
   post-migration §13.2 test, the counter resets only on success, and
   `ClusterState::migrate` no longer clears it.
+  Row 3's PASS was found premature by the read-only diagnostic; the
+  two-axis matrix could not see the defect because the code agreed with
+  the draft. Shape B (pending attempts and a settle interval) replaced
+  the first-verdict definition — see S14.
 - **S12 — expiry filter.** §5.3.3 required re-issue after `valid_until`
   without saying whether an expired statement still counts.
   **Resolved** in this commit: it no longer counts, the obligation to
@@ -1313,6 +1317,22 @@ otherwise.
   "3 of 4" without the rule behind them. **Resolved** in this commit: the
   quorum is `n - f`, with those two sizes as specific cases.
   `RingMembership::quorum` already computed `n - f`; no code changed.
+- **S14 — pending split attempts and the settle interval.** S11's
+  definition made the attempt's outcome the new cluster's *first*
+  post-migration §13.2 verdict, and that verdict is false by
+  construction: a `CreateNew` cluster has no advertisers at the move, and
+  a `JoinNear`/`JoinFar` cluster still sees the samples that made
+  `split_due` true at the same timestamp. With "`MUST NOT` reset on
+  failure" the counter only climbed and `MAX_SPLIT_ATTEMPTS` became a
+  latch. **Resolved** in this commit: §13.5 now makes an attempt *pending*
+  until the first eligible recompute, one `CLUSTER_HEARTBEAT` after the
+  migration, so a peer has had the chance to advertise the new
+  `cluster_id`; a pending attempt does not count against the cap, and the
+  eligible verdict either clears the counter (acceptable) or increments
+  it (unacceptable). `ClusterState::pending_split` records the attempt,
+  `ClusterHandle::recompute` decides it once `pending_split_settled`
+  holds, `apply_split` counts nothing, and a `CreateNew` decision begins a
+  fresh pending attempt rather than counting as an outcome.
 
 ---
 

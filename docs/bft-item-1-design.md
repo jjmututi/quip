@@ -36,7 +36,8 @@ recorded under "What it depends on".
 5. **Events and checkpoint.** `Applied` carries the outcome and the new
    digest; `ApplyFailed` is emitted for the failure discriminant, so the
    existing event name keeps its meaning. `bft_checkpoint.state_digest`
-   carries the chain digest.
+   carries the chain digest, and `bft_state_transfer` gains `state_hash`
+   alongside `checkpoint_digest` so the transfer carries both.
 
 6. **Tests** — the four groups under "What the test proves".
 
@@ -47,13 +48,15 @@ recorded under "What it depends on".
 - **`quip-core`'s CBOR** (`quip-core::cbor`) and the driver's existing
   round state machine.
 - **The two-digest split, resolved in the draft.** §5.3.4 previously said
-  `checkpoint_digest` *is* the state digest, while §5.3.4.1 says the field
+  `checkpoint_digest` *is* the state digest, while §5.3.4.1 said the field
   `MUST` be the SHA-256 of the state bytes as transmitted. Those are
   different quantities: one commits to what was applied, the other to what
-  the state is. The draft amendment now distinguishes them —
+  the state is. The amendment now distinguishes them —
   `bft_checkpoint`'s `state_digest` is the chain digest over the committed
-  sequence; `bft_state_transfer`'s `checkpoint_digest` is the SHA-256 of
-  the transferred bytes, which a receiver must verify before applying.
+  sequence; `bft_state_transfer`'s `checkpoint_digest` is that same chain
+  digest, restated so the ring signature can be verified; and the transfer
+  carries `state_hash`, the SHA-256 of the transferred bytes, which a
+  receiver verifies before applying.
 
   They answer different questions and neither substitutes for the other.
   The chain digest detects diverged execution among honest replicas at

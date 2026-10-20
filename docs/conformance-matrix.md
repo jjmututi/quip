@@ -1,7 +1,7 @@
 # Conformance matrix
 
 **Status: fourth delivery.** The eight-field schema, its vocabulary, and
-fourteen rows. The full pass is in progress: "What follows" inventories
+eighteen rows. The full pass is in progress: "What follows" inventories
 the sections still to convert, with their statement counts, so the
 remaining work is a list rather than an estimate.
 
@@ -418,28 +418,112 @@ enough and the edit has not landed."
 - **Submission impact.** `non-blocking`.
 - **Depends on.** none (leaf); row 7 depends on this row.
 
-### 14. §5.3.4.1 — byte digest for state transfer — PASS
+### 14. §5.3.4.1 — byte digest for state transfer — FAIL
 
-- **Clause.** "The `checkpoint_digest` field `MUST` be the SHA-256 of the
-  `state` bytes as transmitted."
+- **Clause.** "The `state_hash` field `MUST` be the SHA-256 of the
+  `state` bytes as transmitted." A transfer carries both digests: the
+  checkpoint's chain digest as `checkpoint_digest` (what the ring
+  signature covers) and `state_hash` (what the bytes must match).
 - **Requirement.** `MUST` bind the transferred bytes; a receiver `MUST`
-  verify it before applying the state.
-- **Source.** `BftDriver::handle_state_transfer_response`
-  (`quip-net/src/bft_driver.rs`): it computes SHA-256 over the message's
-  `state` bytes, compares the result with `checkpoint_digest`, and only
-  then calls `BftHandler::apply_state`.
-- **Test.** `state_transfer_rejects_digest_mismatch`,
-  `state_transfer_roundtrip`.
-- **Verdict.** PASS.
-- **Specification status.** clear — unambiguous after the amendment that
-  distinguishes this byte digest from the chain digest a checkpoint
-  carries.
-- **Submission impact.** `non-blocking`.
+  verify `state_hash` before applying the state.
+- **Source.** `quip_net::bft_driver::BftStateTransfer` carries
+  `checkpoint_digest` and `state`, and **no `state_hash`**;
+  `handle_state_transfer_response` computes SHA-256 over `state` and
+  compares it with `checkpoint_digest` before calling
+  `BftHandler::apply_state`.
+- **Test.** `state_transfer_rejects_digest_mismatch` proves the byte
+  check, but against the field the amended draft reserves for the chain
+  digest. There is no `state_hash` to test.
+- **Verdict.** **FAIL** — the behaviour is right and the message shape is
+  not. The code binds the bytes to `checkpoint_digest`, which now names
+  the chain digest; and it computes no chain digest at all.
+- **Specification status.** clear — the amendment gives the two digests
+  distinct fields and distinct verification steps.
+- **Submission impact.** `non-blocking` — a code gap, tracked by BFT-A
+  item 1, not a draft gap. This is the row that the second amendment
+  created and the matrix now records.
 - **Depends on.** none (leaf); row 8 depends on this row.
+
+### 15. §5.3.4 — pre-prepare digest recomputation — PASS
+
+- **Clause.** "Witnesses `MUST` recompute this digest from the received
+  fields and reject the message with E_BFT_FAILURE if it does not
+  match."
+- **Requirement.** `MUST` recompute and reject on mismatch.
+- **Source.** `BftPreprepare::verify_full` calls `verify_digest`
+  (`quip-net/src/bft.rs`), which recomputes
+  `SHA-256(ring_id || view || sequence || QUIP-CBOR(operation))`; called
+  by `BftDriver::on_preprepare`.
+- **Test.** `preprepare_verify_digest_accepts_matching`,
+  `preprepare_verify_digest_rejects_tampered_operation`,
+  `preprepare_verify_digest_rejects_wrong_digest_field`, plus the five
+  sensitivity tests.
+- **Verdict.** PASS.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf).
+
+### 16. §5.3.4 — new-view quorum — PASS
+
+- **Clause.** "A `bft_new_view` message `MUST` contain at least
+  `VIEW_CHANGE_QUORUM` (5) valid view-change messages."
+- **Requirement.** `MUST`.
+- **Source.** `BftDriver::maybe_emit_new_view` returns without emitting
+  unless `view_change.votes.len() >= membership.quorum()`, and only the
+  primary for the target view emits.
+- **Test.** `view_change_promotes_new_primary`.
+- **Verdict.** PASS. The messages are carried as encoded
+  `bft_view_change` messages and the encoded count is the vote count.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** none (leaf).
+
+### 17. §5.3.4 — state-transfer ring signature — PASS
+
+- **Clause.** "Recipients of a `bft_state_transfer` `MUST` validate the
+  `RingSignature` against the checkpoint signing payload for
+  `(ring_id, checkpoint_sequence, checkpoint_digest)`, by either the
+  individual or the FROST form, and `MUST` validate the quorum
+  threshold before accepting any state transfer."
+- **Requirement.** `MUST` validate the signature set and the quorum.
+- **Source.** `verify_checkpoint_ring_sig`
+  (`quip-net/src/bft_driver.rs`), called by
+  `handle_state_transfer_response` before the byte check.
+- **Test.** `state_transfer_rejects_bad_ring_signature`,
+  `state_transfer_roundtrip`.
+- **Verdict.** PASS for the individual form, which is one of the two
+  forms the clause permits; the FROST branch is BFT-A item 4 and is not
+  a conformance gap while the draft accepts either.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking`.
+- **Depends on.** row 14 — the payload the signature covers is
+  `checkpoint_digest`, whose meaning row 14 fixes.
+
+### 18. §5.3.4 — critical operations in degraded mode — FAIL
+
+- **Clause.** "Critical operations `MUST` be delayed until full consensus
+  (5 of 7) is restored. The following operations `MUST NOT` proceed in
+  DEGRADED mode: key rotation; key revocation; witness membership
+  changes; resource ownership transfers; Trusted CID registrations that
+  require witness validation."
+- **Requirement.** `MUST NOT` proceed.
+- **Source.** none. `grep -rn DEGRADED quip-net/src/bft_driver.rs` finds a
+  doc comment and nothing else; the driver accepts any operation kind
+  whenever it has quorum, and does not distinguish a 3-of-4 ring from a
+  full one for operation admission.
+- **Test.** none.
+- **Verdict.** **FAIL** — the gate does not exist. A key rotation can
+  commit with three of four signatures on a degraded ring.
+- **Specification status.** clear — the list of operations and the
+  quorum are both stated.
+- **Submission impact.** `non-blocking` — a code gap against a clear
+  clause, and it belongs with the degraded-ring work rather than the
+  draft.
+- **Depends on.** row 6 — the quorum that defines "degraded".
 
 ## What follows
 
-**Coverage: 14 rows against 146 `MUST` and 104 `SHOULD` statements in
+**Coverage: 18 rows against 146 `MUST` and 104 `SHOULD` statements in
 104 sections.** The rows cover the decision points where the reference
 implementation gives a source to check against — the capability surface,
 the witness threshold, the BFT quorum and execution contract, the cluster
@@ -454,7 +538,7 @@ Rows by section:
 |---|---|
 | §4 Handshake and profile negotiation | 1, 4 |
 | §5.3.3 Witness statements | 2, 5, 10, 11 |
-| §5.3.4 BFT consensus, operations, execution | 6, 8 |
+| §5.3.4 BFT consensus, operations, execution | 6, 8, 15, 16, 17, 18 |
 | §10.1 Signing convention | 9 |
 | §13.2 Cluster acceptance | 12 |
 | §13.4 Cluster merging | 7 |
@@ -468,9 +552,11 @@ Not yet covered, in the order the next passes should take them:
    capability-bit registry, extension handling. Mechanical (`clear`)
    except the registry, which is `silent` where the draft names bits the
    code does not use.
-2. **§5.3.4's remaining `MUST`s** — preprepare/prepare/precommit
-   ordering, view change, the `new_view` form, the checkpoint format.
-   This is BFT-A's remaining items and the most design-heavy group.
+2. **§5.3.4's remaining `MUST`s** — the prepare/precommit/commit ordering
+   rules, the contents a view-change vote must carry, the `new_view`'s
+   prepared and checkpoint carry-forward (BFT-A items 2 and 3), and the
+   checkpoint's state-format requirements. This is BFT-A's remaining work
+   and the most design-heavy group.
 3. **§8 CIDs and merkle range** — 16 `MUST`s, mostly `clear` and backed
    by `quip-storage` tests.
 4. **§12 NAT** — 6 `MUST`s, backed by `nat.rs` / `nat_driver.rs` tests.
@@ -523,6 +609,23 @@ fails, the tree shows what is downstream of it; the flat table is where
 the row itself is read. The tree is not maintained separately, because a
 second copy of the edges would be wrong the first time a row is edited.
 
+**A `PASS` on an `incomplete` specification is a draft finding.** The
+verdict and the specification status can disagree in the direction that
+matters: the code does the right thing while the draft names it wrongly,
+so the row reads `PASS` on an `incomplete` clause. That is not a code gap
+and it is not a passing row — it is the draft being wrong about something
+the implementation accidentally got right. Such findings are discovered
+by reading sections beside each other, not by per-clause checks, because
+each clause is individually true. The design notes are the instrument;
+the matrix records the finding.
+
+Three of this project's cross-section findings were found that way —
+S8's field-name contradiction, the unknown-keys rule that would have
+closed an open map, and the chain-versus-byte digest collision — and all
+three would have survived every test in the tree, because in each case
+both behaviours were correct. That is why the design notes precede the
+matrix passes rather than following them.
+
 **The decisive query returns four rows, all `review required`, none
 `blocking`.** It returned five in the previous revision; row 8 left the
 query because §5.3.4 now fixes the outcome's wire form as well as the
@@ -532,3 +635,11 @@ The remaining four are §13.5's attempt episode and §13.4's merge
 (`incomplete`) and §5.3.3's re-issue and §5.3.4's quorum (`ambiguous`).
 Row 8 is still `FAIL`, but on the code alone: the implementation is the
 next BFT unit, not a draft edit.
+
+The §5.3.4/§5.3.4.1 pass added rows 14–18. Two are `FAIL` on `clear`
+clauses — row 14 (the transfer carries no `state_hash`, and the code
+binds the bytes to the field the amended draft reserves for the chain
+digest) and row 18 (the driver has no degraded-mode gate, so a key
+rotation can commit on a 3-of-4 ring). Both are code gaps behind clear
+text, so neither enters this query; they are tracked as BFT-A item 1 and
+the new item 5a.

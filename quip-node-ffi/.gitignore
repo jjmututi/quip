@@ -7,3 +7,5 @@
 
 # Build output
 /target/
+# Widget Preview related
+.widget_preview/

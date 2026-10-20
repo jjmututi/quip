@@ -1394,7 +1394,8 @@ bft_state_transfer = [
   ring_id: bytes .size 32,
   checkpoint_sequence: uint,
   state: bytes,
-  checkpoint_digest: bytes .size 32,
+  checkpoint_digest: bytes .size 32,  ; The checkpoint's state_digest (chain digest)
+  state_hash: bytes .size 32,         ; SHA-256(state) as transmitted
   ring_signature: RingSignature   ; Witness ring signature (5 of 7)
 ]
 
@@ -1660,15 +1661,19 @@ Operation = {
             over the committed operation sequence, computed as above from
             the all-zero 32-byte genesis value. The
             <tt>checkpoint_digest</tt> a <tt>bft_state_transfer</tt>
-            carries is a different quantity: the SHA-256 of the state
-            bytes as transmitted, which a receiver
-            <bcp14>MUST</bcp14> verify against the received state before
-            applying it (<xref target="bft-checkpoint"/>). Neither digest
-            substitutes for the other — one commits to what was applied,
-            the other to what the state is. Divergence is detected at
-            checkpoint quorum and is not repaired by the checkpoint
-            mechanism: the protocol's answer to a failed quorum is a view
-            change.</t>
+            carries is that same chain digest, restated so the transfer's
+            ring signature — the checkpoint's signature set — can be
+            verified without carrying the checkpoint message. The transfer
+            also carries <tt>state_hash</tt>, the SHA-256 of the
+            <tt>state</tt> bytes as transmitted, which a receiver
+            <bcp14>MUST</bcp14> verify before applying the state
+            (<xref target="bft-checkpoint"/>). The two digests are not
+            interchangeable — one commits to what was applied, the other to
+            what the state is — and a transfer needs both: the chain digest
+            to check the signature, <tt>state_hash</tt> to check the bytes.
+            Divergence is detected at checkpoint quorum and is not repaired
+            by the checkpoint mechanism: the protocol's answer to a failed
+            quorum is a view change.</t>
           </section>
         </section>
         
@@ -1722,7 +1727,7 @@ VIEW_CHANGE_QUORUM = 5     ; Quorum size for view changes and checkpoints
             message as <tt>checkpoint_sequence</tt> and
             <tt>checkpoint_digest</tt> — requiring quorum (5-of-7 for a full
             ring, 3-of-4 degraded), and verifies that
-            <tt>checkpoint_digest</tt> is the SHA-256 of the transmitted state
+            <tt>state_hash</tt> is the SHA-256 of the transmitted state
             before applying it.</li>
             <li>The lagging witness resumes participation from the checkpoint.</li>
           </ol>
@@ -1738,7 +1743,7 @@ VIEW_CHANGE_QUORUM = 5     ; Quorum size for view changes and checkpoints
           mandate a serialization. The following requirements apply:</t>
 
           <ul>
-            <li>The <tt>checkpoint_digest</tt> field
+            <li>The <tt>state_hash</tt> field
             <bcp14>MUST</bcp14> be the SHA-256 of the <tt>state</tt>
             bytes as transmitted.</li>
             <li>The <tt>state</tt> bytes <bcp14>MUST</bcp14> be

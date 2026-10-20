@@ -160,7 +160,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, fourteen rows, and a coverage table for the remaining 146 `MUST` / 104 `SHOULD` statements by section. Row 8 (`apply()` execution contract) is `FAIL`/`clear`/`non-blocking` and depends on rows 6 and 14; row 14 records the byte digest for state transfer | in progress |
+| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, eighteen rows, and a coverage table for the remaining `MUST`/`SHOULD` statements by section. The §5.3.4/§5.3.4.1 pass added rows 14–18: the transfer's two digests (row 14, `FAIL` — the code has no `state_hash`), preprepare digest, new-view quorum, ring-signature validation (`PASS`), and degraded-mode admission (row 18, `FAIL` — no gate) | in progress |
 
 ---
 
@@ -1354,7 +1354,11 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    byte digest, verified before the state is applied. The chain's genesis
    is the all-zero 32-byte value, stated in the draft and provisional.
    The matrix records the byte digest as row 14 and row 8 now depends on
-   it.
+   it. The §5.3.4 pass then found that the transfer carried only one
+   digest: `bft_state_transfer` gains `state_hash` (SHA-256 of the bytes)
+   while `checkpoint_digest` becomes the checkpoint's chain digest, so the
+   ring signature has a payload to verify and the bytes have a digest of
+   their own. The code has neither the field nor the chain digest yet.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier
@@ -1377,6 +1381,14 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    Spec pass section. The FROST gap in item 4 is unaffected: the draft
    accepts both signature forms, the implementation verifies the
    individual form only.
+
+5a. **Degraded-mode operation admission.** §5.3.4 forbids key rotation,
+   revocation, witness membership changes, resource ownership transfers
+   and Trusted-CID registrations on a 3-of-4 ring, and `BftDriver` has no
+   gate: it accepts any operation kind once it has quorum, without
+   distinguishing a degraded ring from a full one. Conformance-matrix
+   row 18. Needs a kind check at proposal and a test that a degraded ring
+   rejects the five kinds.
 
 ### BFT validation (BFT-V)
 

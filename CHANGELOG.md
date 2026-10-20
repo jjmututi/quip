@@ -1344,7 +1344,14 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    as is the `OperationOutcome` wire form (text keys, a text
    discriminant, a 256-byte payload bound). Row 8 is now `clear` /
    `non-blocking`; its verdict stays `FAIL` because the implementation
-   is the next BFT unit.
+   is the next BFT unit. The design contract for that unit is
+   `docs/bft-item-1-design.md`, and it records one unresolved dependency
+   before the code can start: §5.3.4.1 says `checkpoint_digest` is the
+   SHA-256 of the transferred state bytes, while §5.3.4 says it is the
+   execution-state digest — both cannot hold, and the code implements
+   the older one. The note recommends two digests and a one-sentence
+   amendment; the §5.3.4 matrix pass is where the conflicting row is
+   added.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier
@@ -1797,6 +1804,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
 | `docs/conformance-matrix.md:1` | M9.6b | clause → source → test matrix; eight-field schema, thirteen rows, dependency edges, coverage inventory |
 | `docs/apply-contract.md:1` | BFT-A 1 | the three execution contracts, compared, with a recommendation |
+| `docs/bft-item-1-design.md:1` | BFT-A 1 | execution contract: outcome type, validate hook, chain digest, two-digest conflict |
 | `quip-node/src/peer.rs:1` | M9.5b-b, M9.5b-c | peer slot and lifecycle vocabulary |
 | `quip-node/src/peer.rs` (`PeerSlot`) | M9.5b-b | generation identity |
 | `quip-node/src/peer.rs` (`PeerLifecycle`) | M9.5b-b | §2a transition table |

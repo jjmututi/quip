@@ -1150,6 +1150,7 @@ mod tests {
                 checkpoint_sequence: 100,
                 state: vec![1, 2, 3],
                 checkpoint_digest: [0xab; 32],
+                state_hash: [0xac; 32],
                 ring_signature: quip_core::messages::RingSignature::Individual(
                     quip_core::messages::IndividualRingSig {
                         signatures: vec![[0; 64]; 5],

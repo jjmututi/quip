@@ -192,10 +192,10 @@ pub trait BftHandler {
 
     /// Install a state received via `bft_state_transfer`.
     ///
-    /// The driver validates the ring signature and the
-    /// `checkpoint_digest` against the transmitted bytes before
-    /// calling this; the handler installs the state. The default is
-    /// a no-op.
+    /// The driver validates the ring signature against
+    /// `checkpoint_digest` and the transmitted bytes against
+    /// `state_hash` before calling this; the handler installs the
+    /// state. The default is a no-op.
     fn apply_state(&mut self, _state: &[u8]) -> Result<()> {
         Ok(())
     }
@@ -1197,10 +1197,15 @@ where
     /// empty ring signature. Peers with a newer stable checkpoint
     /// will respond with a fully-populated `bft_state_transfer`.
     pub fn request_state_transfer(&mut self) -> Result<()> {
+        let state = Vec::new();
         let msg = BftStateTransfer {
             ring_id: self.ring_id,
             checkpoint_sequence: self.checkpoint_sequence,
-            state: Vec::new(),
+            // The request carries no state, so its byte digest is the
+            // digest of the empty string; the responder ignores both
+            // this and the chain digest.
+            state_hash: sha256(&state),
+            state,
             checkpoint_digest: self.checkpoint_digest,
             ring_signature: RingSignature::Individual(IndividualRingSig {
                 signatures: Vec::new(),
@@ -1283,6 +1288,11 @@ where
         let response = BftStateTransfer {
             ring_id: self.ring_id,
             checkpoint_sequence: stable.sequence,
+            // The two digests are different quantities: `state_hash`
+            // covers the bytes as transmitted, `checkpoint_digest` is the
+            // chain digest the checkpoint signatures cover. Both are
+            // computed from what is actually sent, not recomputed later.
+            state_hash: sha256(&state),
             state,
             checkpoint_digest: stable.digest,
             ring_signature: RingSignature::Individual(IndividualRingSig {
@@ -1318,10 +1328,12 @@ where
             return Err(Error::Bft("state transfer ring signature invalid"));
         }
 
-        // Verify the digest matches the transmitted state.
+        // Verify the byte digest matches the transmitted state. This is
+        // the byte check; the chain digest was checked against the ring
+        // signature above.
         let computed = sha256(&msg.state);
-        if computed != msg.checkpoint_digest {
-            return Err(Error::Bft("state transfer digest mismatch"));
+        if computed != msg.state_hash {
+            return Err(Error::Bft("state transfer byte digest mismatch"));
         }
 
         // Install.
@@ -1559,6 +1571,52 @@ mod tests {
         }
     }
 
+    /// A handler whose chain digest is **not** the digest of its state
+    /// bytes, which is what §5.3.4 specifies: `state_digest` is a
+    /// rolling digest over the committed operation sequence, while
+    /// `state_bytes` is the counter alone. The counting handler makes the
+    /// two quantities equal, so it cannot tell whether a transfer
+    /// distinguishes them; this one can.
+    #[derive(Default)]
+    struct ChainDigestHandler {
+        counter: u64,
+        /// Rolling chain digest over the applied operations. Starts at
+        /// the all-zero genesis value §5.3.4 states.
+        chain: Digest,
+        applied: Vec<(RingId, u64, Operation)>,
+    }
+
+    impl BftHandler for ChainDigestHandler {
+        fn apply(&mut self, ring_id: &RingId, sequence: u64, operation: &Operation) -> Result<()> {
+            self.counter = self.counter.saturating_add(1);
+            let mut preimage = self.chain.to_vec();
+            preimage.extend_from_slice(&sequence.to_be_bytes());
+            preimage.extend_from_slice(operation.kind.as_bytes());
+            preimage.extend_from_slice(&operation.subject);
+            self.chain = sha256(&preimage);
+            self.applied.push((*ring_id, sequence, operation.clone()));
+            Ok(())
+        }
+
+        fn state_digest(&self) -> Digest {
+            self.chain
+        }
+
+        fn state_bytes(&self) -> Vec<u8> {
+            self.counter.to_be_bytes().to_vec()
+        }
+
+        fn apply_state(&mut self, state: &[u8]) -> Result<()> {
+            if state.len() != 8 {
+                return Err(Error::Bft("counting state must be 8 bytes"));
+            }
+            let mut arr = [0u8; 8];
+            arr.copy_from_slice(state);
+            self.counter = u64::from_be_bytes(arr);
+            Ok(())
+        }
+    }
+
     /// A handler that records operations but has no meaningful state
     /// (the trait's default state methods apply).
     #[derive(Default)]
@@ -1587,6 +1645,7 @@ mod tests {
 
     type Driver = BftDriver<Ed25519Signer, Ed25519Verifier, RecordingHandler>;
     type CountingDriver = BftDriver<Ed25519Signer, Ed25519Verifier, CountingHandler>;
+    type ChainDigestDriver = BftDriver<Ed25519Signer, Ed25519Verifier, ChainDigestHandler>;
 
     /// Build drivers in canonical membership order, so `drivers[i]`
     /// has NodeId `m.members()[i]`.
@@ -1641,6 +1700,12 @@ mod tests {
         (m, drivers)
     }
 
+    fn build_chain_digest_ring() -> (RingMembership, Vec<ChainDigestDriver>) {
+        let (m, signers) = ring7();
+        let drivers = drivers_in_order(&m, signers, ChainDigestHandler::default, [1; 32], 0);
+        (m, drivers)
+    }
+
     /// Propagate messages until quiescent. Returns collected events
     /// per driver.
     fn pump(
@@ -1689,8 +1754,8 @@ mod tests {
 
     /// Deliver only checkpoint messages, so checkpoint stability can
     /// be tested in isolation from state transfers.
-    fn pump_checkpoints(
-        drivers: &mut [CountingDriver],
+    fn pump_checkpoints<H: BftHandler>(
+        drivers: &mut [BftDriver<Ed25519Signer, Ed25519Verifier, H>],
         membership: &RingMembership,
     ) {
         for _ in 0..20 {
@@ -1719,8 +1784,8 @@ mod tests {
 
     /// Pump messages including checkpoints and state transfers, used
     /// by the counting-handler tests.
-    fn pump_counting(
-        drivers: &mut [CountingDriver],
+    fn pump_counting<H: BftHandler>(
+        drivers: &mut [BftDriver<Ed25519Signer, Ed25519Verifier, H>],
         membership: &RingMembership,
     ) -> Vec<Vec<BftEvent>> {
         let n = drivers.len();
@@ -2157,6 +2222,7 @@ mod tests {
             BftOutbound::StateTransferRequest(msg) => {
                 assert_eq!(msg.checkpoint_sequence, 0);
                 assert!(msg.state.is_empty());
+                assert_eq!(msg.state_hash, sha256(&[]));
             }
             other => panic!("expected StateTransferRequest, got {other:?}"),
         }
@@ -2213,6 +2279,13 @@ mod tests {
             other => panic!("expected response, got {other:?}"),
         };
 
+        // The response carries both digests, each of the quantity it
+        // names: `checkpoint_digest` is the checkpoint's chain digest
+        // (what the ring signature covers), `state_hash` is SHA-256 of
+        // the bytes about to be sent.
+        assert_eq!(response.checkpoint_digest, healthy_digest);
+        assert_eq!(response.state_hash, sha256(&response.state));
+
         // Deliver the response to driver 0.
         drivers[0]
             .on_state_transfer(&m.members()[2], &response)
@@ -2251,6 +2324,7 @@ mod tests {
             checkpoint_sequence: 0,
             state: Vec::new(),
             checkpoint_digest: [0u8; 32],
+            state_hash: sha256(&[]),
             ring_signature: RingSignature::Individual(IndividualRingSig {
                 signatures: Vec::new(),
                 signers: Vec::new(),
@@ -2264,11 +2338,96 @@ mod tests {
             other => panic!("expected response, got {other:?}"),
         };
 
-        // Tamper with the state bytes, leaving the digest untouched.
+        // Tamper with the state bytes, leaving both digests untouched.
         response.state.push(0xFF);
 
+        // The byte check must fire, not the ring-signature check: the
+        // chain digest and the signature are still the real ones.
         let err = drivers[0].on_state_transfer(&m.members()[2], &response);
-        assert!(err.is_err(), "digest mismatch must be rejected");
+        assert!(
+            matches!(&err, Err(Error::Bft(m)) if m.contains("byte digest mismatch")),
+            "byte digest mismatch must be rejected by the byte check, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn state_transfer_distinguishes_chain_digest_from_byte_digest() {
+        let (m, mut drivers) = build_chain_digest_ring();
+
+        // Drive one successful round so every handler applies the same
+        // operation and computes the same chain digest.
+        drivers[0].start(operation("revocation")).unwrap();
+        let _ = pump_counting(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.handler().counter, 1);
+            assert_eq!(d.sequence(), 1);
+        }
+
+        // Precondition, and the whole point of this test: this handler's
+        // chain digest is a rolling digest over applied operations, so it
+        // is not the digest of the state bytes. With the counting handler
+        // the two are equal and a conflation cannot be observed.
+        let healthy_state = drivers[3].handler().state_bytes();
+        let healthy_chain = drivers[3].handler().state_digest();
+        assert_ne!(
+            healthy_chain,
+            sha256(&healthy_state),
+            "the fixture must keep the two digests distinct"
+        );
+
+        // Checkpoint at sequence 1, carrying the chain digest.
+        for d in &mut drivers {
+            d.start_checkpoint().unwrap();
+        }
+        pump_checkpoints(&mut drivers, &m);
+        assert_eq!(drivers[0].checkpoint_sequence(), 1);
+        assert_eq!(*drivers[0].checkpoint_digest(), healthy_chain);
+        assert!(drivers[0].stable_checkpoint_signatures().unwrap() >= m.quorum());
+
+        // Make driver 0 lagging.
+        drivers[0].handler_mut().counter = 0;
+        drivers[0].handler_mut().chain = [0u8; 32];
+        drivers[0].checkpoint_sequence = 0;
+        drivers[0].checkpoint_digest = [0u8; 32];
+        drivers[0].stable_checkpoint = None;
+        drivers[0].sequence = 0;
+
+        // Request, then collect a healthy peer's response.
+        drivers[0].request_state_transfer().unwrap();
+        let request = match drivers[0].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferRequest(msg)) => msg,
+            other => panic!("expected request, got {other:?}"),
+        };
+        drivers[2]
+            .on_state_transfer(&m.members()[0], &request)
+            .unwrap();
+        let response = match drivers[2].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferResponse(msg)) => msg,
+            other => panic!("expected response, got {other:?}"),
+        };
+
+        // The transfer carries both digests and they differ.
+        assert_eq!(response.state, healthy_state);
+        assert_eq!(response.state_hash, sha256(&response.state));
+        assert_eq!(response.checkpoint_digest, healthy_chain);
+        assert_ne!(response.checkpoint_digest, response.state_hash);
+
+        // Before the fix the receiver compared SHA-256 of the bytes
+        // against `checkpoint_digest` and rejected this transfer at
+        // `handle_state_transfer_response` with "state transfer digest
+        // mismatch". Now the bytes are checked against `state_hash` and
+        // the ring signature against `checkpoint_digest`, so a handler
+        // whose chain digest is what §5.3.4 specifies still transfers.
+        drivers[0]
+            .on_state_transfer(&m.members()[2], &response)
+            .unwrap();
+
+        assert_eq!(drivers[0].checkpoint_sequence, 1);
+        // The installed value is the chain digest, not the byte digest.
+        assert_eq!(drivers[0].checkpoint_digest, healthy_chain);
+        assert_eq!(drivers[0].handler().counter, 1);
+        assert_eq!(drivers[0].sequence(), 1);
+        assert_eq!(drivers[0].handler().state_bytes(), healthy_state);
     }
 
     #[test]
@@ -2280,6 +2439,7 @@ mod tests {
             checkpoint_sequence: 5,
             state: vec![0, 0, 0, 0, 0, 0, 0, 1],
             checkpoint_digest: sha256(&[0u8, 0, 0, 0, 0, 0, 0, 1]),
+            state_hash: sha256(&[0u8, 0, 0, 0, 0, 0, 0, 1]),
             ring_signature: RingSignature::Individual(IndividualRingSig {
                 signatures: vec![[0u8; 64]; 5],
                 signers: vec![
@@ -2306,6 +2466,7 @@ mod tests {
             checkpoint_sequence: 3,
             state: vec![0u8; 8],
             checkpoint_digest: sha256(&[0u8; 8]),
+            state_hash: sha256(&[0u8; 8]),
             ring_signature: RingSignature::Individual(IndividualRingSig {
                 signatures: vec![[0u8; 64]; 5],
                 signers: vec![

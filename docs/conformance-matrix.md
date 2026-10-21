@@ -425,7 +425,7 @@ enough and the edit has not landed."
 - **Submission impact.** `non-blocking`.
 - **Depends on.** none (leaf); row 7 depends on this row.
 
-### 14. §5.3.4.1 — byte digest for state transfer — FAIL
+### 14. §5.3.4.1 — byte digest for state transfer — PASS
 
 - **Clause.** "The `state_hash` field `MUST` be the SHA-256 of the
   `state` bytes as transmitted." A transfer carries both digests: the
@@ -433,22 +433,33 @@ enough and the edit has not landed."
   signature covers) and `state_hash` (what the bytes must match).
 - **Requirement.** `MUST` bind the transferred bytes; a receiver `MUST`
   verify `state_hash` before applying the state.
-- **Source.** `quip_net::bft_driver::BftStateTransfer` carries
-  `checkpoint_digest` and `state`, and **no `state_hash`**;
-  `handle_state_transfer_response` computes SHA-256 over `state` and
-  compares it with `checkpoint_digest` before calling
-  `BftHandler::apply_state`.
-- **Test.** `state_transfer_rejects_digest_mismatch` proves the byte
-  check, but against the field the amended draft reserves for the chain
-  digest. There is no `state_hash` to test.
-- **Verdict.** **FAIL** — the behaviour is right and the message shape is
-  not. The code binds the bytes to `checkpoint_digest`, which now names
-  the chain digest; and it computes no chain digest at all.
+- **Source.** `quip_net::bft::BftStateTransfer` carries both digests in
+  the draft's field order — `checkpoint_digest`, then `state_hash`.
+  `handle_state_transfer_response` compares `sha256(&msg.state)` with
+  `state_hash` before calling `BftHandler::apply_state`, and verifies the
+  ring signature against `checkpoint_digest` through
+  `verify_checkpoint_ring_sig`, which rebuilds the `bft_checkpoint`
+  payload with that value as the checkpoint's `state_digest`.
+- **Test.** `state_transfer_rejects_digest_mismatch` corrupts the state
+  bytes, leaves both digests intact, and asserts the byte check fires
+  rather than the signature check. `state_transfer_roundtrip` asserts a
+  real response carries the chain digest in `checkpoint_digest` and
+  SHA-256 of its own bytes in `state_hash`, and that the install stores
+  the chain digest.
+  `state_transfer_distinguishes_chain_digest_from_byte_digest` runs the
+  same path against a handler whose `state_digest` is a rolling digest
+  over applied operations rather than the digest of `state_bytes`, so the
+  two quantities differ; it asserts they differ before transferring, and
+  that the transfer is accepted. That test fails against the previous
+  comparison, which rejected it with "state transfer digest mismatch".
+- **Verdict.** **PASS** — the message carries both digests, each field is
+  checked against the quantity it names, and the two checks are
+  independent: corrupt bytes are caught by `state_hash`, and a
+  substituted chain digest is caught by the ring signature.
 - **Specification status.** clear — the amendment gives the two digests
   distinct fields and distinct verification steps.
-- **Submission impact.** `non-blocking` — a code gap, tracked by BFT-A
-  item 1, not a draft gap. This is the row that the second amendment
-  created and the matrix now records.
+- **Submission impact.** `non-blocking` — the code gap this row recorded
+  is closed, and no submission decision depended on it.
 - **Depends on.** none (leaf); row 8 depends on this row.
 
 ### 15. §5.3.4 — pre-prepare digest recomputation — PASS
@@ -651,7 +662,8 @@ merge, which needs a design note before any code — the draft does not
 define what "join" does to the cluster id, the member set or the
 coordinator.
 
-Rows 8 and 14–18 are `FAIL` on `clear` clauses — the `apply()` contract,
-the transfer's missing `state_hash`, and the degraded-mode gate. Those
-are code gaps behind adequate text, so they do not enter this query; they
-are tracked as BFT-A item 1 and item 5a.
+Rows 8 and 18 are `FAIL` on `clear` clauses — the `apply()` contract and
+the degraded-mode gate. Row 14 was the third, the transfer's missing
+`state_hash`, and it left the list when the field landed. Those rows are
+code gaps behind adequate text, so they do not enter this query; they are
+tracked as BFT-A item 1 and item 5a.

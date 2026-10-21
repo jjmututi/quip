@@ -72,7 +72,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~758 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~759 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -112,12 +112,12 @@ Baseline on `main` after M9.6b:
 
 ```
 quip-core      74 passed
-quip-net      496 passed
+quip-net      497 passed
 quip-storage   57 passed
 quip-node     131 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~758 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~759 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -135,7 +135,7 @@ doc-tests       4 passed (one per crate)
 | Spec pass | S1–S7 and D4 resolved in the draft | landed |
 | Spec pass | S8 (`bft_state_transfer` ring signature scope) | decided, draft text landed |
 | Spec pass | S9–S10 (initial witness issuance; verifier independence) | decided, draft text landed |
-| Spec pass | S11–S14 (split attempt episode; expiry filter; quorum as `n - f`; pending split attempts) | resolved, draft text landed |
+| Spec pass | S11–S15 (split attempt episode; expiry filter; quorum as `n - f`; pending split attempts; the state-transfer digest pair) | resolved, draft text landed |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
@@ -161,7 +161,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, eighteen rows, and a coverage table for the remaining `MUST`/`SHOULD` statements by section. The §5.3.4/§5.3.4.1 pass added rows 14–18: the transfer's two digests (row 14, `FAIL` — the code has no `state_hash`), preprepare digest, new-view quorum, ring-signature validation (`PASS`), and degraded-mode admission (row 18, `FAIL` — no gate) | in progress |
+| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, eighteen rows, and a coverage table for the remaining `MUST`/`SHOULD` statements by section. The §5.3.4/§5.3.4.1 pass added rows 14–18: the transfer's two digests (row 14, `PASS` once the code gained `state_hash`), preprepare digest, new-view quorum, ring-signature validation (`PASS`), and degraded-mode admission (row 18, `FAIL` — no gate) | in progress |
 
 ---
 
@@ -1333,6 +1333,27 @@ otherwise.
   `ClusterHandle::recompute` decides it once `pending_split_settled`
   holds, `apply_split` counts nothing, and a `CreateNew` decision begins a
   fresh pending attempt rather than counting as an outcome.
+- **S15 — the state-transfer digest pair.** §5.3.4.1 gives
+  `bft_state_transfer` two digests: `checkpoint_digest`, the checkpoint's
+  chain digest restated so the checkpoint's signature set can be verified
+  without carrying the checkpoint message, and `state_hash`, the SHA-256
+  of the `state` bytes as transmitted. The implementation carried only
+  `checkpoint_digest` and documented it as the digest of `state`, so the
+  receiver's byte check compared SHA-256 of the bytes against a field the
+  responder filled from `stable.digest`, the chain digest. The two
+  quantities agreed only because the test handler defined `state_digest`
+  as `sha256(state_bytes)`; a handler whose chain digest is a digest over
+  the committed operation sequence, which §5.3.4 specifies, would have
+  had every state transfer rejected. **Resolved** in this commit:
+  `BftStateTransfer` gains `state_hash` in the draft's field order, the
+  responder fills it from the bytes it is about to send, and
+  `handle_state_transfer_response` verifies the bytes against
+  `state_hash` while the ring signature continues to be verified against
+  `checkpoint_digest`. Conformance matrix row 14 moves `FAIL` → `PASS`.
+  The row was correct before the reviews ran: it recorded the missing
+  field and the conflated check when the code still had them, and the
+  two reviews of `c6a371a` confirmed the entry rather than discovering
+  it.
 
 ---
 
@@ -1383,20 +1404,21 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    discriminant, a 256-byte payload bound). Row 8 is now `clear` /
    `non-blocking`; its verdict stays `FAIL` because the implementation
    is the next BFT unit. The design contract for that unit is
-   `docs/bft-item-1-design.md`. It surfaced a conflict — §5.3.4.1 says
-   `checkpoint_digest` is the SHA-256 of the transferred state bytes,
+   `docs/bft-item-1-design.md`. It surfaced a conflict — §5.3.4.1 said
+   `checkpoint_digest` was the SHA-256 of the transferred state bytes,
    while §5.3.4 said the same field was the execution-state digest — and
    the draft amendment resolves it by keeping both quantities under the
    names the CDDL already gives them: `bft_checkpoint`'s `state_digest`
-   is the chain digest, `bft_state_transfer`'s `checkpoint_digest` is the
-   byte digest, verified before the state is applied. The chain's genesis
-   is the all-zero 32-byte value, stated in the draft and provisional.
-   The matrix records the byte digest as row 14 and row 8 now depends on
-   it. The §5.3.4 pass then found that the transfer carried only one
-   digest: `bft_state_transfer` gains `state_hash` (SHA-256 of the bytes)
-   while `checkpoint_digest` becomes the checkpoint's chain digest, so the
-   ring signature has a payload to verify and the bytes have a digest of
-   their own. The code has neither the field nor the chain digest yet.
+   is the chain digest, and `bft_state_transfer` carries the chain digest
+   as `checkpoint_digest` alongside a separate `state_hash` for the
+   bytes, which a receiver verifies before the state is applied. The
+   chain's genesis is the all-zero 32-byte value, stated in the draft and
+   provisional. The matrix records the byte digest as row 14 and row 8 now
+   depends on it. Row 14 recorded the missing `state_hash` and the
+   conflated check while the code still had both defects; the
+   implementation has since gained the field, the responder fills it, and
+   the byte check compares against it, so the row is `PASS`. The reviews
+   of `c6a371a` confirmed that entry rather than discovering it.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

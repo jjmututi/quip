@@ -709,8 +709,17 @@ pub struct BftStateTransfer {
     /// on its digest. The spec does not define the state's internal
     /// structure.
     pub state: Vec<u8>,
-    /// Digest of `state`.
+    /// The checkpoint's `state_digest` (chain digest).
+    ///
+    /// Restated from the `bft_checkpoint` this transfer carries, so the
+    /// ring signature can be verified without carrying the checkpoint
+    /// message. It commits to what was applied, not to the bytes.
     pub checkpoint_digest: Digest,
+    /// SHA-256 of the state bytes as transmitted.
+    ///
+    /// Distinct from `checkpoint_digest`: this commits to what the
+    /// state *is*, and a receiver checks it before applying the state.
+    pub state_hash: Digest,
     /// A ring signature over the transfer.
     ///
     /// MUST be a valid `RingSignature` with at least
@@ -728,6 +737,7 @@ impl BftStateTransfer {
                 CborValue::Int(self.checkpoint_sequence as i128),
                 CborValue::Bytes(self.state.clone()),
                 CborValue::Bytes(self.checkpoint_digest.to_vec()),
+                CborValue::Bytes(self.state_hash.to_vec()),
                 self.ring_signature.to_cbor(),
             ],
         );
@@ -741,7 +751,7 @@ impl BftStateTransfer {
             return Err(Error::BadFrame("not a bft_state_transfer"));
         }
         let f = fields(&v, "bft_state_transfer")?;
-        if f.len() != 5 {
+        if f.len() != 6 {
             return Err(Error::BadFrame("bft_state_transfer arity"));
         }
         Ok(Self {
@@ -749,7 +759,8 @@ impl BftStateTransfer {
             checkpoint_sequence: as_u64(&f[1])?,
             state: as_bytes(&f[2])?,
             checkpoint_digest: as_bytes_n32(&f[3])?,
-            ring_signature: RingSignature::from_cbor(&f[4]).map_err(Error::Core)?,
+            state_hash: as_bytes_n32(&f[4])?,
+            ring_signature: RingSignature::from_cbor(&f[5]).map_err(Error::Core)?,
         })
     }
 
@@ -766,6 +777,7 @@ impl BftStateTransfer {
                 CborValue::Int(self.checkpoint_sequence as i128),
                 CborValue::Bytes(self.state.clone()),
                 CborValue::Bytes(self.checkpoint_digest.to_vec()),
+                CborValue::Bytes(self.state_hash.to_vec()),
             ],
         );
         Ok(encode(&msg)?)
@@ -1339,6 +1351,7 @@ mod tests {
             checkpoint_sequence: 100,
             state: vec![0x11, 0x22, 0x33],
             checkpoint_digest: [0xab; 32],
+            state_hash: [0xac; 32],
             ring_signature: RingSignature::Individual(IndividualRingSig {
                 signatures: vec![[0; 64]; 5],
                 signers: vec![nid(1), nid(2), nid(3), nid(4), nid(5)],
@@ -1356,6 +1369,7 @@ mod tests {
             checkpoint_sequence: 100,
             state: vec![0x44; 20],
             checkpoint_digest: [0xcd; 32],
+            state_hash: [0xce; 32],
             ring_signature: RingSignature::Frost(FrostRingSig {
                 aggregate: vec![0xaa; 64],
                 participants: vec![nid(1), nid(2), nid(3), nid(4), nid(5)],
@@ -1374,6 +1388,7 @@ mod tests {
             checkpoint_sequence: 100,
             state: vec![1, 2, 3],
             checkpoint_digest: [0xab; 32],
+            state_hash: [0xac; 32],
             ring_signature: RingSignature::Individual(IndividualRingSig {
                 signatures: vec![[0xff; 64]],
                 signers: vec![nid(1)],
@@ -1382,7 +1397,12 @@ mod tests {
         let payload = m.signing_payload().unwrap();
         let decoded = decode(&payload).unwrap();
         let f = crate::codec::fields(&decoded, "bft_state_transfer").unwrap();
-        assert_eq!(f.len(), 4);
+        // ring_id, checkpoint_sequence, state, checkpoint_digest,
+        // state_hash — the ring signature is excluded, and both digests
+        // are covered.
+        assert_eq!(f.len(), 5);
+        assert_eq!(as_bytes_n32(&f[3]).unwrap(), [0xab; 32]);
+        assert_eq!(as_bytes_n32(&f[4]).unwrap(), [0xac; 32]);
     }
 
     // ---- rejects ----

@@ -1742,6 +1742,14 @@ VIEW_CHANGE_QUORUM = 5     ; Quorum size for view changes and checkpoints
             ring, 3-of-4 degraded), and verifies that
             <tt>state_hash</tt> is the SHA-256 of the transmitted state
             before applying it.</li>
+            <li>Before applying the state, the receiver <bcp14>MUST</bcp14>
+            recompute the chain digest from the transmitted state using the
+            application's handler and <bcp14>MUST</bcp14> reject the transfer
+            if that digest does not equal <tt>checkpoint_digest</tt>. A
+            handler whose chain digest is derived from applied operations
+            <bcp14>MUST</bcp14> serialize that digest into its state, so that
+            recomputing the digest from the serialized state returns the
+            digest the handler reports.</li>
             <li>The lagging witness resumes participation from the checkpoint.</li>
           </ol>
 

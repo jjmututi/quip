@@ -190,12 +190,26 @@ pub trait BftHandler {
         Vec::new()
     }
 
+    /// The chain digest of a handler's serialized state (§5.3.4.1).
+    ///
+    /// For any state the handler produces, computing the chain digest
+    /// from its serialized bytes MUST equal the digest `state_digest()`
+    /// reports. A receiver uses this to recompute the chain digest from
+    /// a `bft_state_transfer` and to reject a transfer whose state does
+    /// not match the checkpoint's `state_digest` before applying it.
+    ///
+    /// There is no default: a handler that cannot answer this cannot
+    /// take part in a state transfer, because its state could not be
+    /// authenticated against the checkpoint the ring signed.
+    fn state_digest_of(&self, state: &[u8]) -> Digest;
+
     /// Install a state received via `bft_state_transfer`.
     ///
     /// The driver validates the ring signature against
-    /// `checkpoint_digest` and the transmitted bytes against
-    /// `state_hash` before calling this; the handler installs the
-    /// state. The default is a no-op.
+    /// `checkpoint_digest`, the transmitted bytes against `state_hash`,
+    /// and the chain digest recomputed from the bytes against
+    /// `checkpoint_digest` (§5.3.4.1) before calling this; the handler
+    /// installs the state. The default is a no-op.
     fn apply_state(&mut self, _state: &[u8]) -> Result<()> {
         Ok(())
     }
@@ -1336,6 +1350,16 @@ where
             return Err(Error::Bft("state transfer byte digest mismatch"));
         }
 
+        // §5.3.4.1: recompute the chain digest from the transmitted
+        // state and require it to equal the checkpoint's state_digest.
+        // This is the check that binds the bytes to a signed value; the
+        // byte check above proves only self-consistency with the
+        // sender-supplied state_hash.
+        let recomputed = self.handler.state_digest_of(&msg.state);
+        if recomputed != msg.checkpoint_digest {
+            return Err(Error::Bft("state transfer chain digest mismatch"));
+        }
+
         // Install.
         self.handler.apply_state(&msg.state)?;
         self.checkpoint_sequence = msg.checkpoint_sequence;
@@ -1560,6 +1584,12 @@ mod tests {
             self.counter.to_be_bytes().to_vec()
         }
 
+        fn state_digest_of(&self, state: &[u8]) -> Digest {
+            // The counting handler's chain digest is the digest of its
+            // serialized state, so the recomputation is the same call.
+            sha256(state)
+        }
+
         fn apply_state(&mut self, state: &[u8]) -> Result<()> {
             if state.len() != 8 {
                 return Err(Error::Bft("counting state must be 8 bytes"));
@@ -1573,10 +1603,13 @@ mod tests {
 
     /// A handler whose chain digest is **not** the digest of its state
     /// bytes, which is what §5.3.4 specifies: `state_digest` is a
-    /// rolling digest over the committed operation sequence, while
-    /// `state_bytes` is the counter alone. The counting handler makes the
+    /// rolling digest over the committed operation sequence, and
+    /// `state_bytes` carries that digest alongside the counter rather
+    /// than being digested to produce it. The counting handler makes the
     /// two quantities equal, so it cannot tell whether a transfer
-    /// distinguishes them; this one can.
+    /// distinguishes them; this one can. It also satisfies §5.3.4.1's
+    /// requirement that a handler with a derived chain digest serialize
+    /// it, so `state_digest_of(&state_bytes()) == state_digest()`.
     #[derive(Default)]
     struct ChainDigestHandler {
         counter: u64,
@@ -1599,21 +1632,57 @@ mod tests {
         }
 
         fn state_digest(&self) -> Digest {
-            self.chain
+            // Read the digest back out of the serialized state, so
+            // `state_digest() == state_digest_of(&state_bytes())` holds by
+            // construction rather than by convention: a half-done
+            // serialization cannot make the two diverge.
+            ChainDigestHandler::chain_from_state(&self.state_bytes())
+                .expect("state_bytes always carries the rolling digest")
         }
 
         fn state_bytes(&self) -> Vec<u8> {
-            self.counter.to_be_bytes().to_vec()
+            // §5.3.4.1: a handler whose chain digest is derived from
+            // applied operations must serialize that digest, so the
+            // receiver can recompute it from the bytes alone. Counter
+            // first, then the rolling digest.
+            let mut out = self.counter.to_be_bytes().to_vec();
+            out.extend_from_slice(&self.chain);
+            out
+        }
+
+        fn state_digest_of(&self, state: &[u8]) -> Digest {
+            // A state that does not carry the rolling digest cannot be
+            // the state that produced this checkpoint, so the all-zero
+            // value is returned and the receiver's comparison against
+            // `checkpoint_digest` rejects it.
+            ChainDigestHandler::chain_from_state(state).unwrap_or([0u8; 32])
         }
 
         fn apply_state(&mut self, state: &[u8]) -> Result<()> {
-            if state.len() != 8 {
-                return Err(Error::Bft("counting state must be 8 bytes"));
+            if state.len() != ChainDigestHandler::STATE_LEN {
+                return Err(Error::Bft("chain-digest state must be 40 bytes"));
             }
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(state);
-            self.counter = u64::from_be_bytes(arr);
+            let mut counter = [0u8; 8];
+            counter.copy_from_slice(&state[..8]);
+            self.counter = u64::from_be_bytes(counter);
+            self.chain = ChainDigestHandler::chain_from_state(state).expect("length checked above");
             Ok(())
+        }
+    }
+
+    impl ChainDigestHandler {
+        /// `counter.to_be_bytes() ++ chain`: 8 bytes then 32.
+        const STATE_LEN: usize = 40;
+
+        /// The rolling digest carried by a serialized state, or `None` if
+        /// `state` is not one.
+        fn chain_from_state(state: &[u8]) -> Option<Digest> {
+            if state.len() != Self::STATE_LEN {
+                return None;
+            }
+            let mut d = [0u8; 32];
+            d.copy_from_slice(&state[8..Self::STATE_LEN]);
+            Some(d)
         }
     }
 
@@ -1634,12 +1703,25 @@ mod tests {
             self.applied.push((*ring_id, sequence, operation.clone()));
             Ok(())
         }
+
+        fn state_digest_of(&self, _state: &[u8]) -> Digest {
+            // This handler carries no state: `state_digest` is the
+            // trait's all-zero sentinel and `state_bytes` is empty, so
+            // every state maps to the sentinel and the property
+            // `state_digest_of(&state_bytes()) == state_digest()` holds.
+            [0u8; 32]
+        }
     }
 
     struct FailingHandler;
     impl BftHandler for FailingHandler {
         fn apply(&mut self, _: &RingId, _: u64, _: &Operation) -> Result<()> {
             Err(Error::Bft("handler refused"))
+        }
+
+        fn state_digest_of(&self, _state: &[u8]) -> Digest {
+            // Same as `RecordingHandler`: no state, all-zero sentinel.
+            [0u8; 32]
         }
     }
 
@@ -1703,6 +1785,17 @@ mod tests {
     fn build_chain_digest_ring() -> (RingMembership, Vec<ChainDigestDriver>) {
         let (m, signers) = ring7();
         let drivers = drivers_in_order(&m, signers, ChainDigestHandler::default, [1; 32], 0);
+        // §5.3.4.1's property, asserted on the genesis state so a
+        // half-done serialization change fails here rather than letting a
+        // later transfer test pass for the wrong reason:
+        // `state_digest_of(&state_bytes())` must equal `state_digest()`.
+        for d in &drivers {
+            assert_eq!(
+                d.handler().state_digest_of(&d.handler().state_bytes()),
+                d.handler().state_digest(),
+                "the fixture's state must be self-describing"
+            );
+        }
         (m, drivers)
     }
 
@@ -2374,6 +2467,13 @@ mod tests {
             sha256(&healthy_state),
             "the fixture must keep the two digests distinct"
         );
+        // The same property on the post-apply state, which is the state a
+        // transfer actually carries.
+        assert_eq!(
+            drivers[3].handler().state_digest_of(&healthy_state),
+            healthy_chain,
+            "state_digest_of(state_bytes()) must equal state_digest()"
+        );
 
         // Checkpoint at sequence 1, carrying the chain digest.
         for d in &mut drivers {
@@ -2428,6 +2528,85 @@ mod tests {
         assert_eq!(drivers[0].handler().counter, 1);
         assert_eq!(drivers[0].sequence(), 1);
         assert_eq!(drivers[0].handler().state_bytes(), healthy_state);
+    }
+
+    /// §5.3.4.1's substitution case, and the reason `state_digest_of`
+    /// exists: a responder holding a genuine checkpoint signature can
+    /// supply arbitrary state with a `state_hash` computed over it. Both
+    /// sides of the byte check are then the sender's, so they agree by
+    /// construction, and only the chain-digest recomputation can reject
+    /// the transfer. `checkpoint_digest` and `ring_signature` are left
+    /// untouched, so the signature still verifies.
+    #[test]
+    fn state_transfer_rejects_substituted_state_with_matching_state_hash() {
+        let (m, mut drivers) = build_chain_digest_ring();
+
+        drivers[0].start(operation("revocation")).unwrap();
+        let _ = pump_counting(&mut drivers, &m);
+        for d in &mut drivers {
+            d.start_checkpoint().unwrap();
+        }
+        pump_checkpoints(&mut drivers, &m);
+        assert_eq!(drivers[0].checkpoint_sequence(), 1);
+
+        let genuine_state = drivers[3].handler().state_bytes();
+        let genuine_chain = drivers[3].handler().state_digest();
+        // The property the receiver's recomputation relies on, asserted
+        // here so a half-done fixture change cannot make this test pass
+        // for the wrong reason.
+        assert_eq!(
+            drivers[3].handler().state_digest_of(&genuine_state),
+            genuine_chain,
+            "state_digest_of(state_bytes()) must equal state_digest()"
+        );
+
+        // Make driver 0 lagging.
+        drivers[0].handler_mut().counter = 0;
+        drivers[0].handler_mut().chain = [0u8; 32];
+        drivers[0].checkpoint_sequence = 0;
+        drivers[0].checkpoint_digest = [0u8; 32];
+        drivers[0].stable_checkpoint = None;
+        drivers[0].sequence = 0;
+
+        // Collect a genuine response from a healthy peer.
+        drivers[0].request_state_transfer().unwrap();
+        let request = match drivers[0].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferRequest(msg)) => msg,
+            other => panic!("expected request, got {other:?}"),
+        };
+        drivers[2]
+            .on_state_transfer(&m.members()[0], &request)
+            .unwrap();
+        let mut response = match drivers[2].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferResponse(msg)) => msg,
+            other => panic!("expected response, got {other:?}"),
+        };
+
+        // Substitute the bytes, repair the sender-supplied checksum, and
+        // leave the signed triple and the signature alone.
+        response.state = vec![0xAB; ChainDigestHandler::STATE_LEN];
+        response.state_hash = sha256(&response.state);
+        assert_ne!(response.state, genuine_state, "the state was replaced");
+        assert_eq!(
+            response.state_hash,
+            sha256(&response.state),
+            "the byte check passes by construction"
+        );
+        assert_eq!(
+            response.checkpoint_digest, genuine_chain,
+            "the signed chain digest is untouched"
+        );
+
+        let err = drivers[0].on_state_transfer(&m.members()[2], &response);
+        assert!(
+            matches!(&err, Err(Error::Bft(m)) if *m == "state transfer chain digest mismatch"),
+            "substituted state must be rejected by the chain-digest check, got {err:?}"
+        );
+
+        // Nothing was installed and nothing was applied.
+        assert_eq!(drivers[0].checkpoint_sequence, 0);
+        assert_eq!(drivers[0].handler().counter, 0);
+        assert_eq!(drivers[0].sequence(), 0);
     }
 
     #[test]

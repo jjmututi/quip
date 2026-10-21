@@ -432,12 +432,16 @@ enough and the edit has not landed."
   checkpoint's chain digest as `checkpoint_digest` (what the ring
   signature covers) and `state_hash` (what the bytes must match).
 - **Requirement.** `MUST` bind the transferred bytes; a receiver `MUST`
-  verify `state_hash` before applying the state.
+  verify `state_hash` before applying the state, and `MUST` recompute the
+  chain digest from the bytes and reject the transfer if it does not
+  equal `checkpoint_digest`.
 - **Source.** `quip_net::bft::BftStateTransfer` carries both digests in
   the draft's field order — `checkpoint_digest`, then `state_hash`.
   `handle_state_transfer_response` compares `sha256(&msg.state)` with
-  `state_hash` before calling `BftHandler::apply_state`, and verifies the
-  ring signature against `checkpoint_digest` through
+  `state_hash`, then recomputes the chain digest with
+  `BftHandler::state_digest_of(&msg.state)` and compares that with
+  `checkpoint_digest`, before calling `BftHandler::apply_state`; the ring
+  signature is verified against `checkpoint_digest` through
   `verify_checkpoint_ring_sig`, which rebuilds the `bft_checkpoint`
   payload with that value as the checkpoint's `state_digest`.
 - **Test.** `state_transfer_rejects_digest_mismatch` corrupts the state
@@ -450,12 +454,22 @@ enough and the edit has not landed."
   same path against a handler whose `state_digest` is a rolling digest
   over applied operations rather than the digest of `state_bytes`, so the
   two quantities differ; it asserts they differ before transferring, and
-  that the transfer is accepted. That test fails against the previous
-  comparison, which rejected it with "state transfer digest mismatch".
-- **Verdict.** **PASS** — the message carries both digests, each field is
-  checked against the quantity it names, and the two checks are
-  independent: corrupt bytes are caught by `state_hash`, and a
-  substituted chain digest is caught by the ring signature.
+  that the transfer is accepted.
+  `state_transfer_rejects_substituted_state_with_matching_state_hash`
+  replaces `state` with arbitrary bytes, recomputes `state_hash` so the
+  byte check passes, leaves `checkpoint_digest` and `ring_signature`
+  untouched, and asserts the transfer is rejected with
+  `state transfer chain digest mismatch` and nothing is installed. It
+  fails against the pre-recomputation receiver, which accepted the
+  transfer.
+- **Verdict.** **PASS** — the transferred bytes are checked three ways and
+  the checks are not redundant: `state_hash` catches corruption, the
+  ring signature binds the checkpoint triple including
+  `checkpoint_digest`, and `state_digest_of` binds the bytes to that
+  signed digest. Without the third check the first two could both pass on
+  a substituted state, because the sender supplies both sides of the
+  byte comparison; with it, a state that does not recompute to
+  `checkpoint_digest` is rejected before `apply_state`.
 - **Specification status.** clear — the amendment gives the two digests
   distinct fields and distinct verification steps.
 - **Submission impact.** `non-blocking` — the code gap this row recorded

@@ -72,7 +72,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~760 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~761 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -112,12 +112,12 @@ Baseline on `main` after M9.6b:
 
 ```
 quip-core      74 passed
-quip-net      497 passed
+quip-net      498 passed
 quip-storage   57 passed
 quip-node     132 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~760 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~761 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -135,7 +135,7 @@ doc-tests       4 passed (one per crate)
 | Spec pass | S1–S7 and D4 resolved in the draft | landed |
 | Spec pass | S8 (`bft_state_transfer` ring signature scope) | decided, draft text landed |
 | Spec pass | S9–S10 (initial witness issuance; verifier independence) | decided, draft text landed |
-| Spec pass | S11–S15 (split attempt episode; expiry filter; quorum as `n - f`; pending split attempts; the state-transfer digest pair) | resolved, draft text landed |
+| Spec pass | S11–S16 (split attempt episode; expiry filter; quorum as `n - f`; pending split attempts; the state-transfer digest pair; authenticating the transferred state) | resolved, draft text landed |
 | M9.1 | `quip-node`: endpoint bind, accept loop, peer tasks, event stream | landed |
 | M9.2 | `quip-node`: `QuipStore` integration, pin auto-serve, clock injection | landed |
 | M9.3 | `quip-node`: `ConnectionFlow` integration | folded into M9.4b |
@@ -1362,7 +1362,40 @@ otherwise.
   The row was correct before the reviews ran: it recorded the missing
   field and the conflated check when the code still had them, and the
   two reviews of `c6a371a` confirmed the entry rather than discovering
-  it.
+  it. Until S16, `state_hash` was a transport-integrity check only —
+  both sides of the byte comparison were supplied by the sender — so the
+  row's `PASS` rested on corruption detection, not on authentication;
+  S16 binds the bytes to `checkpoint_digest`.
+- **S16 — authenticating the transferred state.** A read-only
+  investigation of `76c9d0e` found that `bft_state_transfer` authenticates
+  only `(ring_id, checkpoint_sequence, checkpoint_digest)`: `state` and
+  `state_hash` reach the receiver covered by no signature, and the byte
+  check compares two values the sender supplies. A responder holding a
+  genuine checkpoint signature could therefore supply arbitrary state
+  with a matching `state_hash` and have it installed and applied, with
+  `BftEvent::StateTransferApplied` then reporting a `checkpoint_digest`
+  the installed state does not commit to. **Resolved** in this commit:
+  `BftHandler` gains `state_digest_of(&self, state: &[u8]) -> Digest`
+  with no default, and `handle_state_transfer_response` recomputes the
+  chain digest from the transmitted state and rejects the transfer with
+  `state transfer chain digest mismatch` before `apply_state`. §5.3.4.1
+  step 3 gains a following step with the two `MUST` sentences: the
+  receiver recomputes and rejects, and a handler whose chain digest is
+  derived from applied operations must serialize that digest into its
+  state. The property the recomputation relies on —
+  `state_digest_of(&state_bytes()) == state_digest()` — is asserted in
+  the `ChainDigestHandler` fixture, so a half-done serialization fails
+  loudly. New test
+  `state_transfer_rejects_substituted_state_with_matching_state_hash`
+  replaces the bytes, repairs `state_hash`, leaves the signed triple
+  untouched, and asserts the rejection; it fails against the
+  pre-recomputation receiver, which returned `Ok(())`. The contract is
+  `docs/bft-state-transfer-auth.md`. Matrix row 14 stays `PASS`; its
+  justification changes, because the bytes are now bound to a signed
+  value rather than to a sender-supplied checksum. Deliberately not in
+  this commit: `BftStateTransfer::verify` and `signing_payload` remain
+  uncalled, the Frost rejection branch stays untested, and the `76c9d0e`
+  style findings are a `docs:` follow-up.
 
 ---
 

@@ -864,6 +864,56 @@ mod split_tests {
         assert!(!m.cluster.split_attempt_pending());
     }
 
+    /// Anthropic's finding on `c6a371a`: no test recomputed at less than
+    /// one heartbeat after a move and asserted that the attempt stays
+    /// pending, so a settle interval of 10 s would have passed every test
+    /// in this file. This pins the boundary from below and at the
+    /// boundary itself.
+    #[test]
+    fn settle_interval_is_not_shorter_than_one_heartbeat() {
+        let m = mesh();
+        prime_split_timer(&m); // three samples: below the §13.2 minimum of 20
+
+        m.cluster
+            .split_if_due(&m.dht, split_due_at())
+            .expect("split due");
+        assert!(m.cluster.split_attempt_pending(), "the attempt is pending");
+
+        // One millisecond short of one CLUSTER_HEARTBEAT: still pending
+        // and still uncounted, which a 10 s interval could not satisfy.
+        let early = m
+            .cluster
+            .recompute(&m.dht, t(split_due_at().as_millis() + 59_999));
+        assert!(
+            m.cluster.split_attempt_pending(),
+            "the attempt must still be pending one millisecond short of the interval"
+        );
+        assert_eq!(
+            m.cluster.split_attempts(),
+            0,
+            "an unsettled attempt does not count"
+        );
+        assert!(!early.acceptable, "three samples is below §13.2's minimum");
+
+        // At exactly one CLUSTER_HEARTBEAT the attempt is decided.
+        let settled = m
+            .cluster
+            .recompute(&m.dht, t(split_due_at().as_millis() + 60_000));
+        assert!(
+            !m.cluster.split_attempt_pending(),
+            "one CLUSTER_HEARTBEAT makes the attempt eligible"
+        );
+        assert_eq!(
+            m.cluster.split_attempts(),
+            1,
+            "the settled verdict counts the failure"
+        );
+        assert!(
+            !settled.acceptable,
+            "three samples is below §13.2's minimum"
+        );
+    }
+
     #[test]
     fn note_split_outcome_clears_only_on_success() {
         let m = mesh();

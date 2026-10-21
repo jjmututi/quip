@@ -72,7 +72,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~759 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~760 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -114,10 +114,10 @@ Baseline on `main` after M9.6b:
 quip-core      74 passed
 quip-net      497 passed
 quip-storage   57 passed
-quip-node     131 passed
+quip-node     132 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~759 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~760 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -1305,16 +1305,20 @@ otherwise.
   `ClusterState::migrate` no longer clears it.
   Row 3's PASS was found premature by the read-only diagnostic; the
   two-axis matrix could not see the defect because the code agreed with
-  the draft. Shape B (pending attempts and a settle interval) replaced
-  the first-verdict definition — see S14.
+  the draft. The diagnostic is the read-only investigation reported in the
+  review thread for `3a8ae49`; it exists only in that thread — no file in
+  the tree records it — and it confirmed that `CreateNew`'s first verdict
+  is false by construction and identified three candidate fixes. Shape B
+  (pending attempts and a settle interval) replaced the first-verdict
+  definition — see S14.
 - **S12 — expiry filter.** §5.3.3 required re-issue after `valid_until`
   without saying whether an expired statement still counts.
-  **Resolved** in this commit: it no longer counts, the obligation to
+  **Resolved** in `3a8ae49`: it no longer counts, the obligation to
   re-issue being the witness's and the filter the recipient's.
   `WitnessStore::statements_for` already filtered on expiry; the new test
   `statements_for_excludes_statements_past_valid_until` proves it.
 - **S13 — quorum as a rule.** §5.3.4 stated the quorum as "5 of 7" and
-  "3 of 4" without the rule behind them. **Resolved** in this commit: the
+  "3 of 4" without the rule behind them. **Resolved** in `3a8ae49`: the
   quorum is `n - f`, with those two sizes as specific cases.
   `RingMembership::quorum` already computed `n - f`; no code changed.
 - **S14 — pending split attempts and the settle interval.** S11's
@@ -1324,7 +1328,7 @@ otherwise.
   a `JoinNear`/`JoinFar` cluster still sees the samples that made
   `split_due` true at the same timestamp. With "`MUST NOT` reset on
   failure" the counter only climbed and `MAX_SPLIT_ATTEMPTS` became a
-  latch. **Resolved** in this commit: §13.5 now makes an attempt *pending*
+  latch. **Resolved** in `c6a371a`: §13.5 now makes an attempt *pending*
   until the first eligible recompute, one `CLUSTER_HEARTBEAT` after the
   migration, so a peer has had the chance to advertise the new
   `cluster_id`; a pending attempt does not count against the cap, and the
@@ -1332,7 +1336,12 @@ otherwise.
   it (unacceptable). `ClusterState::pending_split` records the attempt,
   `ClusterHandle::recompute` decides it once `pending_split_settled`
   holds, `apply_split` counts nothing, and a `CreateNew` decision begins a
-  fresh pending attempt rather than counting as an outcome.
+  fresh pending attempt rather than counting as an outcome. The
+  alternative (Shape A) was to clear the counter on a CreateNew decision,
+  which would have exempted CreateNew from the failure rule rather than
+  making the failure state reachable; the settle interval (Shape B) was
+  chosen because it makes the draft's existing distinction work rather
+  than changing the rule.
 - **S15 — the state-transfer digest pair.** §5.3.4.1 gives
   `bft_state_transfer` two digests: `checkpoint_digest`, the checkpoint's
   chain digest restated so the checkpoint's signature set can be verified
@@ -1344,7 +1353,7 @@ otherwise.
   quantities agreed only because the test handler defined `state_digest`
   as `sha256(state_bytes)`; a handler whose chain digest is a digest over
   the committed operation sequence, which §5.3.4 specifies, would have
-  had every state transfer rejected. **Resolved** in this commit:
+  had every state transfer rejected. **Resolved** in `76c9d0e`:
   `BftStateTransfer` gains `state_hash` in the draft's field order, the
   responder fills it from the bytes it is about to send, and
   `handle_state_transfer_response` verifies the bytes against

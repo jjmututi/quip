@@ -3757,20 +3757,21 @@ CANDIDATE_TTL = 30  ; seconds
         from the moment the migration completes until the first
         <xref target="coral-acceptance"/> member-set computation that is
         eligible to decide it. An attempt is eligible to be decided once
-        the new cluster has accumulated at least one
-        <strong>CLUSTER_HEARTBEAT</strong> since the migration, so that at
-        least one peer has had the opportunity to advertise the new
-        <tt>cluster_id</tt> and the computation can see a member set. A
-        pending attempt <bcp14>MUST NOT</bcp14> count against
-        <strong>MAX_SPLIT_ATTEMPTS</strong>. When the first eligible
-        computation runs, the attempt is successful if the new cluster is
-        acceptable per §13.2 and failed if it is not; the split-attempt
-        counter <bcp14>MUST</bcp14> be reset on success and
+        at least one <strong>CLUSTER_HEARTBEAT</strong> has elapsed since
+        the migration, so that at least one peer has had the opportunity
+        to advertise the new <tt>cluster_id</tt> and the computation can
+        see a member set. A pending attempt <bcp14>MUST NOT</bcp14> count
+        against <strong>MAX_SPLIT_ATTEMPTS</strong>. When the first
+        eligible computation runs, the attempt is successful if the new
+        cluster is acceptable per §13.2 and failed if it is not; the
+        split-attempt counter <bcp14>MUST</bcp14> be reset on success and
         <bcp14>MUST NOT</bcp14> be reset on failure, and the failure limit
         applies to consecutive failures. A CreateNew decision ends the
         previous episode and begins a new pending attempt; the new
         attempt's outcome is decided by the first eligible computation, not
-        by the first computation after the migration.</t>
+        by the first computation after the migration. A CreateNew decision
+        does not reset the split-attempt counter; the consecutive-failure
+        count carries into the next attempt's episode.</t>
       </section>
 
       <!-- ========================================================== -->

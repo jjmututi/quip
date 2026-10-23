@@ -56,7 +56,9 @@
 //! the spec instead intended to inline the inner fields, the wire shape
 //! would have to change in both this crate and `quip-core`.
 
-use crate::cluster::ClusterInfoAnnounce;
+use crate::cluster::{
+    ClusterInfoAnnounce, ClusterMergeAccept, ClusterMergePropose, ClusterMergeReject,
+};
 use crate::codec::{as_bytes, as_u64, envelope, fields, verb_of};
 use crate::coral::{
     CoralLookup, CrossPathResult, CrossPathValidation, LookupResponse, SpilloverRequest,
@@ -366,6 +368,15 @@ pub enum Message {
     CrossPathResult(CrossPathResult),
     /// `cluster_info` — a neighbour's cluster tuple (§13.4, §13.5).
     ClusterInfo(ClusterInfoAnnounce),
+    /// `cluster_merge_propose` — a smaller cluster asks to be merged into
+    /// a larger one (§13.4, docs/m9.6b-merge-design.md §2b).
+    ClusterMergePropose(ClusterMergePropose),
+    /// `cluster_merge_accept` — the larger cluster accepts the proposal;
+    /// its id survives (§2b).
+    ClusterMergeAccept(ClusterMergeAccept),
+    /// `cluster_merge_reject` — the larger cluster refuses the proposal
+    /// (§2b).
+    ClusterMergeReject(ClusterMergeReject),
     /// `connectivity_announce` — DHT connectivity advertisement (§12.1).
     ConnectivityAnnounce(ConnectivityAnnounce),
     /// `candidate_announce` — ICE-like candidate offer (§12.3).
@@ -454,6 +465,9 @@ impl Message {
             Message::CrossPathValidation(_) => "cross_path_validation",
             Message::CrossPathResult(_) => "cross_path_result",
             Message::ClusterInfo(_) => "cluster_info",
+            Message::ClusterMergePropose(_) => "cluster_merge_propose",
+            Message::ClusterMergeAccept(_) => "cluster_merge_accept",
+            Message::ClusterMergeReject(_) => "cluster_merge_reject",
             Message::ConnectivityAnnounce(_) => "connectivity_announce",
             Message::CandidateAnnounce(_) => "candidate_announce",
             Message::RelayDiscovery(_) => "relay_discovery",
@@ -508,6 +522,9 @@ impl Message {
             | Message::CrossPathValidation(_)
             | Message::CrossPathResult(_)
             | Message::ClusterInfo(_)
+            | Message::ClusterMergePropose(_)
+            | Message::ClusterMergeAccept(_)
+            | Message::ClusterMergeReject(_)
             | Message::ConnectivityAnnounce(_)
             | Message::CandidateAnnounce(_)
             | Message::RelayDiscovery(_)
@@ -561,7 +578,10 @@ impl Message {
             | Message::SpilloverResponse(_)
             | Message::CrossPathValidation(_)
             | Message::CrossPathResult(_)
-            | Message::ClusterInfo(_) => {
+            | Message::ClusterInfo(_)
+            | Message::ClusterMergePropose(_)
+            | Message::ClusterMergeAccept(_)
+            | Message::ClusterMergeReject(_) => {
                 Some(crate::handshake::Capabilities::DHT_DISCOVERY)
             }
             Message::ConnectivityAnnounce(_)
@@ -626,6 +646,9 @@ impl Message {
             Message::CrossPathValidation(m) => m.to_bytes(),
             Message::CrossPathResult(m) => m.to_bytes(),
             Message::ClusterInfo(m) => m.to_bytes(),
+            Message::ClusterMergePropose(m) => m.to_bytes(),
+            Message::ClusterMergeAccept(m) => m.to_bytes(),
+            Message::ClusterMergeReject(m) => m.to_bytes(),
             Message::ConnectivityAnnounce(m) => m.to_bytes(),
             Message::CandidateAnnounce(m) => m.to_bytes(),
             Message::RelayDiscovery(m) => m.to_bytes(),
@@ -722,6 +745,15 @@ pub fn dispatch(bytes: &[u8], tier: Tier) -> Result<Message> {
             Message::CrossPathResult(CrossPathResult::from_bytes(bytes)?)
         }
         "cluster_info" => Message::ClusterInfo(ClusterInfoAnnounce::from_bytes(bytes)?),
+        "cluster_merge_propose" => {
+            Message::ClusterMergePropose(ClusterMergePropose::from_bytes(bytes)?)
+        }
+        "cluster_merge_accept" => {
+            Message::ClusterMergeAccept(ClusterMergeAccept::from_bytes(bytes)?)
+        }
+        "cluster_merge_reject" => {
+            Message::ClusterMergeReject(ClusterMergeReject::from_bytes(bytes)?)
+        }
         "connectivity_announce" => {
             Message::ConnectivityAnnounce(ConnectivityAnnounce::from_bytes(bytes)?)
         }
@@ -1013,6 +1045,33 @@ mod tests {
                     ctime: now(),
                 },
                 signature: [0xab; 64],
+            }),
+            Tier::Ctrl,
+        );
+        assert_roundtrip(
+            Message::ClusterMergePropose(ClusterMergePropose {
+                proposer_cluster_id: [0x22; 16],
+                proposer_size: 5,
+                proposed_at: now(),
+                signature: [0xcd; 64],
+            }),
+            Tier::Ctrl,
+        );
+        assert_roundtrip(
+            Message::ClusterMergeAccept(ClusterMergeAccept {
+                accept_cluster_id: [0x33; 16],
+                accept_size: 19,
+                accepted_at: now(),
+                signature: [0xef; 64],
+            }),
+            Tier::Ctrl,
+        );
+        assert_roundtrip(
+            Message::ClusterMergeReject(ClusterMergeReject {
+                proposer_cluster_id: [0x22; 16],
+                reason: crate::cluster::MergeRejectReason::Busy,
+                rejected_at: now(),
+                signature: [0xef; 64],
             }),
             Tier::Ctrl,
         );

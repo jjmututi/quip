@@ -48,6 +48,11 @@ pub type ClusterId = [u8; 16];
 /// Spec §13.2: *"Obtain a random subset of at least 20 nodes."*
 pub const ACCEPTANCE_MIN_SAMPLES: usize = 20;
 
+/// §2d of docs/m9.6b-merge-design.md: a merge proposal is abandoned
+/// if a majority of the smaller cluster has not announced the larger
+/// id within three cluster heartbeats.
+pub const MERGE_PROPOSAL_TIMEOUT_S: u64 = CLUSTER_HEARTBEAT_S * 3;
+
 // -------------------------------------------------------------------------
 // Cluster level
 // -------------------------------------------------------------------------
@@ -193,10 +198,269 @@ impl ClusterInfoAnnounce {
 }
 
 // -------------------------------------------------------------------------
+// Merge wire verbs (§13.4, docs/m9.6b-merge-design.md §2b)
+// -------------------------------------------------------------------------
+
+/// Why a larger cluster's coordinator refused a merge proposal (§2b).
+///
+/// Encoded as a single `u8` in the CBOR array rather than as text: the
+/// draft's other reason codes are numeric and the rejected frame is small.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum MergeRejectReason {
+    /// The size ratio no longer satisfies the δ rule.
+    Size = 0,
+    /// The two clusters are not at the same [`ClusterLevel`].
+    Level = 1,
+    /// The acceptor already has a proposal in flight (`incoming_merge`).
+    Busy = 2,
+    /// The proposal's signature did not verify against the sender.
+    Signature = 3,
+}
+
+impl MergeRejectReason {
+    /// The wire value.
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Decode a wire value; `None` for an unassigned code.
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Size),
+            1 => Some(Self::Level),
+            2 => Some(Self::Busy),
+            3 => Some(Self::Signature),
+            _ => None,
+        }
+    }
+}
+
+/// `cluster_merge_propose` — the smaller cluster's coordinator asks to be
+/// merged into a larger one (§2b).
+///
+/// Signed by the proposing coordinator; [`verify`](Self::verify) takes
+/// the authenticated connection peer, so a member cannot propose on its
+/// coordinator's behalf — the same shape as [`ClusterInfoAnnounce`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterMergePropose {
+    /// The smaller (proposing) cluster's id.
+    pub proposer_cluster_id: ClusterId,
+    /// The smaller cluster's advertised size.
+    pub proposer_size: u64,
+    /// When the proposal was made.
+    pub proposed_at: Timestamp,
+    /// Ed25519 signature by the proposing coordinator.
+    pub signature: [u8; 64],
+}
+
+impl ClusterMergePropose {
+    /// Encode to QUIP-CBOR bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_merge_propose",
+            alloc::vec![
+                CborValue::Bytes(self.proposer_cluster_id.to_vec()),
+                CborValue::Int(self.proposer_size as i128),
+                CborValue::Int(self.proposed_at.as_millis() as i128),
+                CborValue::Bytes(self.signature.to_vec()),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Decode from QUIP-CBOR bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let v = decode(bytes)?;
+        if verb_of(&v)? != "cluster_merge_propose" {
+            return Err(Error::BadFrame("not a cluster_merge_propose"));
+        }
+        let f = fields(&v, "cluster_merge_propose")?;
+        if f.len() != 4 {
+            return Err(Error::BadFrame("cluster_merge_propose arity"));
+        }
+        Ok(Self {
+            proposer_cluster_id: as_bytes_n::<16>(&f[0])?,
+            proposer_size: as_u64(&f[1])?,
+            proposed_at: Timestamp::from_millis(as_u64(&f[2])?),
+            signature: as_bytes_n::<64>(&f[3])?,
+        })
+    }
+
+    /// Bytes covered by `signature`.
+    pub fn signing_payload(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_merge_propose",
+            alloc::vec![
+                CborValue::Bytes(self.proposer_cluster_id.to_vec()),
+                CborValue::Int(self.proposer_size as i128),
+                CborValue::Int(self.proposed_at.as_millis() as i128),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Verify the signature against `sender`, the authenticated peer id.
+    pub fn verify(&self, sender: &NodeId, v: &impl Verifier) -> Result<bool> {
+        let payload = self.signing_payload()?;
+        Ok(v.verify_ed25519(sender, &payload, &self.signature))
+    }
+}
+
+/// `cluster_merge_accept` — the larger cluster's coordinator accepts a
+/// proposal (§2b).
+///
+/// Broadcast to its own members and to the proposing coordinator. The
+/// accepting cluster's id survives; the proposing cluster migrates to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterMergeAccept {
+    /// The larger (surviving) cluster's id.
+    pub accept_cluster_id: ClusterId,
+    /// The larger cluster's size at acceptance (§2c re-checks it).
+    pub accept_size: u64,
+    /// When the proposal was accepted.
+    pub accepted_at: Timestamp,
+    /// Ed25519 signature by the accepting coordinator.
+    pub signature: [u8; 64],
+}
+
+impl ClusterMergeAccept {
+    /// Encode to QUIP-CBOR bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_merge_accept",
+            alloc::vec![
+                CborValue::Bytes(self.accept_cluster_id.to_vec()),
+                CborValue::Int(self.accept_size as i128),
+                CborValue::Int(self.accepted_at.as_millis() as i128),
+                CborValue::Bytes(self.signature.to_vec()),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Decode from QUIP-CBOR bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let v = decode(bytes)?;
+        if verb_of(&v)? != "cluster_merge_accept" {
+            return Err(Error::BadFrame("not a cluster_merge_accept"));
+        }
+        let f = fields(&v, "cluster_merge_accept")?;
+        if f.len() != 4 {
+            return Err(Error::BadFrame("cluster_merge_accept arity"));
+        }
+        Ok(Self {
+            accept_cluster_id: as_bytes_n::<16>(&f[0])?,
+            accept_size: as_u64(&f[1])?,
+            accepted_at: Timestamp::from_millis(as_u64(&f[2])?),
+            signature: as_bytes_n::<64>(&f[3])?,
+        })
+    }
+
+    /// Bytes covered by `signature`.
+    pub fn signing_payload(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_merge_accept",
+            alloc::vec![
+                CborValue::Bytes(self.accept_cluster_id.to_vec()),
+                CborValue::Int(self.accept_size as i128),
+                CborValue::Int(self.accepted_at.as_millis() as i128),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Verify the signature against `sender`, the authenticated peer id.
+    pub fn verify(&self, sender: &NodeId, v: &impl Verifier) -> Result<bool> {
+        let payload = self.signing_payload()?;
+        Ok(v.verify_ed25519(sender, &payload, &self.signature))
+    }
+}
+
+/// `cluster_merge_reject` — the larger cluster's coordinator refuses a
+/// proposal (§2b).
+///
+/// The proposer's cluster id is echoed for correlation; the proposal is
+/// not retried within the same episode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterMergeReject {
+    /// The proposing cluster's id, echoed for correlation.
+    pub proposer_cluster_id: ClusterId,
+    /// Why the proposal was refused.
+    pub reason: MergeRejectReason,
+    /// When the proposal was refused.
+    pub rejected_at: Timestamp,
+    /// Ed25519 signature by the accepting coordinator.
+    pub signature: [u8; 64],
+}
+
+impl ClusterMergeReject {
+    /// Encode to QUIP-CBOR bytes.
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_merge_reject",
+            alloc::vec![
+                CborValue::Bytes(self.proposer_cluster_id.to_vec()),
+                CborValue::Int(self.reason.as_u8() as i128),
+                CborValue::Int(self.rejected_at.as_millis() as i128),
+                CborValue::Bytes(self.signature.to_vec()),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Decode from QUIP-CBOR bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let v = decode(bytes)?;
+        if verb_of(&v)? != "cluster_merge_reject" {
+            return Err(Error::BadFrame("not a cluster_merge_reject"));
+        }
+        let f = fields(&v, "cluster_merge_reject")?;
+        if f.len() != 4 {
+            return Err(Error::BadFrame("cluster_merge_reject arity"));
+        }
+        let code = as_u64(&f[1])?;
+        let reason = u8::try_from(code)
+            .ok()
+            .and_then(MergeRejectReason::from_u8)
+            .ok_or(Error::BadFrame("cluster_merge_reject reason"))?;
+        Ok(Self {
+            proposer_cluster_id: as_bytes_n::<16>(&f[0])?,
+            reason,
+            rejected_at: Timestamp::from_millis(as_u64(&f[2])?),
+            signature: as_bytes_n::<64>(&f[3])?,
+        })
+    }
+
+    /// Bytes covered by `signature`.
+    pub fn signing_payload(&self) -> Result<Vec<u8>> {
+        let msg = envelope(
+            "cluster_merge_reject",
+            alloc::vec![
+                CborValue::Bytes(self.proposer_cluster_id.to_vec()),
+                CborValue::Int(self.reason.as_u8() as i128),
+                CborValue::Int(self.rejected_at.as_millis() as i128),
+            ],
+        );
+        Ok(encode(&msg)?)
+    }
+
+    /// Verify the signature against `sender`, the authenticated peer id.
+    pub fn verify(&self, sender: &NodeId, v: &impl Verifier) -> Result<bool> {
+        let payload = self.signing_payload()?;
+        Ok(v.verify_ed25519(sender, &payload, &self.signature))
+    }
+}
+
+// -------------------------------------------------------------------------
 // Merge decision (§13.4)
 // -------------------------------------------------------------------------
 
 /// Whether to leave the current cluster for a neighbour.
+///
+/// `Merge` implies "merge into the peer [`ClusterInfo`] this decision was
+/// evaluated against"; the caller has the `ClusterInfo` in hand, so the
+/// target is not carried on the variant.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum MergeDecision {
     /// Stay where you are.
@@ -352,6 +616,35 @@ pub struct ClusterState {
     /// recompute decides the attempt. A pending attempt has no outcome
     /// yet, so it neither counts against the cap nor clears the counter.
     pub pending_split: Option<PendingSplit>,
+    /// The merge proposal this node has in flight, if any (§2b, §2c).
+    pub pending_merge: Option<PendingMerge>,
+    /// Receiver-side slot for a proposal the local coordinator is
+    /// deciding, if any (§2c). Distinct from `pending_merge`: the
+    /// proposer records what it sent, the acceptor records what it has
+    /// not yet answered, and the two exist on different nodes.
+    pub incoming_merge: Option<PendingMergeIncoming>,
+}
+
+/// A merge proposal this node has proposed and not yet concluded (§2b).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PendingMerge {
+    /// The larger cluster the proposal targets.
+    pub target: ClusterId,
+    /// When the proposal was made.
+    pub proposed_at: Timestamp,
+}
+
+/// A merge proposal the local coordinator has received and not yet
+/// answered (§2c). The acceptor's single slot: a second proposal
+/// displaces the first.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PendingMergeIncoming {
+    /// The proposing coordinator's node id.
+    pub proposer_id: NodeId,
+    /// The proposing cluster's id.
+    pub proposer_cluster_id: ClusterId,
+    /// When the proposal was made.
+    pub proposed_at: Timestamp,
 }
 
 /// An attempt whose outcome has not yet been decided (§13.5).
@@ -379,6 +672,8 @@ impl ClusterState {
             rtt_exceeded_since: None,
             split_attempts: 0,
             pending_split: None,
+            pending_merge: None,
+            incoming_merge: None,
         }
     }
 
@@ -489,6 +784,109 @@ impl ClusterState {
         } else {
             MergeDecision::Stay
         }
+    }
+
+    // ---------------------------------------------------------------------
+    // Merge lifecycle (§2b, §2c of docs/m9.6b-merge-design.md)
+    // ---------------------------------------------------------------------
+
+    /// True if the §2a conditions other than size are met: no pending
+    /// split, and no outgoing or incoming merge in flight.
+    ///
+    /// The size condition (§2a rule 1) is evaluated by
+    /// [`Self::should_merge`] at the call site, where the peer
+    /// [`ClusterInfo`] is in hand. The level condition (§2a rule 4) is
+    /// also the caller's filter: the peer's level is not carried in
+    /// `ClusterInfo`, so this method cannot see it.
+    ///
+    /// `now` and `config` are accepted for symmetry with the rest of
+    /// `ClusterState` and are unused today; they leave room for a further
+    /// rule without a signature change.
+    pub fn merge_proposal_eligible(
+        &self,
+        peer_info: &ClusterInfo,
+        _now: Timestamp,
+        _config: &ClusterConfig,
+    ) -> bool {
+        if peer_info.id == self.id {
+            return false;
+        }
+        if self.pending_split.is_some() {
+            return false;
+        }
+        if self.pending_merge.is_some() {
+            return false;
+        }
+        if self.incoming_merge.is_some() {
+            return false;
+        }
+        true
+    }
+
+    /// Start a pending merge proposal to `target`. Idempotent while a
+    /// proposal is outstanding: returns `false` and leaves the existing
+    /// proposal in place.
+    pub fn start_merge_proposal(&mut self, target: ClusterId, now: Timestamp) -> bool {
+        if self.pending_merge.is_some() {
+            return false;
+        }
+        self.pending_merge = Some(PendingMerge {
+            target,
+            proposed_at: now,
+        });
+        true
+    }
+
+    /// Whether the outgoing pending merge has had its full
+    /// [`MERGE_PROPOSAL_TIMEOUT_S`] to settle.
+    pub fn pending_merge_settled(&self, now: Timestamp) -> bool {
+        match self.pending_merge {
+            None => false,
+            Some(p) => {
+                now.as_secs().saturating_sub(p.proposed_at.as_secs()) >= MERGE_PROPOSAL_TIMEOUT_S
+            }
+        }
+    }
+
+    /// Decide the outgoing pending merge. On accept, records the
+    /// completion; on reject or timeout, clears the pending state and
+    /// does not retry within the same episode. Returns the larger
+    /// cluster id on accept, `None` otherwise.
+    ///
+    /// Acceptance is immediate, so the timestamp is not consulted.
+    pub fn note_merge_result(&mut self, accepted: bool, _now: Timestamp) -> Option<ClusterId> {
+        let pending = self.pending_merge.take()?;
+        if accepted {
+            Some(pending.target)
+        } else {
+            None
+        }
+    }
+
+    /// Record an incoming proposal from `proposer_id`.
+    ///
+    /// The acceptor holds one slot, so a second proposal displaces the
+    /// first. Returns `true` if the slot was empty (nothing displaced)
+    /// and `false` if a prior proposal was replaced.
+    pub fn note_incoming_merge(
+        &mut self,
+        proposer_id: NodeId,
+        proposer_cluster_id: ClusterId,
+        proposed_at: Timestamp,
+    ) -> bool {
+        let was_empty = self.incoming_merge.is_none();
+        self.incoming_merge = Some(PendingMergeIncoming {
+            proposer_id,
+            proposer_cluster_id,
+            proposed_at,
+        });
+        was_empty
+    }
+
+    /// Clear the incoming proposal slot; called when the coordinator has
+    /// sent an accept or a reject for it.
+    pub fn clear_incoming_merge(&mut self) {
+        self.incoming_merge = None;
     }
 
     // ---------------------------------------------------------------------
@@ -953,6 +1351,214 @@ mod tests {
         // merge regardless of id.
         let other = info(99, 50);
         assert_eq!(c.should_merge(&other, now, &cfg), MergeDecision::Merge);
+    }
+
+    // ---- merge lifecycle (§2a, §2b, §2c of the merge note) ----
+
+    /// §2a rule 1 is the δ rule, not a literal 1/4 check.
+    ///
+    /// 5 members against 19: `5 * 4 = 20 > 19`, so a literal 1/4 test
+    /// would refuse at every δ. At δ=2 the δ rule refuses too
+    /// (`log2(19/5) ≈ 1.93 < 2`), and at δ=0 it accepts, because the
+    /// tested function is authoritative. The two outcomes together are
+    /// what distinguishes the δ rule from a separate floor.
+    #[test]
+    fn merge_requires_the_size_condition() {
+        let mut c = ClusterState::new(cid(9), ClusterLevel::Local, t(0));
+        c.update_size(5);
+        let cfg = local_config();
+
+        let delta_two = t(3600); // odd interval: δ = 2
+        let other = info(99, 19); // higher id, so the tie-break says stay
+        assert_eq!(
+            c.should_merge(&other, delta_two, &cfg),
+            MergeDecision::Stay,
+            "log2(19/5) is below δ=2, and the tie-break favours the lower id"
+        );
+
+        let delta_zero = t(0); // even interval: δ = 0
+        assert_eq!(
+            c.should_merge(&other, delta_zero, &cfg),
+            MergeDecision::Merge,
+            "at δ=0 the same pair merges: the δ rule is the check, not 5 * 4 <= 19"
+        );
+    }
+
+    /// §2a rule 2: the RTT sample floor.
+    ///
+    /// The floor lives in [`ClusterState::is_acceptable`], which is where
+    /// the §13.2 acceptance test is. `merge_proposal_eligible` takes no
+    /// samples, so it cannot express rule 2 — the caller evaluates the p90
+    /// pair with the measurements in hand. This test pins the floor where
+    /// it actually is and records that boundary.
+    #[test]
+    fn merge_requires_enough_rtt_samples() {
+        let c = ClusterState::new(cid(9), ClusterLevel::Local, t(0));
+        let cfg = local_config();
+
+        let short = [10u64; ACCEPTANCE_MIN_SAMPLES - 1];
+        let exact = [10u64; ACCEPTANCE_MIN_SAMPLES];
+        assert!(
+            !c.is_acceptable(&short, &cfg),
+            "one sample below the floor is not acceptable in either direction"
+        );
+        assert!(c.is_acceptable(&exact, &cfg), "at the floor");
+
+        // Eligibility has no sample input, so a peer that fails rule 2 is
+        // still "eligible" here; rule 2 is the caller's check.
+        assert!(c.merge_proposal_eligible(&info(1, 100), t(0), &cfg));
+    }
+
+    /// §2a rule 3: a cluster in the middle of a split episode does not
+    /// start a merge.
+    #[test]
+    fn merge_rejected_when_pending_split() {
+        let mut c = ClusterState::new(cid(9), ClusterLevel::Local, t(0));
+        let cfg = local_config();
+        c.pending_split = Some(PendingSplit {
+            migrated_at: t(0),
+            new_id: cid(7),
+        });
+
+        assert!(!c.merge_proposal_eligible(&info(1, 100), t(1), &cfg));
+
+        // A caller that gates on eligibility never reaches the setter.
+        if c.merge_proposal_eligible(&info(1, 100), t(1), &cfg) {
+            c.start_merge_proposal(cid(1), t(1));
+        }
+        assert!(
+            c.pending_merge.is_none(),
+            "no proposal is started while a split is in flight"
+        );
+    }
+
+    #[test]
+    fn merge_wire_roundtrips() {
+        let p = ClusterMergePropose {
+            proposer_cluster_id: cid(0x22),
+            proposer_size: 5,
+            proposed_at: t(10),
+            signature: [0xaa; 64],
+        };
+        let bytes = p.to_bytes().unwrap();
+        assert_eq!(ClusterMergePropose::from_bytes(&bytes).unwrap(), p);
+
+        let a = ClusterMergeAccept {
+            accept_cluster_id: cid(0x33),
+            accept_size: 19,
+            accepted_at: t(11),
+            signature: [0xbb; 64],
+        };
+        let bytes = a.to_bytes().unwrap();
+        assert_eq!(ClusterMergeAccept::from_bytes(&bytes).unwrap(), a);
+
+        let r = ClusterMergeReject {
+            proposer_cluster_id: cid(0x22),
+            reason: MergeRejectReason::Busy,
+            rejected_at: t(12),
+            signature: [0xcc; 64],
+        };
+        let bytes = r.to_bytes().unwrap();
+        assert_eq!(ClusterMergeReject::from_bytes(&bytes).unwrap(), r);
+
+        // All three are control-tier messages.
+        assert_eq!(
+            crate::message::Message::ClusterMergePropose(p.clone()).required_tier(),
+            crate::frame::Tier::Ctrl
+        );
+        assert_eq!(
+            crate::message::Message::ClusterMergeAccept(a.clone()).required_tier(),
+            crate::frame::Tier::Ctrl
+        );
+        assert_eq!(
+            crate::message::Message::ClusterMergeReject(r.clone()).required_tier(),
+            crate::frame::Tier::Ctrl
+        );
+
+        // The verb is checked, not ignored.
+        let foreign = envelope("coral_lookup", alloc::vec![CborValue::Int(1)]);
+        let encoded = encode(&foreign).unwrap();
+        assert!(ClusterMergePropose::from_bytes(&encoded).is_err());
+        assert!(ClusterMergeAccept::from_bytes(&encoded).is_err());
+        assert!(ClusterMergeReject::from_bytes(&encoded).is_err());
+
+        // Arity is enforced.
+        let short = envelope(
+            "cluster_merge_propose",
+            alloc::vec![CborValue::Bytes(cid(1).to_vec())],
+        );
+        assert!(ClusterMergePropose::from_bytes(&encode(&short).unwrap()).is_err());
+
+        // An unassigned reason code is refused rather than defaulted.
+        let bad_reason = envelope(
+            "cluster_merge_reject",
+            alloc::vec![
+                CborValue::Bytes(cid(1).to_vec()),
+                CborValue::Int(9),
+                CborValue::Int(0),
+                CborValue::Bytes([0u8; 64].to_vec()),
+            ],
+        );
+        assert!(ClusterMergeReject::from_bytes(&encode(&bad_reason).unwrap()).is_err());
+    }
+
+    #[test]
+    fn note_merge_result_clears_pending() {
+        let mut c = ClusterState::new(cid(9), ClusterLevel::Local, t(0));
+
+        assert!(c.start_merge_proposal(cid(1), t(0)));
+        assert!(
+            !c.start_merge_proposal(cid(2), t(1)),
+            "a second proposal is refused while one is outstanding"
+        );
+
+        // §2d's timeout is three heartbeats.
+        assert!(!c.pending_merge_settled(t(MERGE_PROPOSAL_TIMEOUT_S - 1)));
+        assert!(c.pending_merge_settled(t(MERGE_PROPOSAL_TIMEOUT_S)));
+
+        assert_eq!(c.note_merge_result(false, t(5)), None);
+        assert!(
+            c.pending_merge.is_none(),
+            "a rejection clears the pending state"
+        );
+
+        // Not retried within the same episode: a second result is a no-op.
+        assert_eq!(c.note_merge_result(true, t(6)), None);
+        assert!(c.pending_merge.is_none());
+    }
+
+    #[test]
+    fn note_merge_result_on_accept_returns_the_larger_id() {
+        let mut c = ClusterState::new(cid(9), ClusterLevel::Local, t(0));
+        assert!(c.start_merge_proposal(cid(1), t(0)));
+
+        assert_eq!(c.note_merge_result(true, t(1)), Some(cid(1)));
+        assert!(
+            c.pending_merge.is_none(),
+            "acceptance concludes the episode"
+        );
+    }
+
+    #[test]
+    fn incoming_merge_slot_replaces_a_prior_proposal() {
+        let mut c = ClusterState::new(cid(9), ClusterLevel::Local, t(0));
+
+        assert!(
+            c.note_incoming_merge(nid(1), cid(0x21), t(10)),
+            "the first proposal finds the slot empty"
+        );
+        assert!(
+            !c.note_incoming_merge(nid(2), cid(0x22), t(20)),
+            "the second displaces the first"
+        );
+
+        let slot = c.incoming_merge.expect("a proposal is recorded");
+        assert_eq!(slot.proposer_id, nid(2));
+        assert_eq!(slot.proposer_cluster_id, cid(0x22));
+        assert_eq!(slot.proposed_at, t(20));
+
+        c.clear_incoming_merge();
+        assert!(c.incoming_merge.is_none());
     }
 
     #[test]

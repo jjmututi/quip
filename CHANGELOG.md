@@ -1159,6 +1159,22 @@ FAIL / incomplete / review required until the merge code lands;
 the note fix changes what "incomplete" means — a documentation gap,
 not an undefined behaviour.
 
+**M9.6b merge — wire verbs and state-machine lifecycle.** The first
+half of the merge implementation lands: the three coordinator-level
+wire verbs (`cluster_merge_propose`, `cluster_merge_accept`,
+`cluster_merge_reject`), the proposer-side `pending_merge` and the
+acceptor-side `incoming_merge` slots on `ClusterState`, the
+`pending_merge_settled` / `note_merge_result` lifecycle, and the
+three unit tests the M9.6b merge note's §4 names. The production
+caller (`ClusterHandle::merge_if_due`) and the integration test
+(`merge_produces_larger_cluster_id`) are the next commit. Row 7
+stays FAIL; its Test field gains the three test names and its
+Source field gains the three new `ClusterState` methods, with the
+note that `should_merge` still has no caller. `MERGE_PROPOSAL_TIMEOUT_S`
+is `3 * CLUSTER_HEARTBEAT_S`, per the note's §2d. `MergeDecision`
+is unchanged; the note's `Merge { into }` wording is reconciled
+in the doc comment and corrected in a separate docs commit.
+
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 

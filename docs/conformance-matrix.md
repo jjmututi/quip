@@ -267,18 +267,26 @@ enough and the edit has not landed."
 - **Requirement.** `MUST` join the larger cluster past the δ threshold;
   `MUST` break ties on the lower `cluster_id`.
 - **Source.** `quip_net::cluster::ClusterState::should_merge` returns
-  `MergeDecision`, and **no production code calls it**
-  (`grep -rn should_merge quip-node/src` is empty).
+  `MergeDecision`, and **no production code calls it**; commit 2 adds
+  `ClusterHandle::merge_if_due` (`grep -rn should_merge quip-node/src`
+  is still empty). The merge lifecycle exists in `quip-net`:
+  `ClusterState::start_merge_proposal`, `note_merge_result`,
+  `pending_merge_settled` and the `pending_merge` / `incoming_merge`
+  slots, with the three wire verbs `cluster_merge_propose`,
+  `cluster_merge_accept` and `cluster_merge_reject` (DHT_DISCOVERY-gated,
+  `Tier::Ctrl`).
 - **Test.** `merge_to_larger_when_delta_zero`,
   `merge_stays_when_own_size_larger`,
   `merge_tie_break_lower_cluster_id_wins`,
   `merge_delta_two_requires_size_ratio_greater_than_four` — all of the
   *decision*, none of a node acting on it. **none for completion**; those
-  four exercise the decision, not the merge. The note's planned tests
-  (`merge_requires_the_size_condition`,
-  `merge_requires_enough_rtt_samples`,
-  `merge_rejected_when_pending_split`,
-  `merge_produces_larger_cluster_id`) land with the merge code.
+  four exercise the decision, not the merge. The note's three unit tests
+  now exist: `merge_requires_the_size_condition`,
+  `merge_requires_enough_rtt_samples`, `merge_rejected_when_pending_split`,
+  alongside `merge_wire_roundtrips`, `note_merge_result_clears_pending`,
+  `note_merge_result_on_accept_returns_the_larger_id` and
+  `incoming_merge_slot_replaces_a_prior_proposal`. The integration test
+  `merge_produces_larger_cluster_id` lands with the merge code.
 - **Verdict.** **FAIL** — the requirement is not enforced. The decision
   function is implemented and unit-tested, which is why a test-count
   check would call this covered, but no code path ever joins a cluster
@@ -294,7 +302,10 @@ enough and the edit has not landed."
   denominator, RTT input, `should_merge` caller). Row stays FAIL /
   incomplete / review required; the note fix changes what "incomplete"
   means (documentation gap rather than undefined behaviour) and
-  names the code path the merge milestone will add.
+  names the code path the merge milestone will add. <SHA>: wire verbs,
+  `pending_merge` / `incoming_merge` slots and the lifecycle land in
+  `quip-net`; the caller and integration test are commit 2. Row
+  unchanged: the wire and state exist, the caller does not.
 - **Specification status.** **incomplete** — "join" is not defined: the
   draft does not say whether the joining node adopts the target's
   `cluster_id`, what happens to its own id, its coordinator, or the

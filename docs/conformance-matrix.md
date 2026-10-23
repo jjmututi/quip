@@ -285,7 +285,7 @@ enough and the edit has not landed."
   `merge_requires_enough_rtt_samples`, `merge_rejected_when_pending_split`,
   alongside `merge_wire_roundtrips`, `note_merge_result_clears_pending`,
   `note_merge_result_on_accept_returns_the_larger_id` and
-  `incoming_merge_slot_replaces_a_prior_proposal`. The integration test
+  `incoming_merge_slot_rejects_a_second_proposal`. The integration test
   `merge_produces_larger_cluster_id` lands with the merge code.
 - **Verdict.** **FAIL** — the requirement is not enforced. The decision
   function is implemented and unit-tested, which is why a test-count

@@ -1174,6 +1174,11 @@ note that `should_merge` still has no caller. `MERGE_PROPOSAL_TIMEOUT_S`
 is `3 * CLUSTER_HEARTBEAT_S`, per the note's §2d. `MergeDecision`
 is unchanged; the note's `Merge { into }` wording is reconciled
 in the doc comment and corrected in a separate docs commit.
+The acceptor's incoming_merge slot is single-occupancy: a second
+proposal while the slot is held returns false and does not displace
+the first, so the caller can respond `ClusterMergeReject { reason:
+Busy }` as §2c requires. The initial commit wrote the slot as
+latest-wins; this commit corrects that.
 
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED

@@ -865,22 +865,25 @@ impl ClusterState {
 
     /// Record an incoming proposal from `proposer_id`.
     ///
-    /// The acceptor holds one slot, so a second proposal displaces the
-    /// first. Returns `true` if the slot was empty (nothing displaced)
-    /// and `false` if a prior proposal was replaced.
+    /// The acceptor's slot is single-occupancy (§2c). A second proposal
+    /// while the slot is occupied returns `false` and does not displace
+    /// the first; the caller responds with
+    /// [`ClusterMergeReject { reason: Busy }`](ClusterMergeReject).
     pub fn note_incoming_merge(
         &mut self,
         proposer_id: NodeId,
         proposer_cluster_id: ClusterId,
         proposed_at: Timestamp,
     ) -> bool {
-        let was_empty = self.incoming_merge.is_none();
+        if self.incoming_merge.is_some() {
+            return false;
+        }
         self.incoming_merge = Some(PendingMergeIncoming {
             proposer_id,
             proposer_cluster_id,
             proposed_at,
         });
-        was_empty
+        true
     }
 
     /// Clear the incoming proposal slot; called when the coordinator has
@@ -1539,8 +1542,10 @@ mod tests {
         );
     }
 
+    /// §2c: the second proposal is rejected with `Busy` by the caller; the
+    /// slot is single-occupancy, and the first proposal is not displaced.
     #[test]
-    fn incoming_merge_slot_replaces_a_prior_proposal() {
+    fn incoming_merge_slot_rejects_a_second_proposal() {
         let mut c = ClusterState::new(cid(9), ClusterLevel::Local, t(0));
 
         assert!(
@@ -1549,16 +1554,20 @@ mod tests {
         );
         assert!(
             !c.note_incoming_merge(nid(2), cid(0x22), t(20)),
-            "the second displaces the first"
+            "the second is refused while the slot is held"
         );
 
-        let slot = c.incoming_merge.expect("a proposal is recorded");
-        assert_eq!(slot.proposer_id, nid(2));
-        assert_eq!(slot.proposer_cluster_id, cid(0x22));
-        assert_eq!(slot.proposed_at, t(20));
+        let slot = c.incoming_merge.expect("the first proposal is recorded");
+        assert_eq!(slot.proposer_id, nid(1), "the first is not displaced");
+        assert_eq!(slot.proposer_cluster_id, cid(0x21));
+        assert_eq!(slot.proposed_at, t(10));
 
         c.clear_incoming_merge();
         assert!(c.incoming_merge.is_none());
+        assert!(
+            c.note_incoming_merge(nid(2), cid(0x22), t(30)),
+            "once the slot is clear, the next proposal is accepted"
+        );
     }
 
     #[test]

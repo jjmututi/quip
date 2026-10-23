@@ -302,7 +302,7 @@ enough and the edit has not landed."
   denominator, RTT input, `should_merge` caller). Row stays FAIL /
   incomplete / review required; the note fix changes what "incomplete"
   means (documentation gap rather than undefined behaviour) and
-  names the code path the merge milestone will add. <SHA>: wire verbs,
+  names the code path the merge milestone will add. `028c102`: wire verbs,
   `pending_merge` / `incoming_merge` slots and the lifecycle land in
   `quip-net`; the caller and integration test are commit 2. Row
   unchanged: the wire and state exist, the caller does not.

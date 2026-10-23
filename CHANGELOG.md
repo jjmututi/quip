@@ -72,7 +72,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~761 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~762 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -112,12 +112,12 @@ Baseline on `main` after M9.6b:
 
 ```
 quip-core      74 passed
-quip-net      498 passed
+quip-net      499 passed
 quip-storage   57 passed
 quip-node     132 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~761 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~762 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -1374,28 +1374,52 @@ otherwise.
   genuine checkpoint signature could therefore supply arbitrary state
   with a matching `state_hash` and have it installed and applied, with
   `BftEvent::StateTransferApplied` then reporting a `checkpoint_digest`
-  the installed state does not commit to. **Resolved** in this commit:
+  the installed state does not commit to. **Resolved** in <SHA>:
   `BftHandler` gains `state_digest_of(&self, state: &[u8]) -> Digest`
   with no default, and `handle_state_transfer_response` recomputes the
   chain digest from the transmitted state and rejects the transfer with
   `state transfer chain digest mismatch` before `apply_state`. §5.3.4.1
-  step 3 gains a following step with the two `MUST` sentences: the
-  receiver recomputes and rejects, and a handler whose chain digest is
-  derived from applied operations must serialize that digest into its
-  state. The property the recomputation relies on —
-  `state_digest_of(&state_bytes()) == state_digest()` — is asserted in
-  the `ChainDigestHandler` fixture, so a half-done serialization fails
-  loudly. New test
+  step 4 (added in 84c29c4, rewritten here) carries the `MUST` sentences:
+  the receiver recomputes and rejects, the chain digest covers every byte
+  of the handler's serialized state rather than only the bytes carrying
+  the digest, a handler must serialize its chain digest so the
+  recomputation returns the digest it reports, and a handler `MUST NOT`
+  install a byte the recomputed digest does not cover. The last clause is
+  the §5.3.4.1 coverage reading made normative, and it is what the S16
+  mechanism needed: the receiver's guarantee is only as strong as the
+  handler's choice of coverage, so leaving the reading ambiguous would
+  leave the class open to the next handler. The property the
+  recomputation relies on — `state_digest_of(&state_bytes()) ==
+  state_digest()` — is asserted in the `ChainDigestHandler` fixture, so a
+  half-done serialization fails loudly. Tests:
   `state_transfer_rejects_substituted_state_with_matching_state_hash`
   replaces the bytes, repairs `state_hash`, leaves the signed triple
   untouched, and asserts the rejection; it fails against the
-  pre-recomputation receiver, which returned `Ok(())`. The contract is
-  `docs/bft-state-transfer-auth.md`. Matrix row 14 stays `PASS`; its
-  justification changes, because the bytes are now bound to a signed
-  value rather than to a sender-supplied checksum. Deliberately not in
-  this commit: `BftStateTransfer::verify` and `signing_payload` remain
-  uncalled, the Frost rejection branch stays untested, and the `76c9d0e`
-  style findings are a `docs:` follow-up.
+  pre-recomputation receiver, which returned `Ok(())`. New here:
+  `state_transfer_rejects_counter_only_substitution` differs from the
+  genuine state only in the counter bytes `0..8` and is rejected by the
+  recomputation, which the whole-state test could not distinguish.
+  The contract is `docs/bft-state-transfer-auth.md`. Matrix row 14 stays
+  `PASS`; its justification changes, because the bytes are now bound to a
+  signed value rather than to a sender-supplied checksum, and it carries a
+  verdict history.
+  CI: run 39640265939 on 84c29c4, all five jobs success.
+  Mutation check: removing the recomputation gives `got Ok(())`;
+  restoring it gives the chain-digest mismatch.
+  `BftStateTransfer::verify` and `signing_payload` remain uncalled, the
+  third instance of the name-the-caller class.
+  `state_digest_of` returns the all-zero sentinel for a malformed state; a
+  test feeding a wrongly-sized state is deferred with this note.
+  The chain digest now covers all 40 bytes of `ChainDigestHandler`'s
+  serialized state under the §5.3.4.1 coverage reading; a counter-only
+  substitution is rejected by the new
+  `state_transfer_rejects_counter_only_substitution` test. The fixture
+  domain-separates that digest from `sha256(state)` so the two quantities
+  stay distinguishable, which is what
+  `state_transfer_distinguishes_chain_digest_from_byte_digest` checks.
+  Deliberately not in this commit: the sentinel-branch test, the Frost
+  rejection branch, and the `76c9d0e` style findings, which are a `docs:`
+  follow-up.
 
 ---
 

@@ -339,10 +339,22 @@ enough and the edit has not landed."
   field removed, encoded with QUIP-CBOR.
 - **Requirement.** `MUST` sign the payload without the signature.
 - **Source.** `signing_payload()` on each wire type in
-  `quip-net/src/nat_wire.rs`, `quip-net/src/coral.rs` and
-  `quip-net/src/cluster.rs`. Called by each type's `verify`, and by the
-  senders that fill the signature (`dht_result_from`, the relay
-  responder, the cluster heartbeat).
+  `quip-net/src/nat_wire.rs`, `quip-net/src/coral.rs`,
+  `quip-net/src/cluster.rs` and `quip-net/src/bft.rs`. Called by each
+  type's `verify`, and by the senders that fill the signature
+  (`dht_result_from`, the relay responder, the cluster heartbeat); for
+  the `bft.rs` types, by the driver handlers that verify votes, view
+  changes, new views and checkpoints. **One exception, and it is the
+  third instance of the uncalled-code class:** `bft_state_transfer`'s
+  `BftStateTransfer::signing_payload` and `BftStateTransfer::verify` have
+  no caller at all — production or test. The receive path verifies the
+  checkpoint signature set through `verify_checkpoint_ring_sig` instead
+  (row 17), so a signature over the transfer's own payload is never
+  checked. The first two instances of the class were counted in the
+  `c6a371a` and `76c9d0e` review rounds (`Capabilities::new_checked`,
+  row 4; `ClusterState::should_merge`, row 7); this one is recorded here
+  rather than fixed, because the treatment is either deletion or wiring
+  and both are separate from §10.1.
 - **Test.** `connectivity_announce_signing_payload_excludes_signature`,
   `relay_discovery_signing_payload_excludes_signature`,
   `signing_payload_excludes_signature` (`cluster_info`), plus the
@@ -461,20 +473,37 @@ enough and the edit has not landed."
   untouched, and asserts the transfer is rejected with
   `state transfer chain digest mismatch` and nothing is installed. It
   fails against the pre-recomputation receiver, which accepted the
-  transfer.
-- **Verdict.** **PASS** — the transferred bytes are checked three ways and
-  the checks are not redundant: `state_hash` catches corruption, the
-  ring signature binds the checkpoint triple including
-  `checkpoint_digest`, and `state_digest_of` binds the bytes to that
-  signed digest. Without the third check the first two could both pass on
-  a substituted state, because the sender supplies both sides of the
-  byte comparison; with it, a state that does not recompute to
-  `checkpoint_digest` is rejected before `apply_state`.
+  transfer. `state_transfer_rejects_counter_only_substitution` differs
+  from the genuine state only in the counter bytes `0..8`, repairs
+  `state_hash`, and asserts the same rejection; it is the test that
+  distinguishes digest coverage from whole-state substitution, because
+  the previous test differs in both ranges.
+- **Verdict.** **PASS** — the bytes are bound to a signed value, and the
+  binding is only as strong as the handler's coverage. `state_hash`
+  catches corruption, the ring signature binds the checkpoint triple
+  including `checkpoint_digest`, and `state_digest_of` recomputes the
+  chain digest from the transmitted state and compares it with the signed
+  `checkpoint_digest`. §5.3.4.1 makes the coverage reading normative: the
+  chain digest is a digest over **every** byte of the handler's
+  serialized state, and a handler `MUST NOT` install a byte the
+  recomputed digest does not cover. Under that reading the
+  `ChainDigestHandler` fixture's digest covers all 40 bytes — counter and
+  rolling chain — and a counter-only substitution is rejected. Before
+  that amendment the row's `PASS` rested on the narrower property
+  reading, under which a handler could serialize bytes outside its digest
+  and the receiver would install them.
+- **History.** 84c29c4: `PASS` under the property reading. This commit:
+  `PASS` under the coverage reading, §5.3.4.1 amended. Counter bytes
+  `0..8` now covered by the digest; counter-only substitution rejected
+  (`state_transfer_rejects_counter_only_substitution`).
 - **Specification status.** clear — the amendment gives the two digests
   distinct fields and distinct verification steps.
 - **Submission impact.** `non-blocking` — the code gap this row recorded
   is closed, and no submission decision depended on it.
-- **Depends on.** none (leaf); row 8 depends on this row.
+- **Depends on.** none (leaf); row 8 depends on this row, and row 17 for
+  the checkpoint triple — `checkpoint_digest` is the value the ring
+  signature covers, so the recomputation compares against a signed value.
+  The contract is S16 in `CHANGELOG.md`.
 
 ### 15. §5.3.4 — pre-prepare digest recomputation — PASS
 

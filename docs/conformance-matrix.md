@@ -283,12 +283,12 @@ enough and the edit has not landed."
   function is implemented and unit-tested, which is why a test-count
   check would call this covered, but no code path ever joins a cluster
   for this reason. Recorded as Outstanding Work 16a. The bf520fe design
-  note (docs/m9.6b-merge-design.md) was revised in <SHA> to resolve the
+  note (docs/m9.6b-merge-design.md) was revised in `3fbee08` to resolve the
   review findings; `merge_if_due` is now named as
   `ClusterState::should_merge`'s caller and will close the
   uncalled-code gap when the merge code lands.
 - **History.** bf520fe: design note landed, FAIL / incomplete /
-  review required. <SHA>: note revised to resolve the bf520fe review
+  review required. `3fbee08`: note revised to resolve the bf520fe review
   pair's findings (direction of id adoption, size re-check timing,
   receiver-side `busy` state, migration trigger, completion
   denominator, RTT input, `should_merge` caller). Row stays FAIL /

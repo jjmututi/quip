@@ -492,7 +492,7 @@ enough and the edit has not landed."
   that amendment the row's `PASS` rested on the narrower property
   reading, under which a handler could serialize bytes outside its digest
   and the receiver would install them.
-- **History.** 84c29c4: `PASS` under the property reading. This commit:
+- **History.** 84c29c4: `PASS` under the property reading. `ece3e58`:
   `PASS` under the coverage reading, §5.3.4.1 amended. Counter bytes
   `0..8` now covered by the digest; counter-only substitution rejected
   (`state_transfer_rejects_counter_only_substitution`).

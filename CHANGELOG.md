@@ -1134,6 +1134,31 @@ the new verb found the new bug in one classifier, with one test naming
 what the bug would have done — not in one of four copies, where the
 negative case had no home.
 
+**M9.6b design note revision.** The bf520fe review pair found that
+docs/m9.6b-merge-design.md's §2 could not be transcribed as it stood:
+§2b said the larger cluster's members adopt the smaller cluster's id
+while §2c and §2d said the larger id survives; the size re-check was
+"at the time of the proposal" in §2b and "at acceptance time" in §2c;
+first-arrived-wins needed a receiver-side `PendingMerge` the note did
+not define; the member-migration trigger was unspecified; the
+completion denominator was "smaller cluster's members" in one place
+and "remaining members" in another; failure mode 3 was named a failure
+but stated as completion; §2a's RTT rule depended on a
+`ClusterInfo.rtt` field that neither the code nor the draft carries;
+and §2a's 1/4 rule was not what `ClusterState::should_merge` actually
+evaluates. The revision makes three decisions and lands them:
+eligibility is `should_merge`'s δ rule (the draft's 1/4 floor is
+satisfied at δ=2 and oscillated at δ=0, which is the intent); the
+RTT input is local samples against the peer cluster's members, with
+no new wire field; and completion is a reachable-at-acceptance
+majority, with partial migration a completion rule rather than a
+failure. `merge_if_due` is named as `should_merge`'s caller, which
+closes the note's own §1 gap and the fourth instance of the
+uncalled-code class. No code, no draft change. Row 7 stays
+FAIL / incomplete / review required until the merge code lands;
+the note fix changes what "incomplete" means — a documentation gap,
+not an undefined behaviour.
+
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 

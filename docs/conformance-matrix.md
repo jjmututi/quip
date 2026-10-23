@@ -273,11 +273,28 @@ enough and the edit has not landed."
   `merge_stays_when_own_size_larger`,
   `merge_tie_break_lower_cluster_id_wins`,
   `merge_delta_two_requires_size_ratio_greater_than_four` — all of the
-  *decision*, none of a node acting on it.
+  *decision*, none of a node acting on it. **none for completion**; those
+  four exercise the decision, not the merge. The note's planned tests
+  (`merge_requires_the_size_condition`,
+  `merge_requires_enough_rtt_samples`,
+  `merge_rejected_when_pending_split`,
+  `merge_produces_larger_cluster_id`) land with the merge code.
 - **Verdict.** **FAIL** — the requirement is not enforced. The decision
   function is implemented and unit-tested, which is why a test-count
   check would call this covered, but no code path ever joins a cluster
-  for this reason. Recorded as Outstanding Work 16a.
+  for this reason. Recorded as Outstanding Work 16a. The bf520fe design
+  note (docs/m9.6b-merge-design.md) was revised in <SHA> to resolve the
+  review findings; `merge_if_due` is now named as
+  `ClusterState::should_merge`'s caller and will close the
+  uncalled-code gap when the merge code lands.
+- **History.** bf520fe: design note landed, FAIL / incomplete /
+  review required. <SHA>: note revised to resolve the bf520fe review
+  pair's findings (direction of id adoption, size re-check timing,
+  receiver-side `busy` state, migration trigger, completion
+  denominator, RTT input, `should_merge` caller). Row stays FAIL /
+  incomplete / review required; the note fix changes what "incomplete"
+  means (documentation gap rather than undefined behaviour) and
+  names the code path the merge milestone will add.
 - **Specification status.** **incomplete** — "join" is not defined: the
   draft does not say whether the joining node adopts the target's
   `cluster_id`, what happens to its own id, its coordinator, or the
@@ -285,9 +302,12 @@ enough and the edit has not landed."
 - **Submission impact.** `review required` — merge is how clusters
   converge to a stable size; leaving it unexecuted and undefined is
   either acceptable at this revision or not, and that is a decision.
-- **Depends on.** row 13 (the size estimate merge compares). A `FAIL`
-  dependency would leave merge's decision input unverified even if merge
-  had a caller.
+- **Depends on.** row 13 (§13.6 — the size estimate merge compares; the
+  size the δ rule compares is the estimate §13.6 defines) and row 12
+  (§13.2 — the p90 the RTT rule compares is the acceptance test's p90,
+  and the ≥ 20 sample floor is the same constant). A `FAIL` dependency
+  would leave merge's decision input unverified even if merge had a
+  caller.
 
 ### 8. §5.3.4 — execution contract for committed operations — FAIL
 

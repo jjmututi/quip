@@ -1374,7 +1374,7 @@ otherwise.
   genuine checkpoint signature could therefore supply arbitrary state
   with a matching `state_hash` and have it installed and applied, with
   `BftEvent::StateTransferApplied` then reporting a `checkpoint_digest`
-  the installed state does not commit to. **Resolved** in <SHA>:
+  the installed state does not commit to. **Resolved** in `ece3e58`:
   `BftHandler` gains `state_digest_of(&self, state: &[u8]) -> Digest`
   with no default, and `handle_state_transfer_response` recomputes the
   chain digest from the transmitted state and rejects the transfer with

@@ -72,7 +72,7 @@ All crates compile, every test passes, clippy and rustdoc are silent
 under `-D warnings`, and the `no_std` build works:
 
 ```
-cargo test --workspace --all-features                    ~762 unit + 4 doc, exit 0
+cargo test --workspace --all-features                    ~770 unit + 4 doc, exit 0
 cargo clippy --workspace --all-targets --all-features    clean, -D warnings
 cargo doc --workspace --all-features --no-deps           clean
 RUSTDOCFLAGS="-D warnings" cargo doc ...                 clean
@@ -112,12 +112,12 @@ Baseline on `main` after M9.6b:
 
 ```
 quip-core      74 passed
-quip-net      499 passed
+quip-net      506 passed
 quip-storage   57 passed
-quip-node     132 passed
+quip-node     133 passed
 quip-node-ffi   0 passed
 doc-tests       4 passed (one per crate)
-             ~762 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
+             ~770 unit tests, 0 failed — clippy clean, rustdoc clean, no_std clean
 ```
 
 ### Status at a glance
@@ -147,6 +147,7 @@ doc-tests       4 passed (one per crate)
 | M9.5b-c | `quip-node`: routing eligibility, cluster-member identity, `RelayedPathEstablished`, `NatDriver` in the peer task, signed candidate exchange, real probe, relay path, cluster membership and XOR routing; cluster split execution deferred to M9.6b | landed |
 | M9.6a | `quip-node`: witness accumulation, store, responder, issuance policy | landed |
 | M9.6b | `quip-node`: cluster-info exchange and split execution | landed |
+| M9.6b (merge) | `quip-node`: cluster merging (§13.4) | landed |
 | M9.6c | `quip-node`: trust bootstrap | not started |
 | M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
 | M9.8 | `quip-node`: peer address book and bootstrap | not started |
@@ -1194,6 +1195,18 @@ the first, so the caller can respond `ClusterMergeReject { reason:
 Busy }` as §2c requires. The initial commit wrote the slot as
 latest-wins; this commit corrects that.
 
+The production caller and the integration test land in this
+commit. `ClusterHandle::merge_if_due` is `should_merge`'s caller,
+closing the fourth instance of the name-the-caller class.
+`ClusterHandle::plan_merge` evaluates the four §2a rules (rule 1
+via `should_merge`, rule 2 via two p90 comparisons, rule 3 via
+the `pending_split` slot, rule 4 transitively through §13.2's
+threshold). The Busy path the incoming_merge fix made reachable
+is exercised by the integration test. Row 7 moves to PASS;
+specification status stays incomplete until the draft's §13.4
+amendment folds §2 into the draft, which is the next docs
+commit.
+
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
 
@@ -1490,6 +1503,8 @@ completion, validation, protocol design, or release discipline —
 rather than by milestone number. The status table above names the
 same items under their phase labels (BFT-A, BFT-V, N-Hard, Spec,
 M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
+
+M9.6b merge — draft §13.4 amendment.
 
 ### BFT correctness (BFT-A)
 

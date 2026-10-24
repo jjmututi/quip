@@ -266,15 +266,20 @@ enough and the edit has not landed."
   lower `cluster_id`" otherwise.
 - **Requirement.** `MUST` join the larger cluster past the δ threshold;
   `MUST` break ties on the lower `cluster_id`.
-- **Source.** `quip_net::cluster::ClusterState::should_merge` returns
-  `MergeDecision`, and **no production code calls it**; commit 2 adds
-  `ClusterHandle::merge_if_due` (`grep -rn should_merge quip-node/src`
-  is still empty). The merge lifecycle exists in `quip-net`:
-  `ClusterState::start_merge_proposal`, `note_merge_result`,
-  `pending_merge_settled` and the `pending_merge` / `incoming_merge`
-  slots, with the three wire verbs `cluster_merge_propose`,
-  `cluster_merge_accept` and `cluster_merge_reject` (DHT_DISCOVERY-gated,
-  `Tier::Ctrl`).
+- **Source.** `ClusterState::should_merge` returns `MergeDecision`, and
+  `ClusterHandle::merge_if_due` is its production caller
+  (`grep -rn should_merge quip-node/src` now returns `plan_merge`).
+  `ClusterHandle::plan_merge` evaluates §2a rules 1–3 (rule 1 via
+  `should_merge`, rule 2 via two p90 comparisons, rule 3 via
+  `pending_split`); rule 4 is transitive through §13.2. The lifecycle
+  lives in `ClusterState::start_merge_proposal`,
+  `note_merge_result`, `pending_merge_settled`,
+  `merge_proposal_eligible` and the `pending_merge` / `incoming_merge`
+  slots; `ClusterHandle::note_merge_result` is exercised through
+  `ClusterHandle::state` by the peer task. The three wire verbs
+  (`cluster_merge_propose`, `cluster_merge_accept`,
+  `cluster_merge_reject`) are DHT_DISCOVERY-gated, `Tier::Ctrl`, and
+  classify as `InboundAction::Merge` in `classify_inbound`.
 - **Test.** `merge_to_larger_when_delta_zero`,
   `merge_stays_when_own_size_larger`,
   `merge_tie_break_lower_cluster_id_wins`,
@@ -286,15 +291,20 @@ enough and the edit has not landed."
   alongside `merge_wire_roundtrips`, `note_merge_result_clears_pending`,
   `note_merge_result_on_accept_returns_the_larger_id` and
   `incoming_merge_slot_rejects_a_second_proposal`. The integration test
-  `merge_produces_larger_cluster_id` lands with the merge code.
-- **Verdict.** **FAIL** — the requirement is not enforced. The decision
-  function is implemented and unit-tested, which is why a test-count
-  check would call this covered, but no code path ever joins a cluster
-  for this reason. Recorded as Outstanding Work 16a. The bf520fe design
-  note (docs/m9.6b-merge-design.md) was revised in `3fbee08` to resolve the
-  review findings; `merge_if_due` is now named as
-  `ClusterState::should_merge`'s caller and will close the
-  uncalled-code gap when the merge code lands.
+  `merge_produces_larger_cluster_id` drives the full path on a
+  two-cluster fixture (25 local + 20 larger peers, because §2a rule 2
+  needs 20 samples on each side) and asserts the larger id survives,
+  the pending slot clears, the split counter stays 0, and the `Busy`
+  path refuses a second proposal.
+- **Verdict.** **PASS** — the code path is complete: `merge_if_due` is
+  `should_merge`'s production caller, evaluates the four §2a rules
+  per the note's §3, and the integration test
+  `merge_produces_larger_cluster_id` proves the completion and the
+  `Busy` path. The four existing decision tests remain; the three
+  unit tests from the wire commit remain. The row's specification
+  status stays `incomplete` until the draft's §13.4 amendment folds
+  §2 into the draft; the amendment is the next docs commit and will
+  move the row to `PASS` / `clear` / `non-blocking`.
 - **History.** bf520fe: design note landed, FAIL / incomplete /
   review required. `3fbee08`: note revised to resolve the bf520fe review
   pair's findings (direction of id adoption, size re-check timing,
@@ -305,7 +315,12 @@ enough and the edit has not landed."
   names the code path the merge milestone will add. `028c102`: wire verbs,
   `pending_merge` / `incoming_merge` slots and the lifecycle land in
   `quip-net`; the caller and integration test are commit 2. Row
-  unchanged: the wire and state exist, the caller does not.
+  unchanged: the wire and state exist, the caller does not. <SHA>: the
+  caller (`ClusterHandle::merge_if_due` / `plan_merge`), the
+  `classify_inbound` / `apply_inbound` merge arms, `ClusterView::
+  pending_merge` and `merge_produces_larger_cluster_id` land; row
+  moves FAIL → PASS, specification status stays `incomplete` until the
+  §13.4 amendment.
 - **Specification status.** **incomplete** — "join" is not defined: the
   draft does not say whether the joining node adopts the target's
   `cluster_id`, what happens to its own id, its coordinator, or the

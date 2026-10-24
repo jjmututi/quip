@@ -97,7 +97,7 @@
 
 use quip_core::dvv::NodeId;
 use quip_core::time::Timestamp;
-use quip_net::cluster::{ClusterInfo, ClusterInfoAnnounce};
+use quip_net::cluster::{ClusterInfo, ClusterInfoAnnounce, ClusterMergePropose};
 use quip_net::coral::select_witness_ring;
 use quip_net::crypto::Ed25519Verifier;
 use quip_net::dht::RttClass;
@@ -394,6 +394,17 @@ impl DhtHandle {
             target: None,
             key: None,
             msg: Message::ClusterInfo(announce),
+        });
+    }
+
+    /// Send a merge proposal to a specific coordinator (the larger
+    /// cluster's). Peer-scoped, like `publish_candidates`: `target` is
+    /// the accepter, `key` is `None`.
+    pub fn publish_cluster_merge_propose(&self, propose: ClusterMergePropose, target: NodeId) {
+        let _ = self.inner.outbound_tx.send(Outbound {
+            target: Some(target),
+            key: None,
+            msg: Message::ClusterMergePropose(propose),
         });
     }
 

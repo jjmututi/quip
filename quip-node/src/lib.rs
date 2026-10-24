@@ -929,7 +929,9 @@ where
     ///
     /// Reads the routing-eligible set and RTT samples from the DHT
     /// table, advances the cluster state machine, and returns the
-    /// resulting snapshot.
+    /// resulting snapshot. `pending_merge` in the snapshot mirrors the
+    /// state's outstanding merge proposal, the same way `split_due`
+    /// mirrors the split timer.
     pub fn cluster_view(&self) -> ClusterView {
         self.cluster.recompute(&self.dht, self.clock.now())
     }

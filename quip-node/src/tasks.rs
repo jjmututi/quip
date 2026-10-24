@@ -11,6 +11,7 @@ use quip_core::cbor::decode;
 use quip_core::dvv::NodeId;
 use quip_core::messages::{KeyClaim, Signer, WitnessStatement};
 use quip_core::time::Timestamp;
+use quip_net::cluster::{ClusterMergeReject, MergeRejectReason};
 use quip_net::coral::{LookupPath, LookupResponse};
 use quip_net::crypto::{Ed25519Signer, Ed25519Verifier};
 use quip_net::discovery::{
@@ -429,6 +430,10 @@ struct InboundOptions {
     /// would file a claim before either side had an authenticated peer
     /// id to file it under.
     serve_cluster_info: bool,
+    /// §13.4 merge verbs. Enabled wherever `cluster_info` is; the merge
+    /// is a cluster verb and the acceptor's coordinator may already be a
+    /// peer.
+    serve_cluster_merge: bool,
 }
 
 impl InboundOptions {
@@ -438,6 +443,7 @@ impl InboundOptions {
         serve_coral: false,
         serve_pins: false,
         serve_cluster_info: false,
+        serve_cluster_merge: false,
     };
     /// §12 NAT phase: relay and Coral are served; pins are not.
     const NAT: Self = Self {
@@ -445,6 +451,7 @@ impl InboundOptions {
         serve_coral: true,
         serve_pins: false,
         serve_cluster_info: true,
+        serve_cluster_merge: true,
     };
     /// Witness discovery: relay and Coral are served; pins are not.
     const DISCOVERY: Self = Self {
@@ -452,6 +459,7 @@ impl InboundOptions {
         serve_coral: true,
         serve_pins: false,
         serve_cluster_info: true,
+        serve_cluster_merge: true,
     };
     /// Established: everything this layer owns.
     const STEADY: Self = Self {
@@ -459,6 +467,7 @@ impl InboundOptions {
         serve_coral: true,
         serve_pins: true,
         serve_cluster_info: true,
+        serve_cluster_merge: true,
     };
     /// T3 datagrams carry no §12/§13 verbs; only witness ingest applies.
     const DATAGRAM: Self = Self {
@@ -466,6 +475,7 @@ impl InboundOptions {
         serve_coral: false,
         serve_pins: false,
         serve_cluster_info: false,
+        serve_cluster_merge: false,
     };
 }
 
@@ -484,6 +494,10 @@ enum InboundAction {
     /// A `cluster_info` from the connection's peer: verify, record, and
     /// answer if our tuple differs (§13.4).
     ClusterInfo,
+    /// A §13.4 merge verb: propose, accept, or reject. The peer task
+    /// decides what to do with it; only the coordinator of a cluster
+    /// answers.
+    Merge,
     /// An auto-served pin verb.
     Pins,
     /// Nothing this layer owns.
@@ -524,6 +538,19 @@ fn classify_inbound(
     // nothing to record it under.
     if opts.serve_cluster_info && peer.is_some() && matches!(msg, Message::ClusterInfo(_)) {
         return InboundAction::ClusterInfo;
+    }
+    // The merge verbs carry a signature verified against the connection's
+    // peer, so like `cluster_info` they need an authenticated sender.
+    if opts.serve_cluster_merge
+        && peer.is_some()
+        && matches!(
+            msg,
+            Message::ClusterMergePropose(_)
+                | Message::ClusterMergeAccept(_)
+                | Message::ClusterMergeReject(_)
+        )
+    {
+        return InboundAction::Merge;
     }
     if opts.serve_pins && is_pin_verb(msg) {
         return InboundAction::Pins;
@@ -670,6 +697,63 @@ where
                             let _ = driver.send(&Message::ClusterInfo(reply), now).await;
                         }
                     }
+                }
+            }
+            InboundOutcome::Handled
+        }
+        InboundAction::Merge => {
+            if let Some(peer) = peer {
+                match &msg {
+                    Message::ClusterMergePropose(p) => {
+                        // Verify against the authenticated sender, then try
+                        // to occupy the acceptor slot.
+                        if matches!(p.verify(&peer, &Ed25519Verifier), Ok(true)) {
+                            let now = clock.now();
+                            let was_free = deps.cluster.state().note_incoming_merge(
+                                peer,
+                                p.proposer_cluster_id,
+                                p.proposed_at,
+                            );
+                            if !was_free {
+                                // §2c: a second proposal while the slot is
+                                // occupied is answered Busy, not accepted.
+                                let mut reject = ClusterMergeReject {
+                                    proposer_cluster_id: p.proposer_cluster_id,
+                                    reason: MergeRejectReason::Busy,
+                                    rejected_at: now,
+                                    signature: [0u8; 64],
+                                };
+                                if let Ok(payload) = reject.signing_payload() {
+                                    reject.signature = deps.signer.as_ref().sign_ed25519(&payload);
+                                }
+                                let _ =
+                                    driver.send(&Message::ClusterMergeReject(reject), now).await;
+                            }
+                            // A free slot leaves the decision to the cluster
+                            // task, which holds the §2a measurements; this
+                            // arm records the proposal and answers Busy.
+                        }
+                    }
+                    Message::ClusterMergeAccept(a) => {
+                        if matches!(a.verify(&peer, &Ed25519Verifier), Ok(true)) {
+                            let now = clock.now();
+                            let mut st = deps.cluster.state();
+                            if st.pending_merge.is_some() {
+                                st.migrate(a.accept_cluster_id, now);
+                                // A merge is not a split episode: `migrate`
+                                // starts a pending split attempt, so clear it.
+                                st.pending_split = None;
+                                let _ = st.note_merge_result(true, now);
+                            }
+                        }
+                    }
+                    Message::ClusterMergeReject(r) => {
+                        if matches!(r.verify(&peer, &Ed25519Verifier), Ok(true)) {
+                            let now = clock.now();
+                            let _ = deps.cluster.state().note_merge_result(false, now);
+                        }
+                    }
+                    _ => {}
                 }
             }
             InboundOutcome::Handled
@@ -2148,6 +2232,7 @@ mod tests {
                 serve_coral: false,
                 serve_pins: false,
                 serve_cluster_info: false,
+                serve_cluster_merge: false,
             },
         );
         assert_eq!(
@@ -2157,6 +2242,7 @@ mod tests {
                 serve_coral: true,
                 serve_pins: false,
                 serve_cluster_info: true,
+                serve_cluster_merge: true,
             },
         );
         assert_eq!(
@@ -2166,6 +2252,7 @@ mod tests {
                 serve_coral: true,
                 serve_pins: false,
                 serve_cluster_info: true,
+                serve_cluster_merge: true,
             },
         );
         assert_eq!(
@@ -2175,6 +2262,7 @@ mod tests {
                 serve_coral: true,
                 serve_pins: true,
                 serve_cluster_info: true,
+                serve_cluster_merge: true,
             },
         );
         assert_eq!(
@@ -2184,6 +2272,7 @@ mod tests {
                 serve_coral: false,
                 serve_pins: false,
                 serve_cluster_info: false,
+                serve_cluster_merge: false,
             },
         );
     }

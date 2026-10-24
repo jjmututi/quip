@@ -16,8 +16,8 @@ use quip_core::messages::Signer;
 use quip_core::time::Timestamp;
 use quip_net::cluster::{
     center_lookup_key, estimate_size_from_routing_table, far_cluster_id, fresh_cluster_id,
-    near_cluster_id, percentile, ClusterConfig, ClusterInfo, ClusterInfoAnnounce, ClusterLevel,
-    ClusterState, SplitAction,
+    near_cluster_id, percentile, ClusterConfig, ClusterId, ClusterInfo, ClusterInfoAnnounce,
+    ClusterLevel, ClusterState, MergeDecision, SplitAction, ACCEPTANCE_MIN_SAMPLES,
 };
 use quip_net::MIN_CLUSTER_SIZE;
 
@@ -140,6 +140,10 @@ pub struct ClusterView {
     /// Whether the cluster has been over its RTT threshold long enough
     /// to split (§13.5).
     pub split_due: bool,
+    /// The merge this node has in flight, if any (§2c). `None` when no
+    /// proposal is outstanding. A mirror of the state's `pending_merge`,
+    /// the way `split_due` mirrors the split state.
+    pub pending_merge: Option<([u8; 16], Timestamp)>,
 }
 
 /// The outcome of one split evaluation (§13.5).
@@ -152,6 +156,20 @@ pub struct SplitPlan {
     /// The peer the center lookup picked, and its RTT sample. `None`
     /// when there is no routing-eligible peer to be the center.
     pub center: Option<(NodeId, u64)>,
+}
+
+/// A planned merge (§13.4): which peer's cluster to merge into, and
+/// the larger cluster's id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MergePlan {
+    /// The peer whose cluster we propose merging into. Its coordinator
+    /// will be the accepter.
+    pub into_peer: NodeId,
+    /// The larger cluster's id, which survives the merge.
+    pub into_id: ClusterId,
+    /// The larger cluster's size, recorded for the Changelog's "what
+    /// the plan saw" and for the integration test's assertion.
+    pub larger_size: u64,
 }
 
 /// Shared state behind every [`ClusterHandle`] clone.
@@ -284,6 +302,139 @@ impl ClusterHandle {
         })
     }
 
+    /// A `pub(crate)` view of the shared state machine, for the merge
+    /// verbs (§13.4).
+    ///
+    /// The peer task needs the merge lifecycle methods that have no
+    /// handle-level accessor of their own (`note_incoming_merge`,
+    /// `note_merge_result`, `migrate`). Sharing the one mutex keeps a
+    /// second copy of the state from drifting.
+    pub(crate) fn state(&self) -> std::sync::MutexGuard<'_, ClusterState> {
+        self.inner.state.lock().expect("cluster lock poisoned")
+    }
+
+    /// Evaluate merge eligibility and return the best candidate.
+    ///
+    /// Rules, in the order the note's §3 names them:
+    ///  - §2a rule 1: `ClusterState::should_merge` for the peer's
+    ///    `ClusterInfo` at `now` and the local config.
+    ///  - §2a rule 2: the local p90 against the local cluster's members
+    ///    is strictly greater than the local p90 against the peer
+    ///    cluster's members, both over at least `ACCEPTANCE_MIN_SAMPLES`.
+    ///    This is the caller-side check the state machine cannot make.
+    ///  - §2a rule 3: `pending_split` is `None`.
+    ///  - No merge in flight: `ClusterState::merge_proposal_eligible` for
+    ///    the no-in-flight condition.
+    ///
+    /// Rule 4 is transitive through the acceptance test and is not
+    /// re-checked here.
+    ///
+    /// Returns the candidate with the greatest RTT improvement when more
+    /// than one qualifies; `None` otherwise.
+    pub fn plan_merge(&self, dht: &DhtHandle, now: Timestamp) -> Option<MergePlan> {
+        let cfg = self.inner.config;
+        let records = dht.routing_eligible_records();
+
+        // One lock for the whole evaluation: the split slot, the merge
+        // slots and the id the filter compares against must come from
+        // the same snapshot.
+        let state = self.inner.state.lock().expect("cluster lock poisoned");
+        let local_id = state.id;
+
+        // §2a rule 2's left-hand side: the local cluster's own members.
+        let local_samples: Vec<u64> = records
+            .iter()
+            .filter(|(p, _)| is_cluster_member(&self.inner.neighbours, p, &local_id))
+            .filter_map(|(_, r)| r.rtt_ms)
+            .collect();
+        if local_samples.len() < ACCEPTANCE_MIN_SAMPLES {
+            return None;
+        }
+        let local_p90 = percentile(&local_samples, cfg.acceptance_percentile)?;
+
+        let mut best: Option<(MergePlan, u64)> = None;
+        for (peer, _) in &records {
+            let Some(info) = self.inner.neighbours.get(peer) else {
+                continue;
+            };
+            // Candidates are peers in *another* cluster. `is_cluster_member`
+            // is true for our own members (and for silent peers), so the
+            // filter here is its complement on announced ids.
+            if info.id == local_id {
+                continue;
+            }
+            // §2a rule 1.
+            if state.should_merge(&info, now, &cfg) != MergeDecision::Merge {
+                continue;
+            }
+            // §2a rule 3 and the no-merge-in-flight condition.
+            if !state.merge_proposal_eligible(&info, now, &cfg) {
+                continue;
+            }
+            // §2a rule 2: the caller's peer-side sample set is the local
+            // routing table's samples toward the members the peer has
+            // announced.
+            let peer_samples: Vec<u64> = records
+                .iter()
+                .filter(|(p, _)| {
+                    self.inner
+                        .neighbours
+                        .get(p)
+                        .map(|i| i.id == info.id)
+                        .unwrap_or(false)
+                })
+                .filter_map(|(_, r)| r.rtt_ms)
+                .collect();
+            if peer_samples.len() < ACCEPTANCE_MIN_SAMPLES {
+                continue;
+            }
+            let Some(peer_p90) = percentile(&peer_samples, cfg.acceptance_percentile) else {
+                continue;
+            };
+            if local_p90 <= peer_p90 {
+                continue;
+            }
+
+            let plan = MergePlan {
+                into_peer: *peer,
+                into_id: info.id,
+                larger_size: info.size,
+            };
+            // Prefer the largest surviving cluster, then the biggest RTT
+            // improvement.
+            let better = match &best {
+                None => true,
+                Some((b, b_p90)) => {
+                    plan.larger_size > b.larger_size
+                        || (plan.larger_size == b.larger_size && peer_p90 < *b_p90)
+                }
+            };
+            if better {
+                best = Some((plan, peer_p90));
+            }
+        }
+
+        best.map(|(plan, _)| plan)
+    }
+
+    /// Plan and start a merge if one is due.
+    ///
+    /// Returns the [`MergePlan`] when a proposal was started, `None`
+    /// otherwise. The migration happens on the accept, in
+    /// `note_merge_result`, not here — the smaller cluster keeps its id
+    /// until the larger coordinator broadcasts acceptance.
+    pub fn merge_if_due(&self, dht: &DhtHandle, now: Timestamp) -> Option<MergePlan> {
+        let plan = self.plan_merge(dht, now)?;
+        let started = {
+            let mut state = self.inner.state.lock().expect("cluster lock poisoned");
+            state.start_merge_proposal(plan.into_id, now)
+        };
+        if !started {
+            return None;
+        }
+        Some(plan)
+    }
+
     /// Apply a plan: record the move and start a pending attempt.
     ///
     /// Nothing is counted here. §13.5 makes the attempt pending until
@@ -372,6 +523,11 @@ impl ClusterHandle {
     /// the size estimate, and feeds the RTT percentile into the split
     /// timer. Missing RTT samples are excluded and never counted
     /// toward the sample minimum.
+    ///
+    /// The returned `split_due` and `pending_merge` are mirrors of the
+    /// state machine's own fields — the split timer's verdict and the
+    /// outstanding merge proposal — reported here so the node layer and
+    /// the FFI do not have to reach into the state.
     pub fn recompute(&self, dht: &DhtHandle, now: Timestamp) -> ClusterView {
         let records = dht.routing_eligible_records();
 
@@ -421,6 +577,7 @@ impl ClusterHandle {
             members,
             acceptable,
             split_due: state.should_split(now, &self.inner.config),
+            pending_merge: state.pending_merge.map(|p| (p.target, p.proposed_at)),
         }
     }
 }
@@ -810,6 +967,106 @@ mod split_tests {
 
     /// `split_if_due` is the whole operation, not just the plan: it
     /// moves the node and returns the id the heartbeat will announce.
+    /// Two clusters in one routing table: `nid(1..=25)` announce the local
+    /// cluster and are slow, `nid(26..=45)` announce the larger peer cluster
+    /// and are fast. §2a rule 2 needs 20 samples on *each* side, so a merge
+    /// fixture needs more peers than `wide_mesh`'s 25.
+    fn merge_mesh() -> (Mesh, [u8; 16]) {
+        let larger: [u8; 16] = [0x22; 16];
+        let local = nid(0);
+        let (dht, _rx) = DhtHandle::new(local);
+        let cluster = ClusterHandle::new(CID, ClusterLevel::Local, t(0));
+        let m = Mesh {
+            dht,
+            cluster,
+            local,
+        };
+        for i in 1..=25u8 {
+            m.dht.note_peer(nid(i), slot(i, 1), None, t(0));
+            m.dht
+                .update_lifecycle(&nid(i), &slot(i, 1), PeerLifecycle::NatDirect);
+            set_rtt(&m, &nid(i), 200); // ours: over the 30 ms threshold
+            announce(&m, nid(i), CID, 5);
+        }
+        for i in 26..=45u8 {
+            m.dht.note_peer(nid(i), slot(i, 1), None, t(0));
+            m.dht
+                .update_lifecycle(&nid(i), &slot(i, 1), PeerLifecycle::NatDirect);
+            set_rtt(&m, &nid(i), 10); // theirs: inside the threshold
+            announce(&m, nid(i), larger, 20);
+        }
+        (m, larger)
+    }
+
+    /// The milestone's purpose: two clusters, one smaller, one larger; the
+    /// smaller proposes a merge, the larger accepts, the smaller's members
+    /// migrate to the larger id, the pending slot clears, and the
+    /// split-attempt counter is untouched (a merge is not a failed split).
+    ///
+    /// In-process: the accept is applied through the same state calls the
+    /// peer task makes (`migrate`, then `note_merge_result`), not through a
+    /// second node's wire. The note's §4 records that limit.
+    #[test]
+    fn merge_produces_larger_cluster_id() {
+        let (m, larger) = merge_mesh();
+
+        // t(0) is a δ=0 interval; our size is 1 and theirs 20, so the ratio
+        // clears either δ.
+        let plan = m
+            .cluster
+            .merge_if_due(&m.dht, t(0))
+            .expect("a merge is due");
+        assert_eq!(plan.into_id, larger, "the larger id survives");
+        assert_eq!(plan.larger_size, 20, "the plan saw the larger size");
+        assert!(
+            plan.into_peer[0] >= 26,
+            "the accepter is one of the larger cluster's peers"
+        );
+
+        let view = m.cluster.recompute(&m.dht, t(0));
+        assert_eq!(
+            view.pending_merge,
+            Some((larger, t(0))),
+            "the proposal is mirrored in the view"
+        );
+
+        // The accept: what the peer task does after a verified
+        // `cluster_merge_accept`.
+        {
+            let mut st = m.cluster.state();
+            st.migrate(larger, t(1_000));
+            st.pending_split = None; // a merge is not a split episode
+            assert_eq!(st.note_merge_result(true, t(1_000)), Some(larger));
+        }
+
+        let view = m.cluster.recompute(&m.dht, t(2_000));
+        assert_eq!(view.id, larger, "the smaller cluster took the larger id");
+        assert!(view.pending_merge.is_none(), "the proposal is concluded");
+        assert_eq!(
+            m.cluster.split_attempts(),
+            0,
+            "a merge is not a failed split"
+        );
+        assert_eq!(view.members.len(), 20, "only the larger cluster remains");
+        assert!(
+            view.members.iter().all(|p| p[0] >= 26),
+            "the old cluster's peers are no longer members"
+        );
+
+        // §2c's Busy path — the reason the single-occupancy fix exists.
+        let mut st = m.cluster.state();
+        assert!(st.note_incoming_merge(nid(26), larger, t(3_000)));
+        assert!(
+            !st.note_incoming_merge(nid(27), larger, t(3_100)),
+            "the second proposal is refused while the slot is held"
+        );
+        assert_eq!(
+            st.incoming_merge.map(|p| p.proposer_id),
+            Some(nid(26)),
+            "the first proposal is not displaced"
+        );
+    }
+
     #[test]
     fn split_if_due_migrates_and_reports_the_new_id() {
         let m = mesh();

@@ -1198,7 +1198,7 @@ naming that the read-only report confirmed in the CDDL and the
 code (`prior_state_digest` as preimage key, `state_digest` as
 checkpoint field, `checkpoint_digest` as transfer field). The
 draft's §5.3.4 / §5.3.4.1 reconciliation is
-`<SHA>`: §5.3.4 gains the sentence that distinguishes the
+`dd98192`: §5.3.4 gains the sentence that distinguishes the
 `prior_state_digest` map key (`d_(n-1)`) from the
 `state_digest` the checkpoint carries (`d_n`) and
 the `checkpoint_digest` the transfer restates; §5.3.4.1's
@@ -1626,7 +1626,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    the byte check compares against it, so the row is `PASS`. The reviews
    of `c6a371a` confirmed that entry rather than discovering it.
    The note's revision (`a5c0dfb`) is the input to the code. The
-   draft's §5.3.4 / §5.3.4.1 reconciliation landed at `<SHA>`:
+   draft's §5.3.4 / §5.3.4.1 reconciliation landed at `dd98192`:
    §5.3.4 now distinguishes the `prior_state_digest` map
    key from the `state_digest` the checkpoint carries and
    the `checkpoint_digest` the transfer restates;

@@ -1,6 +1,6 @@
 # BFT item 1 — the execution contract
 
-**Status: design contract for BFT-A item 1, revised at `<SHA>` after the
+**Status: design contract for BFT-A item 1, revised at `a5c0dfb` after the
 AI1/AI2 review pair and the read-only field-name report.** The note was
 reviewed before the code landed; the pair's findings and the report's
 conclusions are folded into §4, §5, and "What it depends on", and are

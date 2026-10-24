@@ -1614,7 +1614,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    implementation has since gained the field, the responder fills it, and
    the byte check compares against it, so the row is `PASS`. The reviews
    of `c6a371a` confirmed that entry rather than discovering it.
-   The note's revision (`<SHA>`) is the input to the code. The
+   The note's revision (`a5c0dfb`) is the input to the code. The
    draft's §5.3.4 / §5.3.4.1 reconciliation follows as a separate
    `docs:` commit before the code, so the code instruction reads a
    draft whose two sections agree on which digest the checkpoint

@@ -452,6 +452,7 @@
           <tr><td>CLUSTER_ACCEPTANCE_PERCENTILE</td><td>90%</td><td><xref target="coral-acceptance"/></td></tr>
           <tr><td>MERGE_DELTA_INTERVAL</td><td>3600s (1h)</td><td><xref target="coral-merging"/></td></tr>
           <tr><td>MAX_SPLIT_ATTEMPTS</td><td>3</td><td><xref target="coral-splitting"/></td></tr>
+          <tr><td>MERGE_PROPOSAL_TIMEOUT</td><td>180s (3 × CLUSTER_HEARTBEAT)</td><td><xref target="coral-merging"/></td></tr>
           <tr><td>GATEWAY_ROUTER_COUNT</td><td>5</td><td><xref target="coral-discovery"/></td></tr>
           <tr><td>CHECKPOINT_INTERVAL</td><td>100</td><td><xref target="bft-checkpoint"/></td></tr>
           <tr><td>VIEW_CHANGE_QUORUM</td><td>5</td><td><xref target="bft"/></td></tr>
@@ -3605,6 +3606,7 @@ CANDIDATE_TTL = 30  ; seconds
           <tr><td>CLUSTER_ACCEPTANCE_PERCENTILE</td><td>90%</td><td>Latency percentile for cluster acceptance (see <xref target="coral-acceptance"/>)</td></tr>
           <tr><td>MERGE_DELTA_INTERVAL</td><td>3600s (1h)</td><td>δ preference function interval</td></tr>
           <tr><td>MAX_SPLIT_ATTEMPTS</td><td>3</td><td>Maximum split attempts before creating new cluster</td></tr>
+          <tr><td>MERGE_PROPOSAL_TIMEOUT</td><td>180s (3 × CLUSTER_HEARTBEAT)</td><td>Merge proposal timeout</td></tr>
           <tr><td>GATEWAY_ROUTER_COUNT</td><td>5</td><td>Number of gateway routers to use for discovery</td></tr>
           <tr><td>CANDIDATE_TTL</td><td>30s</td><td>Candidate announcement TTL</td></tr>
           <tr><td>SPILLOVER_CACHE_TTL</td><td>300s (5min)</td><td>Spillover response cache TTL</td></tr>
@@ -3692,7 +3694,7 @@ CANDIDATE_TTL = 30  ; seconds
       <section anchor="coral-merging" numbered="true">
         <name>Cluster Merging</name>
         
-        <t>When a node knows of two acceptable clusters at the same level, it will join the larger one. If a node switches clusters, it still remains in the routing tables of nodes in its old cluster. Old neighbors will still contact it; the node replies to level-<tt>i</tt> requests originating outside its current cluster with:</t>
+        <t>When a node knows of two acceptable clusters at the same level, it may join the larger one, subject to the coordination rules of this section. A cluster merge is decided by the two clusters' coordinators, not by a per-member vote: the smaller cluster's coordinator proposes, the larger cluster's coordinator accepts or rejects, and a member that disputes the coordinator's decision is handled by the cluster's existing dispute mechanisms, which are outside the scope of this section. If a node switches clusters, it still remains in the routing tables of nodes in its old cluster. Old neighbors will still contact it; the node replies to level-<tt>i</tt> requests originating outside its current cluster with:</t>
         
         <figure>
           <artwork type="text/plain"><![CDATA[
@@ -3732,6 +3734,116 @@ CANDIDATE_TTL = 30  ; seconds
         </ul>
 
         <t><strong>Stability Guarantee:</strong> This preference function ensures that clusters of disproportionate size merge immediately, while similarly sized clusters eventually converge to a stable state when <tt>δ = 2</tt> forces flow to the lower <tt>cluster_id</tt>.</t>
+
+        <t><strong>Merge coordination.</strong> The δ preference function of
+        this section defines when a node may join a larger cluster. The
+        following coordination rules define how the join is proposed,
+        accepted, and observed. All three are performed by the two clusters'
+        coordinators; a member does not vote on the merge, and a coordinator
+        decides on its cluster's behalf. The two coordinators are identified
+        by <tt>cluster_merge_propose</tt>, <tt>cluster_merge_accept</tt> and
+        <tt>cluster_merge_reject</tt> (§14.1).</t>
+
+        <t><strong>Eligibility.</strong> A cluster is eligible to merge into
+        another cluster only when all four of the following hold:</t>
+        <ol>
+          <li>The δ preference function returns <tt>Merge</tt> for the
+          peer's <tt>ClusterInfo</tt> at the current time and configuration.
+          The rule is the δ function itself: <tt>δ = 2</tt> requires a
+          strict 4× size ratio, and <tt>δ = 0</tt> allows any ratio to win
+          the lower-id tie-break, so clusters of disproportionate size
+          merge immediately and similarly sized clusters converge. The
+          draft's <tt>MUST join</tt> bullets are the join decision; this
+          condition is the size rule that decision depends on.</li>
+          <li>The local cluster's p90 RTT against its own members, over at
+          least 20 samples, is strictly greater than the local cluster's
+          p90 RTT against the peer cluster's members, also over at least
+          20 reachable samples. The peer cluster's members are learned from
+          the routing table and from the peers' own <tt>cluster_info</tt>
+          announcements. A peer cluster with fewer than 20 reachable
+          members is not eligible in either direction. The 20-sample floor
+          is the §13.2 procedure's, applied here to both sides.</li>
+          <li>The local cluster has no pending split attempt (§13.5). A
+          cluster in the middle of a split episode does not merge; the
+          split must conclude first.</li>
+          <li>Neither cluster is at a different <tt>ClusterLevel</tt>. This
+          condition is enforced transitively: two clusters at different
+          levels cannot accept each other under §13.2 because their
+          acceptance thresholds differ, and the smaller cluster's members
+          would fail the larger cluster's threshold. No direct level field
+          is carried on the wire.</li>
+        </ol>
+
+        <t><strong>Authority.</strong> The smaller cluster's coordinator
+        proposes the merge; the larger cluster's coordinator accepts or
+        rejects it. A proposal is carried by <tt>cluster_merge_propose</tt>,
+        signed by the proposing coordinator, and addressed to the larger
+        cluster's coordinator. The proposing coordinator
+        <bcp14>MUST NOT</bcp14> propose to a cluster it is not eligible to
+        merge into. The accepting coordinator <bcp14>MUST</bcp14> verify the
+        proposer's signature against the authenticated peer id and
+        <bcp14>MUST</bcp14> re-check the size condition against its own
+        <tt>size</tt> at the time of acceptance, not at the time of the
+        proposal. A coordinator that accepts
+        <bcp14>MUST</bcp14> broadcast <tt>cluster_merge_accept</tt> to its
+        own members and to the proposing coordinator; the larger cluster's
+        members do not change id (they are already in the surviving
+        cluster), and the proposing coordinator broadcasts the accept to its
+        own members, who update their cluster id to the
+        <strong>larger</strong> cluster's id and start announcing it through
+        <tt>cluster_info</tt>. A coordinator that rejects
+        <bcp14>MUST</bcp14> respond with <tt>cluster_merge_reject</tt>
+        carrying a reason code (§14.1). A proposal from a non-coordinator
+        <bcp14>MUST</bcp14> be rejected.</t>
+
+        <t><strong>Safety.</strong> The larger cluster's coordinator holds
+        at most one outstanding merge proposal at a time. A second proposal
+        arriving while a proposal is in flight is rejected with reason
+        <tt>busy</tt>; the first-arrived proposal is the one the coordinator
+        decides. The larger cluster's coordinator is the authoritative
+        acceptor; a proposal that was valid at proposal time but not at
+        acceptance time is rejected with the reason the failed condition
+        names. The surviving <tt>cluster_id</tt> is the larger cluster's,
+        not the smaller's.</t>
+
+        <t><strong>Completion.</strong> A merge is complete when a majority
+        of the smaller cluster's members reachable at the time of acceptance
+        have announced the larger cluster's id through
+        <tt>cluster_info</tt>. A member that was <tt>Closing</tt> or
+        <tt>Failed</tt> at acceptance is not counted, and does not block
+        completion; a member that returns later still announcing the
+        smaller id is excluded from the merged cluster's routing by the
+        id filter §13.5 implies. A merge that has not completed within
+        <tt>MERGE_PROPOSAL_TIMEOUT</tt> (three <tt>CLUSTER_HEARTBEAT</tt>
+        intervals) is abandoned: the smaller cluster keeps its current id
+        and continues as it was. A rejected or timed-out proposal
+        <bcp14>MUST NOT</bcp14> be retried within the same episode.</t>
+
+        <t><em>Rationale:</em> a per-member vote would be an N-way agreement
+        with no consensus round in the draft's §13.4, and the split path
+        (§13.5) is unilateral, so a merge must be its dual: coordinator-to-
+        coordinator, with a member that disputes the coordinator's decision
+        handled by the cluster's existing dispute mechanisms. The reachable-
+        at-acceptance majority is the completion rule because a member that
+        is <tt>Closing</tt> or <tt>Failed</tt> at acceptance cannot be
+        expected to migrate, and treating its absence as a blocker would
+        make completion depend on a member that may never return.</t>
+
+        <figure>
+          <artwork type="text/plain"><![CDATA[
+Smaller cluster A (5 members)         Larger cluster B (20 members)
+  |-- cluster_merge_propose ---------->|
+  |<-- cluster_merge_accept -----------|
+  |   (broadcast to A's members and    |
+  |    to A's coordinator)             |
+  A's members announce B's id          B's members do not change
+  via cluster_info                     id (already in B)
+  |<-- majority announces B's id ------|
+  B's coordinator observes;            A's coordinator observes
+  A's coordinator observes;            completion per §13.4
+  the smaller cluster's id is abandoned
+          ]]></artwork>
+        </figure>
       </section>
 
       <!-- ========================================================== -->
@@ -4106,7 +4218,8 @@ CTRLVerb = [
   "relay_discovery" / "relay_response" /
   "spillover" / "spillover_response" /
   "coral_lookup" / "coral_lookup_response" /
-  "cross_path_validation" / "cross_path_result",
+  "cross_path_validation" / "cross_path_result" /
+  "cluster_merge_propose" / "cluster_merge_accept" / "cluster_merge_reject",
   * any
 ]
 
@@ -4133,6 +4246,26 @@ spillover = [ "quip-v1", "spillover", SpilloverRequest ]
 spillover_response = [ "quip-v1", "spillover_response", SpilloverResponse ]
 cross_path_validation = [ "quip-v1", "cross_path_validation", CrossPathValidation ]
 cross_path_result = [ "quip-v1", "cross_path_result", CrossPathResult ]
+
+; ---- Cluster Merging Verbs (§13.4) ----
+cluster_merge_propose = [ "quip-v1", "cluster_merge_propose",
+  proposer_cluster_id: bytes .size 16,
+  proposer_size: uint,
+  proposed_at: uint,           ; Unix milliseconds
+  signature: bytes .size 64 ]
+
+cluster_merge_accept = [ "quip-v1", "cluster_merge_accept",
+  accept_cluster_id: bytes .size 16,   ; the surviving (larger) id
+  accept_size: uint,                   ; the larger cluster's size at acceptance
+  accepted_at: uint,
+  signature: bytes .size 64 ]
+
+cluster_merge_reject = [ "quip-v1", "cluster_merge_reject",
+  proposer_cluster_id: bytes .size 16, ; echoed for correlation
+  reason: uint,                        ; 0 = size, 1 = level,
+                                       ; 2 = busy, 3 = signature
+  rejected_at: uint,
+  signature: bytes .size 64 ]
 
 ; ---- Governance Primitives (OPTIONAL) ----
 register_tcid = [ "quip-v1", "register_tcid", TrustedCIDRegistration ]

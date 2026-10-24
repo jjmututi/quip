@@ -1174,6 +1174,13 @@ is carried on the wire. The class is the same one the bf520fe
 review caught for `ClusterInfo.rtt`: the note stated a rule the
 code could not enforce, and the code wins.
 
+The amendment records the δ rule by its own mechanics rather than
+by the note's earlier "1/4 floor" phrasing, because the draft's
+§13.4 does not carry a 1/4 floor — it carries the δ function and
+the two `MUST join` bullets. The phrasing was a note-side
+simplification of what the δ function does at `δ = 2`, and the
+amendment states the mechanics directly.
+
 **M9.6b merge — wire verbs and state-machine lifecycle.** The first
 half of the merge implementation lands: the three coordinator-level
 wire verbs (`cluster_merge_propose`, `cluster_merge_accept`,
@@ -1206,6 +1213,29 @@ is exercised by the integration test. Row 7 moves to PASS;
 specification status stays incomplete until the draft's §13.4
 amendment folds §2 into the draft, which is the next docs
 commit.
+
+The draft's §13.4 now records the coordination rules the note's
+§2a–§2d defined: the δ size rule stated by its own mechanics
+(`δ = 2` requires a strict 4× ratio, `δ = 0` allows
+any ratio to win the lower-id tie-break; no separate 1/4 floor is
+claimed), the two-p90 RTT comparison with the §13.2 20-sample floor
+on both sides, no pending split, and level enforced transitively
+through §13.2. Authority is coordinator-to-coordinator: the smaller
+cluster's coordinator proposes, the larger's decides, the larger id
+survives, and the proposing coordinator broadcasts the accept to
+its own members after the accepting coordinator broadcasts to its
+members. Safety is first-arrived-wins with a receiver-side
+single-occupancy slot and a `busy` reason; stale size is
+re-checked at acceptance. Completion is a reachable-at-acceptance
+majority; partial migration is completion, not failure; a merge
+not complete within `MERGE_PROPOSAL_TIMEOUT` (three
+`CLUSTER_HEARTBEAT`) is abandoned and not retried within
+the same episode. §14.1 gains the three coordinator verbs;
+§3's Protocol Constants Summary gains
+`MERGE_PROPOSAL_TIMEOUT`. §13.4 gains a non-normative worked
+example. The draft is what closes matrix row 7 to `clear`
+and `non-blocking`; the code was what made the row
+`PASS`.
 
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED
@@ -1503,8 +1533,6 @@ completion, validation, protocol design, or release discipline —
 rather than by milestone number. The status table above names the
 same items under their phase labels (BFT-A, BFT-V, N-Hard, Spec,
 M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
-
-M9.6b merge — draft §13.4 amendment.
 
 ### BFT correctness (BFT-A)
 

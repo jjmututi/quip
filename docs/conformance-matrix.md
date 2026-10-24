@@ -22,7 +22,7 @@ code or the text.
 
 ## Method
 
-Each row has eight fields:
+Each row has nine fields:
 
 | Field | Meaning |
 |---|---|
@@ -34,11 +34,13 @@ Each row has eight fields:
 | Specification status | `clear` / `incomplete` / `ambiguous` / `silent` |
 | Submission impact | `blocking` / `review required` / `non-blocking` |
 | Depends on | The rows whose `Source` must exist for this row's `Source` to work; empty for a leaf |
+| History | The row's verdict over time, one entry per commit that moved it; absent when the row has never moved |
 
 The first four are evidence: they are what makes the judgements
 checkable. The next three are judgements: does the code enforce the
 sentence, is the sentence sufficient, and does the sentence stop the
-draft being submitted. The last is structure: what this row stands on.
+draft being submitted. The last two are structure and record: what this
+row stands on, and how it got here.
 
 Verdict vocabulary:
 
@@ -301,11 +303,8 @@ enough and the edit has not landed."
   `should_merge`'s production caller, evaluates the four §2a rules
   per the note's §3, and the integration test
   `merge_produces_larger_cluster_id` proves the completion and the
-  `Busy` path. The four existing decision tests remain; the three
-  unit tests from the wire commit remain. The row's specification
-  status stays `incomplete` until the draft's §13.4 amendment folds
-  §2 into the draft; the amendment is the next docs commit and will
-  move the row to `PASS` / `clear` / `non-blocking`.
+  `Busy` path. The draft's §13.4 now records the coordination rules
+  (§2a–§2d) in `<SHA>`; the row is PASS / clear / non-blocking.
 - **History.** bf520fe: design note landed, FAIL / incomplete /
   review required. `3fbee08`: note revised to resolve the bf520fe review
   pair's findings (direction of id adoption, size re-check timing,
@@ -321,14 +320,24 @@ enough and the edit has not landed."
   `classify_inbound` / `apply_inbound` merge arms, `ClusterView::
   pending_merge` and `merge_produces_larger_cluster_id` land; row
   moves FAIL → PASS, specification status stays `incomplete` until the
-  §13.4 amendment.
-- **Specification status.** **incomplete** — "join" is not defined: the
-  draft does not say whether the joining node adopts the target's
-  `cluster_id`, what happens to its own id, its coordinator, or the
-  tuple it announces afterwards.
-- **Submission impact.** `review required` — merge is how clusters
-  converge to a stable size; leaving it unexecuted and undefined is
-  either acceptable at this revision or not, and that is a decision.
+  §13.4 amendment. `<SHA>`: draft §13.4 amended with the coordination
+  rules, §14.1 gains the three coordinator verbs, §3 gains
+  `MERGE_PROPOSAL_TIMEOUT`; row moves FAIL / incomplete /
+  review required → PASS / clear / non-blocking. Decisive query now
+  returns zero rows.
+- **Specification status.** clear — §13.4 now defines what a merge does
+  to the cluster id (the larger survives), the member set (the
+  smaller's members migrate to the larger id and are excluded by the id
+  filter if they do not), the coordinator (the smaller's coordinator
+  steps down on the next `elect_coordinator` interval; the larger's
+  coordinator remains), and the tuple announced afterwards (the
+  smaller's members announce the larger id).
+- **Submission impact.** `non-blocking` — the draft defines "join", the
+  amendment is landed, and an independent implementer can now read
+  §13.4 and reach the same behaviour the reference implementation
+  does. The remaining code-side gap is the hostile-coordinator case
+  (the note's §4 and §5 record it as unproven); it is a code gap, not
+  a draft gap.
 - **Depends on.** row 13 (§13.6 — the size estimate merge compares; the
   size the δ rule compares is the estimate §13.6 defines) and row 12
   (§13.2 — the p90 the RTT rule compares is the acceptance test's p90,
@@ -745,14 +754,17 @@ makes a correct implementation produce a state the same definition calls
 wrong. When the code agrees with the draft and the result is a latch, the
 draft's definition is the defect, not the code.
 
-**The decisive query returns one row, `review required`, none
+**The decisive query returns zero rows: none `review required`, none
 `blocking`.** Rows 3, 5 and 6 left it in this revision, each by a
 different route: §13.5's attempt episode and §5.3.3's expiry filter were
 resolved by a draft decision plus a test, and §5.3.4's quorum by stating
-`n - f` as the rule the code already implements. What remains is §13.4's
-merge, which needs a design note before any code — the draft does not
-define what "join" does to the cluster id, the member set or the
-coordinator.
+`n - f` as the rule the code already implements. Row 7 (§13.4 merge) was
+the last, and it left by the longest route: a design note (`bf520fe`),
+two note revisions (`3fbee08`, `df3a48e`), the code (`028c102`,
+`98f7db2`, `2bfe99d`), and finally the draft amendment that folded the
+note's §2a–§2d into §13.4. For the first time in this matrix every row
+whose submission impact a draft edit could settle is settled by the
+draft.
 
 Rows 8 and 18 are `FAIL` on `clear` clauses — the `apply()` contract and
 the degraded-mode gate. Row 14 was the third, the transfer's missing

@@ -1,9 +1,18 @@
 # Conformance matrix
 
-**Status: fourth delivery.** The eight-field schema, its vocabulary, and
-eighteen rows. The full pass is in progress: "What follows" inventories
-the sections still to convert, with their statement counts, so the
-remaining work is a list rather than an estimate.
+**Status: fifth delivery.** The nine-field schema, its vocabulary, and
+eighteen rows. The rows cover the decision points where the code and
+the draft have a comparison to make. They do not cover the draft's
+mechanical conformance (canonical CBOR, wire framing, ALPN, the
+`quip-v1` prefix), which every wire test asserts and no row would add
+to; they do not cover sections the code has not implemented (governance,
+quarantine, Trusted CID registration), which are recorded in
+`CHANGELOG.md`'s status table, not here; and they do not speak for the
+draft's size or its division into one or several documents. "What
+follows" names both the sections with a comparison yet to make and the
+sections the code has not landed. **The decisive query returns zero
+rows over the eighteen rows that exist; it does not speak for the
+draft's unrowed statements.**
 
 ## What this is
 
@@ -665,7 +674,9 @@ Rows by section:
 | §13.6 Cluster size estimation | 13 |
 | §5.3.4.1 BFT checkpointing (byte digest) | 14 |
 
-Not yet covered, in the order the next passes should take them:
+**Sections with a comparison yet to make.** The code is landed and
+the row is worth writing; some are mechanical, some are design-heavy.
+In the order the next passes should take them:
 
 1. **§4's remaining `MUST`s** — version negotiation, ALPN, the
    capability-bit registry, extension handling. Mechanical (`clear`)
@@ -686,17 +697,36 @@ Not yet covered, in the order the next passes should take them:
    they need a decision about whether they belong in a conformance
    matrix at all.
 
-The estimate is **two passes, not one.** Where the draft is `clear`, the
-pass is mechanical: the comparison is a check, a row takes minutes, and
-the work parallelises without coordination. Where it is not, the pass is
-**design-time**: the judgement is whether an independent implementer
-would reach the same behaviour from the text, which is a question the
-code can inform and the draft's editor has to answer. Four of the
-thirteen rows are design-time (`ambiguous` or `incomplete`) — rows 3, 5,
-6 and 7; the two `incomplete` ones, §13.5's attempt episode and §13.4's
-merge, decide the submission schedule. Row 8 is `clear` and `FAIL`: its
-draft problem is closed, its implementation problem is not. The
-mechanical rows decide only how long the matrix takes to finish.
+§5.3.4's remaining `MUST`s and §7's governance `MUST`s are the two
+design-heavy groups; the rest are mechanical. None of these rows
+would be a draft ambiguity finding of the kind the eighteen-row
+pass was for; they would be code-vs-draft comparisons on sections
+the code has already implemented or will implement in the next
+milestones.
+
+**Sections the code does not implement.** These are recorded in
+`CHANGELOG.md`'s status table as unlanded, not in the matrix as
+rows, because a row whose `Source` is `none` and whose `Verdict`
+is `FAIL` duplicates the status table's information without adding
+a comparison. They become rows when the code lands:
+
+- §7 governance (`register_tcid`, `quarantine`, `unquarantine`,
+  `derivative_link`, `delegation`) — the storage plane exists;
+  the wire dispatch and the authorization model do not. M11's
+  content layer will land them.
+- §14.2 `query_quarantined` and the governance-shaped SYNC verbs —
+  same reason, same milestone.
+- §13's `ClusterMerge*` verbs — already covered by row 7; the
+  verbs are the code path row 7 names, not a separate row.
+
+The estimate is **one pass, after the next two milestones.** Where the
+draft is `clear`, the pass is mechanical: the comparison is a check, a
+row takes minutes, and the work parallelises without coordination.
+Where it is not, the row is design-time; the judgement is whether an
+independent implementer would reach the same behaviour from the text,
+which the code can inform and the draft's editor has to answer.
+Doing the pass before BFT-A item 1 and M9.6c would row their sections
+twice: once now, once after the code lands.
 
 Two conventions the full pass will keep:
 
@@ -710,9 +740,12 @@ A third convention, and it is normative: **name the caller.** Every row
 whose `Source` is a function MUST name the code that calls it, or state
 that nothing does. A unit-tested function with no caller is a code path
 that exists and does nothing — invisible to a test count and to a review
-that reads the function instead of its call sites. Two instances so far:
-`Capabilities::new_checked` (row 4) and `ClusterState::should_merge`
-(row 7), both with passing unit tests and no production caller. Row 3 is
+that reads the function instead of its call sites. Three instances so
+far: `Capabilities::new_checked` (row 4); `ClusterState::should_merge`
+(row 7), closed at `2bfe99d` when `ClusterHandle::merge_if_due` became
+its caller; and `BftStateTransfer::verify` / `signing_payload`, which
+have no caller at all — neither in production nor in a test — and are
+recorded in row 9's `Source` rather than fixed. Row 3 is
 the sequencing variant of the same failure: `record_split_attempt` is
 called, and the limit it guards cannot be reached.
 
@@ -755,7 +788,9 @@ wrong. When the code agrees with the draft and the result is a latch, the
 draft's definition is the defect, not the code.
 
 **The decisive query returns zero rows: none `review required`, none
-`blocking`.** Rows 3, 5 and 6 left it in this revision, each by a
+`blocking` — over the eighteen rows that exist.** It does not speak
+for the draft's unrowed statements (see the status header and the
+Method section's note). Rows 3, 5 and 6 left it in this revision, each by a
 different route: §13.5's attempt episode and §5.3.3's expiry filter were
 resolved by a draft decision plus a test, and §5.3.4's quorum by stating
 `n - f` as the rule the code already implements. Row 7 (§13.4 merge) was
@@ -765,6 +800,15 @@ two note revisions (`3fbee08`, `df3a48e`), the code (`028c102`,
 note's §2a–§2d into §13.4. For the first time in this matrix every row
 whose submission impact a draft edit could settle is settled by the
 draft.
+
+The query speaks for the rows that exist. It does not speak for
+the draft's statements that have no row: a normative statement the
+code has not implemented is recorded in `CHANGELOG.md`'s status
+table as unlanded, and a normative statement that every wire
+message mechanically satisfies is not rowed at all. The query
+returns zero rows over the eighteen rows that exist; that is a
+statement about their specification status, not a statement about
+the draft.
 
 Rows 8 and 18 are `FAIL` on `clear` clauses — the `apply()` contract and
 the degraded-mode gate. Row 14 was the third, the transfer's missing

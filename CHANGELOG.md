@@ -162,7 +162,7 @@ doc-tests       4 passed (one per crate)
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: eight-field schema, eighteen rows, and a coverage table for the remaining `MUST`/`SHOULD` statements by section. The §5.3.4/§5.3.4.1 pass added rows 14–18: the transfer's two digests (row 14, `PASS` once the code gained `state_hash`), preprepare digest, new-view quorum, ring-signature validation (`PASS`), and degraded-mode admission (row 18, `FAIL` — no gate) | in progress |
+| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: nine-field schema (History added at `ece3e58`), eighteen rows, and a scope statement naming what the matrix covers and what it does not. The decisive query returns zero rows over the eighteen rows that exist; the draft's unrowed statements are inventoried in the matrix's "What follows" section, not judged. The §5.3.4/§5.3.4.1 pass added rows 14–18: the transfer's two digests (row 14, `PASS` once the code gained `state_hash`), preprepare digest, new-view quorum, ring-signature validation (`PASS`), and degraded-mode admission (row 18, `FAIL` — no gate) | in progress |
 
 ---
 
@@ -1692,6 +1692,22 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     the draft. Especially: how does a changing DHT become a stable
     BFT membership, given that an attacker can influence the DHT?
 
+12a. **Is the draft one document or several?** The draft's sections
+    fall into three groups whose dependency on each other is weaker
+    than the sections within each group: the federation protocol
+    (§4 handshake, §5.1-§5.2 identity and DVV, §12 NAT, §14 verbs,
+    §11 tiers, §16 establishment), the trust layer (§5.3 witness trust,
+    §5.3.4 BFT, §6 revocation, §18 security model), and the content
+    layer (§7 governance, §8 CIDs and merkle range, §9 threshold
+    signatures, §13 Coral). Whether this is one Internet-Draft or
+    several is a decision the draft must make before submission, and
+    it is not one the conformance matrix can answer — the matrix rows
+    the code-vs-draft comparison section by section, which is a
+    statement about the code, not about the draft's packaging. The
+    three groups' boundaries are the sections cited here; the
+    decision affects how the draft is submitted and in what order, not
+    what the code does.
+
 13. **Pin authorization model.** §14's intent for `pin` / `unpin`
     is not specified: does any connected peer have the authority to
     make a resource persistent on my store, or is persistence an
@@ -2049,7 +2065,7 @@ Milestone citations in the source. Update both when a tag moves.
 | `quip-node/src/lib.rs` (`handle_discovery_event`) | M9.5a | Coral verb routing |
 | `quip-node/src/lib.rs` (`NodeConfig::signer`) | M9.5a | shared Ed25519 signer |
 | `docs/M9.5b-design.md:1` | M9.5b-a | frozen contracts for NAT and cluster integration |
-| `docs/conformance-matrix.md:1` | M9.6b | clause → source → test matrix; eight-field schema, thirteen rows, dependency edges, coverage inventory |
+| `docs/conformance-matrix.md:1` | M9.6b | clause → source → test matrix; nine-field schema, eighteen rows, dependency edges, coverage inventory |
 | `docs/apply-contract.md:1` | BFT-A 1 | the three execution contracts, compared, with a recommendation |
 | `docs/bft-item-1-design.md:1` | BFT-A 1 | execution contract: outcome type, validate hook, chain digest, two-digest conflict |
 | `quip-node/src/peer.rs:1` | M9.5b-b, M9.5b-c | peer slot and lifecycle vocabulary |

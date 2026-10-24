@@ -61,7 +61,20 @@
 //! [`quip_core::messages::Verifier`] because the four-phase protocol
 //! and every state-transfer verification path would be meaningless
 //! without verifying peers' signatures. Both are value types.
-
+//!
+//! # The chain digest (BFT-A item 1)
+//!
+//! The driver maintains a chain digest d_n over the committed operation
+//! sequence, computed as SHA-256(QUIP-CBOR(map{outcome, operation,
+//! prior_state_digest})). It is a quantity of its own: the handler's
+//! state_digest() reports the byte digest used by the transfer path, and
+//! the two are separate — made to agree by the handler's serialization
+//! when the handler takes §5.3.4.1's state-format SHOULD (see
+//! docs/bft-item-1-design.md's Finding B paragraph). The checkpoint does
+//! not yet carry d_n: that is §5's relation, which lands with the
+//! fixtures that make the two agree. Until then the checkpoint carries
+//! the handler's state_digest(), and the transfer path's chain check
+//! compares against that.
 use crate::bft::{
     BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPrepare, BftPreprepare,
     BftStateTransfer, BftViewChange, Digest, Operation, RingId,
@@ -71,11 +84,11 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use quip_core::cbor::encode;
+use quip_core::cbor::{encode, CborValue};
 use quip_core::constants::{CHECKPOINT_INTERVAL, MIN_WITNESSES};
 use quip_core::dvv::NodeId;
 use quip_core::messages::{
-    IndividualRingSig, RingSignature, Signer, Verifier,
+    IndividualRingSig, OperationOutcome, RingSignature, Signer, Verifier,
 };
 
 // -------------------------------------------------------------------------
@@ -147,29 +160,69 @@ impl RingMembership {
 // BftHandler
 // -------------------------------------------------------------------------
 
+/// The deterministic context §5.3.4 gives the validate and apply hooks.
+///
+/// The four fields are the inputs the draft's "deterministic context"
+/// paragraph names. Neither hook may consult anything else: no wall
+/// clock, no random source, no ambient state that the inputs do not
+/// carry. Every replica computes the same values for the same
+/// sequence, which is what makes [`BftHandler::apply`]'s outcome and
+/// the driver's chain digest deterministic.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OperationContext {
+    /// The operation's index in the committed sequence (equal to the
+    /// driver's sequence at the moment of commitment).
+    pub operation_index: u64,
+    /// The current view.
+    pub view: u64,
+    /// The committed sequence number.
+    pub committed_sequence: u64,
+    /// The previous chain digest d_(n-1).
+    pub prior_state_digest: Digest,
+}
+
 /// The application-side handler for ordered operations.
 ///
 /// Called exactly once per sequence, after a commit quorum has been
 /// reached. The handler applies the operation to whatever state it
-/// owns (a DVV, a resource table, ...). An error is surfaced as
-/// [`BftEvent::ApplyFailed`] and does not halt the driver — the
-/// sequence has already committed; the caller decides whether to
-/// abort, retry, or ignore.
+/// owns (a DVV, a resource table, ...). An application-level failure is
+/// the declared outcome — [`OperationOutcome::ApplicationFailure`] —
+/// not an `Err`, and does not halt the driver: the sequence has already
+/// committed, so the failure is a state transition like any other. A
+/// panic inside [`BftHandler::apply`] is a programming error.
 ///
 /// The state-related methods are used by checkpointing and state
 /// transfer (M4b.3). Their defaults are conservative: a handler that
 /// does not implement state serialization still compiles and its
-/// driver still operates, but its checkpoints carry an all-zeros
-/// digest and its state transfers are empty. Implementations that
-/// want real checkpointing override all three.
+/// driver still operates, but its state transfers are empty.
+/// Implementations that want real checkpointing override all three.
 pub trait BftHandler {
-    /// Apply `operation` at `sequence` in `ring_id`.
+    /// Validate `operation` before it enters consensus (§5.3.4).
+    ///
+    /// Called by the primary before proposing and by a backup before
+    /// voting on a preprepare. `context` carries the deterministic
+    /// inputs §5.3.4 names: the operation index, the view, the
+    /// committed sequence, and the previous state digest d_(n-1). A
+    /// false return drops the preprepare and the sequence does not
+    /// advance; no default, because an application that cannot say
+    /// whether an operation is valid cannot participate.
+    fn validate(&self, ring_id: &RingId, context: &OperationContext, operation: &Operation)
+        -> bool;
+
+    /// Apply `operation` at `context.committed_sequence` in `ring_id`.
+    ///
+    /// Infallible by signature: whether the operation took effect is
+    /// the returned [`OperationOutcome`], which the driver folds into
+    /// the chain digest. An application that wants to report a refusal
+    /// returns [`OperationOutcome::ApplicationFailure`]; there is no
+    /// `Err` channel, because a failure is still a committed state
+    /// transition.
     fn apply(
         &mut self,
         ring_id: &RingId,
-        sequence: u64,
+        context: &OperationContext,
         operation: &Operation,
-    ) -> Result<()>;
+    ) -> OperationOutcome;
 
     /// SHA-256 digest of the current application state.
     ///
@@ -415,6 +468,9 @@ where
     stable_checkpoint: Option<CheckpointRound>,
     /// In-flight checkpoint round, if any.
     pending_checkpoint: Option<CheckpointRound>,
+    /// The chain digest over the committed operation sequence (§5.3.4).
+    /// d_(-1) = [0u8; 32], per the draft's §5.3.4 genesis.
+    chain_digest: Digest,
     /// View-change state.
     view_change: ViewChangeState,
 }
@@ -458,6 +514,7 @@ where
             checkpoint_sequence: 0,
             stable_checkpoint: None,
             pending_checkpoint: None,
+            chain_digest: [0u8; 32],
             view_change: ViewChangeState::default(),
         })
     }
@@ -537,6 +594,18 @@ where
         &self.handler
     }
 
+    /// The chain digest over the committed operation sequence.
+    ///
+    /// `d_n` after `n` committed operations, `[0u8; 32]` before the
+    /// first. It is a quantity of its own: the handler's
+    /// [`BftHandler::state_digest`] is the byte digest the state-transfer
+    /// path checks, and the two agree only for a handler that takes
+    /// §5.3.4.1's state-format SHOULD. The checkpoint carries this value
+    /// once BFT-A item 1's second half lands.
+    pub fn chain_digest(&self) -> &Digest {
+        &self.chain_digest
+    }
+
     /// Mutable access to the handler.
     pub fn handler_mut(&mut self) -> &mut H {
         &mut self.handler
@@ -571,6 +640,12 @@ where
     }
 
     fn propose(&mut self, operation: Operation) -> Result<()> {
+        let context = self.operation_context();
+        if !self.handler.validate(&self.ring_id, &context, &operation) {
+            // The operation never enters consensus: no round state, no
+            // sequence advance, no preprepare on the wire.
+            return Err(Error::Bft("operation rejected by validate"));
+        }
         let digest = compute_digest_parts(
             &self.ring_id,
             self.view,
@@ -633,6 +708,15 @@ where
             return Ok(());
         }
         msg.verify_full(primary, &self.verifier)?;
+
+        // A backup validates before voting (§5.3.4). A rejected
+        // operation is dropped, not an error: this driver keeps its
+        // round state untouched and its sequence where it is, and the
+        // primary's proposal dies on the quorum that fails to form.
+        let context = self.operation_context();
+        if !self.handler.validate(&self.ring_id, &context, &msg.operation) {
+            return Ok(());
+        }
 
         self.current = Some(InFlight {
             operation: msg.operation.clone(),
@@ -834,25 +918,26 @@ where
             Some(c) => c,
             None => return Ok(()),
         };
-        let result = self.handler.apply(
-            &self.ring_id,
-            self.sequence,
-            &current.operation,
-        );
-        match result {
-            Ok(()) => {
-                self.events.push_back(BftEvent::Applied {
-                    sequence: self.sequence,
-                    digest: current.digest,
-                });
-            }
-            Err(e) => {
-                self.events.push_back(BftEvent::ApplyFailed {
-                    sequence: self.sequence,
-                    text: format!("{e:?}"),
-                });
-            }
+        let context = self.operation_context();
+        let outcome = self
+            .handler
+            .apply(&self.ring_id, &context, &current.operation);
+        if matches!(outcome, OperationOutcome::ApplicationFailure(_)) {
+            // The failure is a committed state transition (§5.3.4): the
+            // sequence advances and the digest covers the outcome. The
+            // event is still `ApplyFailed` in this revision; the event
+            // shape changes with BFT-A item 1's second half.
+            self.events.push_back(BftEvent::ApplyFailed {
+                sequence: self.sequence,
+                text: format!("{outcome:?}"),
+            });
+        } else {
+            self.events.push_back(BftEvent::Applied {
+                sequence: self.sequence,
+                digest: current.digest,
+            });
         }
+        self.advance_chain_digest(&context, &current.operation, &outcome)?;
         self.state = RoundState::Idle;
         self.sequence = self.sequence.saturating_add(1);
 
@@ -863,6 +948,53 @@ where
         if self.sequence > 0 && self.sequence % CHECKPOINT_INTERVAL == 0 {
             self.start_checkpoint()?;
         }
+        Ok(())
+    }
+
+    /// The deterministic context for the operation at the current
+    /// sequence (§5.3.4).
+    ///
+    /// Built from the driver's own state, so the primary's `validate`
+    /// call sees the same inputs a backup's does, and `apply` sees the
+    /// same inputs on every replica.
+    fn operation_context(&self) -> OperationContext {
+        OperationContext {
+            operation_index: self.sequence,
+            view: self.view,
+            committed_sequence: self.sequence,
+            prior_state_digest: self.chain_digest,
+        }
+    }
+
+    /// Fold one committed operation into the chain digest (§5.3.4).
+    ///
+    /// `d_n = SHA-256(QUIP-CBOR(map{outcome, operation,
+    /// prior_state_digest}))`, with the keys in the encoder's canonical
+    /// order. The map literal's order is irrelevant — quip-core's
+    /// encoder sorts the text keys, and the sorted order is the one
+    /// §5.3.4's "Digest construction" names.
+    fn advance_chain_digest(
+        &mut self,
+        context: &OperationContext,
+        operation: &Operation,
+        outcome: &OperationOutcome,
+    ) -> Result<()> {
+        let map = CborValue::Map(alloc::vec![
+            (
+                CborValue::String(String::from("outcome")),
+                outcome.to_cbor(),
+            ),
+            (
+                CborValue::String(String::from("operation")),
+                operation.to_cbor(),
+            ),
+            (
+                CborValue::String(String::from("prior_state_digest")),
+                CborValue::Bytes(context.prior_state_digest.to_vec()),
+            ),
+        ]);
+        let encoded = encode(&map)?;
+        self.chain_digest = sha256(&encoded);
         Ok(())
     }
 
@@ -1102,6 +1234,12 @@ where
                 return Ok(());
             }
         }
+        // §4 lands the driver's d_n; §5 — the checkpoint carrying it —
+        // is commit 2, together with the fixture rewrite that makes a
+        // handler's `state_digest()` agree with d_n. Until then the
+        // checkpoint keeps the handler's digest, so the transfer path's
+        // chain check and the S8 tests keep the relation they were
+        // written against.
         let digest = self.handler.state_digest();
 
         let mut msg = BftCheckpoint {
@@ -1568,15 +1706,20 @@ mod tests {
     }
 
     impl BftHandler for CountingHandler {
+        fn validate(&self, _: &RingId, _: &OperationContext, _: &Operation) -> bool {
+            true
+        }
+
         fn apply(
             &mut self,
             ring_id: &RingId,
-            sequence: u64,
+            context: &OperationContext,
             operation: &Operation,
-        ) -> Result<()> {
+        ) -> OperationOutcome {
             self.counter = self.counter.saturating_add(1);
-            self.applied.push((*ring_id, sequence, operation.clone()));
-            Ok(())
+            self.applied
+                .push((*ring_id, context.committed_sequence, operation.clone()));
+            OperationOutcome::Success
         }
 
         fn state_digest(&self) -> Digest {
@@ -1623,15 +1766,29 @@ mod tests {
     }
 
     impl BftHandler for ChainDigestHandler {
-        fn apply(&mut self, ring_id: &RingId, sequence: u64, operation: &Operation) -> Result<()> {
+        fn validate(&self, _: &RingId, _: &OperationContext, _: &Operation) -> bool {
+            true
+        }
+
+        fn apply(
+            &mut self,
+            ring_id: &RingId,
+            context: &OperationContext,
+            operation: &Operation,
+        ) -> OperationOutcome {
+            // The fixture's rolling chain digest is its own: it is not
+            // the driver's `chain_digest`, and the two are expected to
+            // differ. A handler only makes them agree by taking
+            // §5.3.4.1's state-format SHOULD (the note's Finding B).
             self.counter = self.counter.saturating_add(1);
             let mut preimage = self.chain.to_vec();
-            preimage.extend_from_slice(&sequence.to_be_bytes());
+            preimage.extend_from_slice(&context.committed_sequence.to_be_bytes());
             preimage.extend_from_slice(operation.kind.as_bytes());
             preimage.extend_from_slice(&operation.subject);
             self.chain = sha256(&preimage);
-            self.applied.push((*ring_id, sequence, operation.clone()));
-            Ok(())
+            self.applied
+                .push((*ring_id, context.committed_sequence, operation.clone()));
+            OperationOutcome::Success
         }
 
         fn state_digest(&self) -> Digest {
@@ -1716,14 +1873,19 @@ mod tests {
     }
 
     impl BftHandler for RecordingHandler {
+        fn validate(&self, _: &RingId, _: &OperationContext, _: &Operation) -> bool {
+            true
+        }
+
         fn apply(
             &mut self,
             ring_id: &RingId,
-            sequence: u64,
+            context: &OperationContext,
             operation: &Operation,
-        ) -> Result<()> {
-            self.applied.push((*ring_id, sequence, operation.clone()));
-            Ok(())
+        ) -> OperationOutcome {
+            self.applied
+                .push((*ring_id, context.committed_sequence, operation.clone()));
+            OperationOutcome::Success
         }
 
         fn state_digest_of(&self, _state: &[u8]) -> Digest {
@@ -1737,8 +1899,14 @@ mod tests {
 
     struct FailingHandler;
     impl BftHandler for FailingHandler {
-        fn apply(&mut self, _: &RingId, _: u64, _: &Operation) -> Result<()> {
-            Err(Error::Bft("handler refused"))
+        fn validate(&self, _: &RingId, _: &OperationContext, _: &Operation) -> bool {
+            true
+        }
+
+        fn apply(&mut self, _: &RingId, _: &OperationContext, _: &Operation) -> OperationOutcome {
+            // A refusal is the declared outcome, not an `Err`: the
+            // sequence still commits, and the outcome is in the digest.
+            OperationOutcome::ApplicationFailure(None)
         }
 
         fn state_digest_of(&self, _state: &[u8]) -> Digest {
@@ -2128,6 +2296,60 @@ mod tests {
         assert!(any_failed);
         for d in &drivers {
             assert_eq!(d.sequence(), 1);
+        }
+    }
+
+    /// §5.3.4's digest construction: d_n is the protocol hash over the
+    /// committed operation, its outcome, and d_(n-1). The expected
+    /// value is recomputed here from the draft's three keys with the
+    /// encoder's canonical order, so the test pins the construction
+    /// rather than whatever the driver's own helper happens to do.
+    #[test]
+    fn chain_digest_advances_over_the_committed_sequence() {
+        let (m, mut drivers) = build_counting_ring();
+        let genesis: Digest = [0u8; 32];
+        for d in &drivers {
+            assert_eq!(*d.chain_digest(), genesis, "d_(-1) is the all-zero genesis");
+        }
+
+        let first = operation("revocation");
+        drivers[0].start(first.clone()).unwrap();
+        let _ = pump_counting(&mut drivers, &m);
+
+        let outcome = OperationOutcome::Success.to_cbor();
+        let prior = CborValue::Bytes(genesis.to_vec());
+        let map = CborValue::Map(vec![
+            (CborValue::String(String::from("outcome")), outcome.clone()),
+            (
+                CborValue::String(String::from("operation")),
+                first.to_cbor(),
+            ),
+            (
+                CborValue::String(String::from("prior_state_digest")),
+                prior.clone(),
+            ),
+        ]);
+        // §4's ordering claim: the literal order is irrelevant because
+        // the encoder sorts the text keys, and the sorted order is
+        // outcome, operation, prior_state_digest.
+        let reordered = CborValue::Map(vec![
+            (CborValue::String(String::from("prior_state_digest")), prior),
+            (
+                CborValue::String(String::from("operation")),
+                first.to_cbor(),
+            ),
+            (CborValue::String(String::from("outcome")), outcome),
+        ]);
+        assert_eq!(
+            encode(&map).unwrap(),
+            encode(&reordered).unwrap(),
+            "the encoder's canonical sort makes the literal order irrelevant"
+        );
+
+        let expected = sha256(&encode(&map).unwrap());
+        for d in &drivers {
+            assert_eq!(*d.chain_digest(), expected, "every replica computes d_0");
+            assert_ne!(*d.chain_digest(), genesis, "d_0 is not the genesis value");
         }
     }
 

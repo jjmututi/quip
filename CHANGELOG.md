@@ -1273,6 +1273,60 @@ the same episode. §14.1 gains the three coordinator verbs;
 example. The draft is what closes matrix row 7 to `clear`
 and `non-blocking`; the code was what made the row
 `PASS`.
+**BFT-A item 1 — `OperationOutcome`, the two hooks, and the driver's
+chain digest.** The first half of the execution contract lands,
+implementing the note at `a5c0dfb` and the draft amendment at
+`dd98192`: §1's outcome type, §2's `validate` hook and its two call
+sites, §3's infallible `apply`, and §4's `d_n` construction.
+`OperationOutcome` is a protocol type in
+`quip-core/src/messages/operation_outcome.rs` — a text discriminant
+(`success` or `application-failure`), an optional payload bounded at
+256 bytes, and a closed, text-keyed CBOR map whose decode rejects an
+unknown key, an unknown discriminant, a missing discriminant, a
+non-byte payload and an oversize payload with `Error::BadEncoding`.
+The two success shapes stay distinguishable on the wire because the
+`payload` key is absent rather than empty, which is what §5.3.4's
+outcome paragraph requires. `BftHandler` gains `validate`, with no
+default — an application that cannot say whether an operation is
+valid cannot participate — and both hooks take the deterministic
+`OperationContext` carrying the operation index, the view, the
+committed sequence and the prior state digest `d_(n-1)`; `apply`
+takes the same context and returns an `OperationOutcome` instead of
+a `Result`, so an application-level failure is the discriminant and
+a panic is the application's bug. The primary validates before
+proposing (a rejected operation returns `Error::Bft` and never
+builds a round), and a backup validates after verifying the
+preprepare and drops it on failure without setting round state,
+setting `current`, or advancing the sequence. `BftDriver` maintains
+`d_n = SHA-256(QUIP-CBOR(map{outcome, operation,
+prior_state_digest}))` from the all-zero genesis, folds it at each
+commit in `advance_chain_digest`, and exposes it through
+`chain_digest()`; the encoder's canonical sort is what orders the
+three keys, and the new
+`chain_digest_advances_over_the_committed_sequence` test pins that
+by encoding the same map in two different literal orders and
+expecting identical bytes, then checking every replica's `d_0`
+against a value recomputed outside the driver.
+
+The event shape is unchanged in this commit: `apply_current` reads
+the outcome's discriminant and still pushes `BftEvent::Applied` or
+`BftEvent::ApplyFailed`, so the four fixtures keep their observable
+behaviour — `FailingHandler` now returns
+`ApplicationFailure(None)` instead of an `Err`, which is the fixture
+the §5 test will use. `start_checkpoint` still calls the handler's
+`state_digest()`, because §4 lands the driver's `d_n` as a quantity
+of its own and §5's relation is commit 2: the checkpoint carrying
+`d_n`, the fixture rewrite that makes a handler's `state_digest()`
+agree with it by taking §5.3.4.1's state-format SHOULD, the
+`apply_failure_is_a_state_transition` test, and the deletion of
+`ApplyFailed` in favour of an outcome-carrying `Applied`. The four
+S8 state-transfer tests are unchanged and pass, which is exactly
+why the checkpoint's source is unchanged. Matrix row 8 stays FAIL —
+its verdict waits on commit 2 — and row 14 is unchanged and
+unaffected, since the byte check it rests on is unaffected by a
+driver-side digest the transfer path does not yet consume.
+
+
 
 
 ### M10.1 — `quip-node-ffi` bind and query — LANDED

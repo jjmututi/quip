@@ -1197,8 +1197,19 @@ take the recommendation. The note also states the three-place
 naming that the read-only report confirmed in the CDDL and the
 code (`prior_state_digest` as preimage key, `state_digest` as
 checkpoint field, `checkpoint_digest` as transfer field). The
-draft's §5.3.4 / §5.3.4.1 reconciliation follows as its own docs
-commit before the code.
+draft's §5.3.4 / §5.3.4.1 reconciliation is
+`<SHA>`: §5.3.4 gains the sentence that distinguishes the
+`prior_state_digest` map key (`d_(n-1)`) from the
+`state_digest` the checkpoint carries (`d_n`) and
+the `checkpoint_digest` the transfer restates; §5.3.4.1's
+state-format bullet gains the conditional consequence — a
+handler that takes the SHOULD can have its chain digest
+recomputed from the serialized state, a handler that does not
+still satisfies the byte check but its chain check is only as
+strong as the state format it chose. The SHOULD is not promoted
+to MUST. Row 14's PASS is unchanged: the byte check is
+universal and the chain check is conditional, which is what the
+row's verdict already says.
 
 The amendment records the δ rule by its own mechanics rather than
 by the note's earlier "1/4 floor" phrasing, because the draft's
@@ -1615,11 +1626,15 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    the byte check compares against it, so the row is `PASS`. The reviews
    of `c6a371a` confirmed that entry rather than discovering it.
    The note's revision (`a5c0dfb`) is the input to the code. The
-   draft's §5.3.4 / §5.3.4.1 reconciliation follows as a separate
-   `docs:` commit before the code, so the code instruction reads a
-   draft whose two sections agree on which digest the checkpoint
-   carries, what the SHOULD-strength state-format rule means for
-   the chain check, and why row 14's PASS is unaffected.
+   draft's §5.3.4 / §5.3.4.1 reconciliation landed at `<SHA>`:
+   §5.3.4 now distinguishes the `prior_state_digest` map
+   key from the `state_digest` the checkpoint carries and
+   the `checkpoint_digest` the transfer restates;
+   §5.3.4.1's state-format bullet now states the conditional
+   consequence without promoting the SHOULD. The code instruction
+   reads a draft whose two sections agree on what the checkpoint
+   carries and why row 14's PASS is unaffected. BFT-A item 1's
+   next step is the code, not the note.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

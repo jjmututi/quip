@@ -1685,6 +1685,13 @@ Operation = {
             interchangeable — one commits to what was applied, the other to
             what the state is — and a transfer needs both: the chain digest
             to check the signature, <tt>state_hash</tt> to check the bytes.
+            The <tt>prior_state_digest</tt> map key that the digest
+            construction uses is the previous chain digest
+            <tt>d_(n-1)</tt>, not the value the checkpoint carries: the
+            checkpoint's <tt>state_digest</tt> is <tt>d_n</tt>, and the
+            <tt>checkpoint_digest</tt> a <tt>bft_state_transfer</tt>
+            carries is that same <tt>d_n</tt> restated, not
+            <tt>d_(n-1)</tt>.
             Divergence is detected at checkpoint quorum and is not repaired
             by the checkpoint mechanism: the protocol's answer to a failed
             quorum is a view change.</t>
@@ -1780,7 +1787,14 @@ VIEW_CHANGE_QUORUM = 5     ; Quorum size for view changes and checkpoints
             <li>At minimum, the state <bcp14>SHOULD</bcp14> encode the
             DVV the ring is tracking, the current view and sequence
             number, and any operations applied since the last stable
-            checkpoint. The choice of encoding is the application's.</li>
+            checkpoint. The choice of encoding is the application's. When
+            the state encodes the post-checkpoint operations, the chain
+            digest it carries can be recomputed from the serialized state
+            by replaying the sequence; a handler that does not encode the
+            sequence still satisfies the <tt>state_hash</tt> byte check —
+            <tt>state_hash</tt> is the SHA-256 of the bytes as transmitted —
+            but its chain check is only as strong as the state format it
+            chose.</li>
             <li>A recipient that cannot decode the state
             <bcp14>MUST</bcp14> reject the transfer with E_BFT_FAILURE
             (error code 0x0B) rather than apply a state it cannot

@@ -275,8 +275,9 @@ enough and the edit has not landed."
   lives in `ClusterState::start_merge_proposal`,
   `note_merge_result`, `pending_merge_settled`,
   `merge_proposal_eligible` and the `pending_merge` / `incoming_merge`
-  slots; `ClusterHandle::note_merge_result` is exercised through
-  `ClusterHandle::state` by the peer task. The three wire verbs
+  slots; the peer task drives `ClusterState::note_merge_result`
+  through the `ClusterHandle::state` accessor — there is no
+  handle-level wrapper for it. The three wire verbs
   (`cluster_merge_propose`, `cluster_merge_accept`,
   `cluster_merge_reject`) are DHT_DISCOVERY-gated, `Tier::Ctrl`, and
   classify as `InboundAction::Merge` in `classify_inbound`.

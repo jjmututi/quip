@@ -1174,6 +1174,32 @@ is carried on the wire. The class is the same one the bf520fe
 review caught for `ClusterInfo.rtt`: the note stated a rule the
 code could not enforce, and the code wins.
 
+**BFT item 1 note revision.** The AI1/AI2 review pair on
+docs/bft-item-1-design.md and the read-only field-name report
+that followed found eight items the note did not have or got
+wrong: the canonical key order in the digest map was written in
+the literal order rather than the sorted order QUIP-CBOR
+produces; the genesis claim was stale because §5.3.4 now defines
+`d_(-1)`; `ApplyFailed` could not keep its meaning under an
+infallible `apply`; `state_hash` was described as "gained" when
+it is already in the CDDL and the code; the empty-output rule was
+unstated; `apply`'s deterministic context was unstated;
+divergence detection was asserted but untested; and the note had
+no traceability between its items and the draft's clauses. The
+revision addresses all eight and adds a ninth statement the
+report's correction required: on Finding B, the note adopts the
+chain-over-sequence reading and states it conditional on the
+state-format SHOULD — a handler that takes the SHOULD gets the
+chain check as well as the byte check, a handler that does not
+gets only the byte check, and row 14's PASS rests on the byte
+check for every handler and on the chain check for handlers that
+take the recommendation. The note also states the three-place
+naming that the read-only report confirmed in the CDDL and the
+code (`prior_state_digest` as preimage key, `state_digest` as
+checkpoint field, `checkpoint_digest` as transfer field). The
+draft's §5.3.4 / §5.3.4.1 reconciliation follows as its own docs
+commit before the code.
+
 The amendment records the δ rule by its own mechanics rather than
 by the note's earlier "1/4 floor" phrasing, because the draft's
 §13.4 does not carry a 1/4 floor — it carries the δ function and
@@ -1588,6 +1614,12 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    implementation has since gained the field, the responder fills it, and
    the byte check compares against it, so the row is `PASS`. The reviews
    of `c6a371a` confirmed that entry rather than discovering it.
+   The note's revision (`<SHA>`) is the input to the code. The
+   draft's §5.3.4 / §5.3.4.1 reconciliation follows as a separate
+   `docs:` commit before the code, so the code instruction reads a
+   draft whose two sections agree on which digest the checkpoint
+   carries, what the SHOULD-strength state-format rule means for
+   the chain check, and why row 14's PASS is unaffected.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

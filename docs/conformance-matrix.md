@@ -315,7 +315,7 @@ enough and the edit has not landed."
   names the code path the merge milestone will add. `028c102`: wire verbs,
   `pending_merge` / `incoming_merge` slots and the lifecycle land in
   `quip-net`; the caller and integration test are commit 2. Row
-  unchanged: the wire and state exist, the caller does not. <SHA>: the
+  unchanged: the wire and state exist, the caller does not. `2bfe99d`: the
   caller (`ClusterHandle::merge_if_due` / `plan_merge`), the
   `classify_inbound` / `apply_inbound` merge arms, `ClusterView::
   pending_merge` and `merge_produces_larger_cluster_id` land; row

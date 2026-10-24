@@ -1159,6 +1159,20 @@ FAIL / incomplete / review required until the merge code lands;
 the note fix changes what "incomplete" means — a documentation gap,
 not an undefined behaviour.
 
+A second revision to the note's §2a was needed after the first
+half of the merge implementation landed (028c102, corrected in
+`98f7db2`). Two of §2a's four rules could not be enforced
+by `ClusterState::merge_proposal_eligible` as the note stated:
+rule 2 needs two RTT sample sets only the node layer holds, and
+rule 4 needs a level field `ClusterInfo` does not carry. The
+revision names where each rule lives — rules 1, 3 and the
+no-merge-in-flight condition in the state machine; rule 2 in the
+caller; rule 4 transitively through §13.2's threshold — and
+reserves `MergeRejectReason::Level` for a future where the level
+is carried on the wire. The class is the same one the bf520fe
+review caught for `ClusterInfo.rtt`: the note stated a rule the
+code could not enforce, and the code wins.
+
 **M9.6b merge — wire verbs and state-machine lifecycle.** The first
 half of the merge implementation lands: the three coordinator-level
 wire verbs (`cluster_merge_propose`, `cluster_merge_accept`,

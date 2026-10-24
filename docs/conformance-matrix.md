@@ -318,7 +318,9 @@ enough and the edit has not landed."
   (§13.2 — the p90 the RTT rule compares is the acceptance test's p90,
   and the ≥ 20 sample floor is the same constant). A `FAIL` dependency
   would leave merge's decision input unverified even if merge had a
-  caller.
+  caller. Rule 4 of §2a is enforced by §13.2's threshold rather than by
+  a direct comparison, so row 7 depends on row 12 for the level
+  distinction as well as for the acceptance test.
 
 ### 8. §5.3.4 — execution contract for committed operations — FAIL
 

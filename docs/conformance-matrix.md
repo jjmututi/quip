@@ -304,7 +304,7 @@ enough and the edit has not landed."
   per the note's §3, and the integration test
   `merge_produces_larger_cluster_id` proves the completion and the
   `Busy` path. The draft's §13.4 now records the coordination rules
-  (§2a–§2d) in `<SHA>`; the row is PASS / clear / non-blocking.
+  (§2a–§2d) in `990a8e1`; the row is PASS / clear / non-blocking.
 - **History.** bf520fe: design note landed, FAIL / incomplete /
   review required. `3fbee08`: note revised to resolve the bf520fe review
   pair's findings (direction of id adoption, size re-check timing,
@@ -320,7 +320,7 @@ enough and the edit has not landed."
   `classify_inbound` / `apply_inbound` merge arms, `ClusterView::
   pending_merge` and `merge_produces_larger_cluster_id` land; row
   moves FAIL → PASS, specification status stays `incomplete` until the
-  §13.4 amendment. `<SHA>`: draft §13.4 amended with the coordination
+  §13.4 amendment. `990a8e1`: draft §13.4 amended with the coordination
   rules, §14.1 gains the three coordinator verbs, §3 gains
   `MERGE_PROPOSAL_TIMEOUT`; row moves FAIL / incomplete /
   review required → PASS / clear / non-blocking. Decisive query now

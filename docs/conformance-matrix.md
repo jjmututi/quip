@@ -458,7 +458,7 @@ enough and the edit has not landed."
   `Applied { outcome }`, and `apply_failure_is_a_state_transition`
   replaces `apply_failure_is_an_event_not_an_error`; row 8 `FAIL` →
   `PASS`. The `Closure test` field is added with this row; it names that
-  test. `<SHA>`: `ByteDigestHandler` fixture and
+  test. `476b42e`: `ByteDigestHandler` fixture and
   `checkpoint_carries_the_chain_digest_not_the_handler_digest` land; the
   checkpoint's source is now proven by a test that fails under a revert
   to `self.handler.state_digest()`. The `Closure test` field gains its

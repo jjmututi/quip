@@ -1777,7 +1777,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    the source-proving test.
 
    The pair's one code-review finding — the checkpoint's source is not
-   proven — closes at `<SHA>`: `ByteDigestHandler` (a fixture that does
+   proven — closes at `476b42e`: `ByteDigestHandler` (a fixture that does
    not take §5.3.4.1's state-format SHOULD, so its `state_digest()`
    differs from the driver's `chain_digest()`) and
    `checkpoint_carries_the_chain_digest_not_the_handler_digest` (the

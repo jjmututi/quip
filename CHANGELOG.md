@@ -1273,25 +1273,59 @@ the same episode. §14.1 gains the three coordinator verbs;
 example. The draft is what closes matrix row 7 to `clear`
 and `non-blocking`; the code was what made the row
 `PASS`.
-**BFT-A item 1 — the execution contract, in two commits.** Commit 1
-(`35382d9`) landed §1–§4 of the note at `a5c0dfb`, implementing the draft
-amendment at `dd98192`: `OperationOutcome` in
-`quip-core/src/messages/operation_outcome.rs` (text discriminant, optional
-256-byte payload, closed text-keyed CBOR map, `E_BAD_ENCODING` on an
-unknown key, an unknown or missing discriminant, a non-byte or oversize
-payload); `BftHandler::validate` with no default; the deterministic
-`OperationContext` (operation index, view, committed sequence, prior state
-digest) on both hooks; `apply` returning `OperationOutcome` instead of
-`Result`; the primary rejecting a proposal whose `validate` fails and a
-backup dropping a preprepare whose `validate` fails; and the driver's
-`d_n = SHA-256(QUIP-CBOR(map{outcome, operation, prior_state_digest}))`
-with the `chain_digest()` accessor and the
-`chain_digest_advances_over_the_committed_sequence` test that pins the
-construction by encoding one map in two literal orders and checking every
-replica against a value recomputed outside the driver. `ApplyFailed` still
-fired and the checkpoint still carried the handler's digest, so matrix
-row 8 stayed FAIL: §4 landed a quantity, §5 had not yet put it on the
-wire.
+
+**BFT-A item 1 — `OperationOutcome`, the two hooks, and the driver's
+chain digest.** The first half of the execution contract lands,
+implementing the note at `a5c0dfb` and the draft amendment at
+`dd98192`: §1's outcome type, §2's `validate` hook and its two call
+sites, §3's infallible `apply`, and §4's `d_n` construction.
+`OperationOutcome` is a protocol type in
+`quip-core/src/messages/operation_outcome.rs` — a text discriminant
+(`success` or `application-failure`), an optional payload bounded at
+256 bytes, and a closed, text-keyed CBOR map whose decode rejects an
+unknown key, an unknown discriminant, a missing discriminant, a
+non-byte payload and an oversize payload with `Error::BadEncoding`.
+The two success shapes stay distinguishable on the wire because the
+`payload` key is absent rather than empty, which is what §5.3.4's
+outcome paragraph requires. `BftHandler` gains `validate`, with no
+default — an application that cannot say whether an operation is
+valid cannot participate — and both hooks take the deterministic
+`OperationContext` carrying the operation index, the view, the
+committed sequence and the prior state digest `d_(n-1)`; `apply`
+takes the same context and returns an `OperationOutcome` instead of
+a `Result`, so an application-level failure is the discriminant and
+a panic is the application's bug. The primary validates before
+proposing (a rejected operation returns `Error::Bft` and never
+builds a round), and a backup validates after verifying the
+preprepare and drops it on failure without setting round state,
+setting `current`, or advancing the sequence. `BftDriver` maintains
+`d_n = SHA-256(QUIP-CBOR(map{outcome, operation,
+prior_state_digest}))` from the all-zero genesis, folds it at each
+commit in `advance_chain_digest`, and exposes it through
+`chain_digest()`; the encoder's canonical sort is what orders the
+three keys, and the new
+`chain_digest_advances_over_the_committed_sequence` test pins that
+by encoding the same map in two different literal orders and
+expecting identical bytes, then checking every replica's `d_0`
+against a value recomputed outside the driver.
+
+The event shape is unchanged in this commit: `apply_current` reads
+the outcome's discriminant and still pushes `BftEvent::Applied` or
+`BftEvent::ApplyFailed`, so the four fixtures keep their observable
+behaviour — `FailingHandler` now returns
+`ApplicationFailure(None)` instead of an `Err`, which is the fixture
+the §5 test will use. `start_checkpoint` still calls the handler's
+`state_digest()`, because §4 lands the driver's `d_n` as a quantity
+of its own and §5's relation is commit 2: the checkpoint carrying
+`d_n`, the fixture rewrite that makes a handler's `state_digest()`
+agree with it by taking §5.3.4.1's state-format SHOULD, the
+`apply_failure_is_a_state_transition` test, and the deletion of
+`ApplyFailed` in favour of an outcome-carrying `Applied`. The four
+S8 state-transfer tests are unchanged and pass, which is exactly
+why the checkpoint's source is unchanged. Matrix row 8 stays FAIL —
+its verdict waits on commit 2 — and row 14 is unchanged and
+unaffected, since the byte check it rests on is unaffected by a
+driver-side digest the transfer path does not yet consume.
 
 Commit 2 (`1e45f18`) lands §5. `bft_checkpoint.state_digest` carries
 `self.chain_digest`; both S8 fixtures take §5.3.4.1's state-format SHOULD
@@ -1317,6 +1351,37 @@ with the re-pointed justification, and the Matrix's Method section gains
 its tenth field, `Closure test` — one test per class the verdict depends
 on — for row 8 (`apply_failure_is_a_state_transition`) and row 14 (the
 byte check and the chain check).
+
+**BFT-A item 1 review pair — record fixes.** The AI1/AI2 pair of
+`1e45f18` and the read-only investigation that followed found that
+the commit's central change — the checkpoint's source — is exercised
+by no test that separates the two potential sources (the fixtures'
+`state_digest()` now equals d_n, so reverting `let digest =
+self.chain_digest;` to `self.handler.state_digest()` passes every
+test in the diff), plus five record-level findings: row 8's `Source`
+still described the pre-`35382d9` code, the note's Finding B
+paragraph said "for handlers that take the recommendation" while the
+code's chain check is universal, `start_checkpoint`'s comment and
+`BftCheckpoint::state_digest`'s doc comment were stale on which
+quantity the field carries, `docs/apply-contract.md:27` still
+presented the retired test name as current, and the commit-2
+paragraph had replaced the commit-1 paragraph rather than being
+appended to it. The record fixes land at `<SHA>`: row 8's Source
+rewritten to the enforced contract; row 14's Verdict and History
+restated to the code's universal reading; the note's Finding B
+paragraph corrected per its own "the code wins; the note is
+corrected" convention; the two doc comments corrected to name d_n;
+the apply-contract page's stale test name corrected to the test that
+exists; a sentence added to the `Closure test` field's Method
+definition covering rows whose Verdict depends on a class of handler
+behaviour. The commit-1 entry above is restored verbatim from `35382d9`:
+`1e45f18` had replaced it with a summary paragraph rather than
+appending to it, which is the hygiene defect the pair named. A
+test that proves the source — a fixture whose `state_digest()`
+differs from d_n, driving a round and asserting the checkpoint
+carries `chain_digest()` — is the next commit, and the row 8
+`Closure test` field's one-test-per-class convention is unchanged
+because the source is a *second* class the row does not yet name.
 
 Session note: this tree is not rustfmt-clean. A `cargo fmt --all` during
 the BFT-A item 1 work reformatted about 95 files; it was reverted
@@ -1685,7 +1750,16 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    consequence without promoting the SHOULD. The code instruction
    reads a draft whose two sections agree on what the checkpoint
    carries and why row 14's PASS is unaffected. BFT-A item 1's
-   next step is the code, not the note.
+   code followed at `35382d9` and `1e45f18`, and its next step is
+   the source-proving test.
+
+   The AI1/AI2 pair of `1e45f18` found that the commit's central change
+   — the checkpoint's source — is not proven by any test, because both
+   fixtures' `state_digest()` now equals d_n; the follow-up commit that
+   adds a divergent fixture and one source-proving test is the last
+   piece of BFT-A item 1's implementation. The pair also found the five
+   record-level defects the commit-2 subentry records and disposes of;
+   those land at `<SHA>`, and the source-proving test follows.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

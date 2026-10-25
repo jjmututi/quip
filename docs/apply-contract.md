@@ -24,8 +24,15 @@ of what was considered.
 So a failure is an event, and the ring moves on. Replica A applies the
 operation and advances; replica B fails it and advances. Both believe
 consensus progressed; their states differ.
-`apply_failure_is_an_event_not_an_error` asserts exactly this — the test
-is a description of the divergence, not a guard against it.
+`apply_failure_is_a_state_transition` (the test that replaced
+`apply_failure_is_an_event_not_an_error` when §5.3.4's execution
+contract landed at BFT-A item 1) drives exactly this shape: a
+committed failure that the sequence advances past. It proves the
+failure is now a committed outcome — `BftEvent::Applied` carries
+`OperationOutcome::ApplicationFailure` and the chain digest folds
+the outcome — not an error path. Before the contract landed, the
+old test was a description of the divergence; after, the new one
+is a guard against restoring the pre-contract shape.
 
 ## Why the draft cannot stay silent
 

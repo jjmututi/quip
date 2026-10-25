@@ -56,7 +56,11 @@ closes it.
 A `Closure test` field names the test, or one per class, whose passing
 is the row's evidence; a row with a `Closure test` whose named test does
 not exist or does not exercise the requirement is not `PASS`, regardless
-of other tests' status.
+of other tests' status. A row whose Verdict depends on a class of
+handler behaviour (such as "for every handler" versus "for handlers that
+take the recommendation") names the class the code enforces, not the
+class the note's phrasing describes; where the code and the note differ,
+the row's `Closure test` names the code's test and the note is corrected.
 
 Verdict vocabulary:
 
@@ -377,10 +381,24 @@ enough and the edit has not landed."
 - **Requirement.** `MUST` include the hook output in the digest; hooks
   `MUST NOT` be non-deterministic; `validate` failures `MUST` reject
   before consensus; `apply` failures `MUST` be recorded and agreed.
-- **Source.** `quip_net::bft_driver::BftHandler::apply -> Result<()>`.
-  `BftDriver::apply_current` pushes `BftEvent::ApplyFailed` on `Err` and
-  then advances `sequence`; `BftHandler::state_digest` defaults to
-  all-zeros and does not include the result. There is no `validate` hook.
+- **Source.** `quip_net::bft_driver::BftHandler`'s three hooks:
+  `validate(&self, ring_id, context, operation) -> bool`, called by
+  `BftDriver::propose` (a false return is `Error::Bft`, no round is built)
+  and by `BftDriver::on_preprepare` after `verify_full` and before any
+  round state is touched (a false return drops the preprepare with the
+  sequence unchanged). `apply(&mut self, ring_id, context, operation) ->
+  OperationOutcome` — infallible by signature, folded into the chain
+  digest by `BftDriver::apply_current` via `advance_chain_digest` before
+  the `BftEvent::Applied` push. `apply` receives the deterministic
+  `OperationContext { operation_index, view, committed_sequence,
+  prior_state_digest }`. The chain digest `d_n` is
+  `SHA-256(QUIP-CBOR(map{outcome, operation, prior_state_digest}))`,
+  computed once in `chain_digest_for` and used by `advance_chain_digest`
+  and by the fixtures. `bft_checkpoint.state_digest` carries `d_n`, not
+  the handler's `state_digest()`. `BftEvent::ApplyFailed` is gone;
+  `Applied` carries `outcome: OperationOutcome`. Row 14's byte digest is
+  the separate quantity the transfer path checks. `OperationOutcome` is
+  the closed, text-keyed, 256-byte-bounded CBOR map of §5.3.4.
 - **Test.** `apply_failure_is_a_state_transition` drives a handler whose
   `apply` returns `OperationOutcome::ApplicationFailure(None)` through a
   full round and asserts that `BftEvent::Applied` carries that outcome,
@@ -390,7 +408,10 @@ enough and the edit has not landed."
   `chain_digest_advances_over_the_committed_sequence` pins the
   construction: the same three-key map encoded in two literal orders
   yields identical bytes, and every replica's `d_0` equals a value
-  recomputed outside the driver.
+  recomputed outside the driver. Both tests are the row's evidence for
+  its two classes; `apply_failure_is_a_state_transition` is the row's
+  `Closure test`, and `chain_digest_advances_over_the_committed_sequence`
+  pins the digest construction the same row's Source describes.
 - **Verdict.** **PASS** — the code enforces §5.3.4's contract.
   `BftHandler::validate` runs at `propose` (a false return is
   `Error::Bft`, no round is built) and at `on_preprepare` after the
@@ -596,8 +617,15 @@ enough and the edit has not landed."
   — a handler's own bookkeeping — are outside `d_n` by construction and
   no check can cover them, which is why the class the old counter-only
   test named no longer exists. Row 14's `PASS` rests on the byte check
-  for every handler and on the chain check for handlers that take the
-  SHOULD; the amendment is what changed the justification, not the code.
+  for every handler and on the chain check for **every accepted
+  transfer**: the code compares `state_digest_of(&msg.state)` against
+  `checkpoint_digest` in `handle_state_transfer_response` with no branch
+  on whether the handler took §5.3.4.1's state-format SHOULD, so a
+  handler that does not take it fails its transfers closed (a liveness
+  cost, not a safety gap). The note's Finding B paragraph is corrected
+  in this commit to say the same; the amendment landed the conditional
+  reading, the code landed the universal one, and the note follows the
+  code per its own "the code wins; the note is corrected" convention.
 - **History.** 84c29c4: `PASS` under the property reading. `ece3e58`:
   `PASS` under the coverage reading, §5.3.4.1 amended; counter bytes
   `0..8` covered by the digest, counter-only substitution rejected
@@ -609,7 +637,15 @@ enough and the edit has not landed."
   counter-only test is replaced by
   `state_transfer_rejects_substituted_chain_digest`, which substitutes
   the bytes that carry `d_n`. Row stays `PASS`; the `Closure test` field
-  is added with this row.
+  is added with this row. `<SHA>`: the note's Finding B paragraph, the
+  `start_checkpoint` comment and the `BftCheckpoint::state_digest` doc
+  comment are corrected to the code's universal-chain-check reading;
+  row 8's Source is rewritten to the post-`1e45f18` contract; no code
+  change, no test change; row 14's Verdict restated as above; row 14's
+  `Closure test` field is confirmed with its two named tests
+  (`state_transfer_rejects_digest_mismatch` byte check at
+  `bft_driver.rs:2652`, and `state_transfer_rejects_substituted_chain_digest`
+  for the chain check) present in the tree.
 - **Specification status.** clear — the amendment gives the two digests
   distinct fields and distinct verification steps.
 - **Submission impact.** `non-blocking` — the code gap this row recorded

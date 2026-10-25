@@ -150,13 +150,18 @@ draft's and which are the note's.
   A handler that does not take the state-format recommendation still
   satisfies the byte check — `state_hash` is `SHA-256(state)`
   regardless of what the state contains — but its
-  `state_digest_of(state)` may not recompute `d_n`; the chain check
-  is only as strong as the handler's state format. Row 14's PASS
-  rests on the byte check for every handler and on the chain check
-  for handlers that take the recommendation. If the draft later
-  strengthens the state-format rule from SHOULD to MUST, the chain
-  check becomes universal and row 14's PASS becomes stronger; until
-  then, the note records the conditional.
+  `state_digest_of(state)` does not recompute `d_n`, so the chain
+  check rejects its transfers. Row 14's PASS rests on the byte check
+  for every handler and on the chain check for every accepted
+  transfer: `handle_state_transfer_response` compares
+  `state_digest_of(&msg.state)` against `checkpoint_digest` with no
+  branch on whether the handler took the recommendation, so a handler
+  that does not take the state-format SHOULD fails its transfers
+  closed — a liveness cost, not a safety gap, which the row's
+  `non-blocking` acknowledges. The code's universal reading is what
+  this note now records; if the draft later strengthens the
+  state-format rule from SHOULD to MUST, the code is unchanged and
+  the cost to a non-conforming handler is removed.
 
   The three names that refer to the same `d_n` in three places are
   not one field: `prior_state_digest` is a preimage map key (draft

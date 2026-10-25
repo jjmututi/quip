@@ -634,7 +634,13 @@ pub struct BftCheckpoint {
     pub ring_id: RingId,
     /// Sequence number of the checkpoint.
     pub sequence: u64,
-    /// Digest of the state at the checkpoint.
+    /// The chain digest `d_n` over the committed operation sequence
+    /// (§5.3.4). The checkpoint carries `d_n`, not the handler's
+    /// `state_digest()` — that is the handler's reported byte digest,
+    /// which the transfer path's `state_hash` and `state_digest_of`
+    /// checks concern. The two are separate quantities; see
+    /// `docs/bft-item-1-design.md`'s Finding B paragraph and the
+    /// driver's `BftHandler::state_digest` doc comment.
     pub state_digest: Digest,
     /// Ed25519 signature by the signing witness.
     pub witness_sig: [u8; 64],

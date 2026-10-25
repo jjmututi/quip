@@ -230,6 +230,15 @@ pub trait BftHandler {
     /// checkpointing: state transfers are still accepted (the state
     /// is passed to [`Self::apply_state`]), but the driver's own
     /// emitted checkpoints carry a sentinel digest.
+    ///
+    /// Distinct from the driver's chain digest. The driver maintains
+    /// its own `d_n` over the committed operation sequence and the
+    /// checkpoint carries that value; this method is the handler's
+    /// reported byte-level digest, which the transfer path compares
+    /// against `state_digest_of(state_bytes())`. A handler that takes
+    /// §5.3.4.1's state-format SHOULD makes them equal by carrying
+    /// `d_n` in its state; a handler that does not fails its transfers
+    /// closed on the chain check.
     fn state_digest(&self) -> Digest {
         [0u8; 32]
     }
@@ -1205,11 +1214,15 @@ where
                 return Ok(());
             }
         }
-        // The checkpoint carries the chain digest d_n over the committed
-        // operation sequence (§5.3.4). The handler's `state_digest()` is
-        // the byte digest the transfer path compares against; a handler
-        // that takes §5.3.4.1's state-format SHOULD makes the two agree
-        // by carrying d_n in its state, which is what the fixtures do.
+        // The checkpoint carries `d_n`, the driver's chain digest over
+        // the committed operation sequence (§5.3.4). The handler's
+        // `state_digest()` is the digest the handler reports for its
+        // state — for a handler that takes §5.3.4.1's state-format
+        // SHOULD, that is the same d_n, carried in the state's bytes;
+        // for a handler that does not, it is the handler's own value
+        // and the transfer path's chain check will reject transfers
+        // from it. The two are separate quantities in the trait's
+        // contract, made to agree by the handler's serialization.
         let digest = self.chain_digest;
 
         let mut msg = BftCheckpoint {

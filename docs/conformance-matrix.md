@@ -787,7 +787,7 @@ enough and the edit has not landed."
   clause.
 - **Depends on.** row 8 and the item 1 chain-digest work (`1e45f18`,
   `476b42e`).
-- **History.** UNTESTED at `<SHA>` (design note lands; code follows).
+- **History.** UNTESTED at `3a460f2` (design note lands; code follows).
 - **Closure test.** `view_change_carries_prepared_operations`
 
 ### 20. §5.3.4 — checkpoint carry-forward in a new view — UNTESTED
@@ -816,7 +816,7 @@ enough and the edit has not landed."
   clause.
 - **Depends on.** row 8, row 14, and the item 1 chain-digest work
   (`1e45f18`, `476b42e`).
-- **History.** UNTESTED at `<SHA>` (design note lands; code follows).
+- **History.** UNTESTED at `3a460f2` (design note lands; code follows).
 - **Closure test.** `new_view_carries_the_stable_checkpoint`
 
 ## What follows

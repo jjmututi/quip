@@ -2159,7 +2159,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     instructions check the `rustfmt --check` delta and do not reformat.
 
 37. **BFT-A items 2–3 design note.** Landed at
-    `docs/bft-items-2-3-design.md` (`<SHA>`). The note records three
+    `docs/bft-items-2-3-design.md` (`3a460f2`). The note records three
     traps: two code traps (`bft_driver.rs:1153` sends
     `prepared_messages` empty; `bft_driver.rs:1154` sends
     `checkpoint_messages` empty) and one draft trap (the flat "5"

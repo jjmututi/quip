@@ -426,7 +426,7 @@ enough and the edit has not landed."
 - **History.** `35382d9`: commit 1 — `OperationOutcome`, `validate`, the
   infallible `apply` with the deterministic context, and the `d_n`
   construction land; `ApplyFailed` still fires and the checkpoint still
-  carries the handler's digest, so the row stays `FAIL`. `<SHA>`: commit
+  carries the handler's digest, so the row stays `FAIL`. `1e45f18`: commit
   2 — the checkpoint carries `d_n`, the fixtures take §5.3.4.1's
   state-format SHOULD, `ApplyFailed` is deleted in favour of
   `Applied { outcome }`, and `apply_failure_is_a_state_transition`
@@ -601,7 +601,7 @@ enough and the edit has not landed."
 - **History.** 84c29c4: `PASS` under the property reading. `ece3e58`:
   `PASS` under the coverage reading, §5.3.4.1 amended; counter bytes
   `0..8` covered by the digest, counter-only substitution rejected
-  (`state_transfer_rejects_counter_only_substitution`). `<SHA>`: the
+  (`state_transfer_rejects_counter_only_substitution`). `1e45f18`: the
   fixtures take §5.3.4.1's state-format SHOULD and carry the driver's
   `d_n`; `state_digest_of` reads it back, the checkpoint's
   `state_digest` becomes `d_n`, and the whole-state coverage reading is

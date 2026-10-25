@@ -1293,7 +1293,7 @@ fired and the checkpoint still carried the handler's digest, so matrix
 row 8 stayed FAIL: §4 landed a quantity, §5 had not yet put it on the
 wire.
 
-Commit 2 (`<SHA>`) lands §5. `bft_checkpoint.state_digest` carries
+Commit 2 (`1e45f18`) lands §5. `bft_checkpoint.state_digest` carries
 `self.chain_digest`; both S8 fixtures take §5.3.4.1's state-format SHOULD
 by computing `d_n` from the context in `apply` and serializing
 `counter ++ d_n`, so `state_digest_of(&state_bytes()) == state_digest()`

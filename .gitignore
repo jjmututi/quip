@@ -19,3 +19,12 @@ target/
 .idea/
 .vscode/
 *.iml
+
+# CLINE CHATS
+.cline/
+
+# Local AI review pipeline artifacts (prompts, reviews). Not project sources.
+.cline/
+
+# Local tooling artifacts.
+.cline/

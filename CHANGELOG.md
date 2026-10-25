@@ -1366,7 +1366,7 @@ code's chain check is universal, `start_checkpoint`'s comment and
 quantity the field carries, `docs/apply-contract.md:27` still
 presented the retired test name as current, and the commit-2
 paragraph had replaced the commit-1 paragraph rather than being
-appended to it. The record fixes land at `<SHA>`: row 8's Source
+appended to it. The record fixes land at `2b252f4`: row 8's Source
 rewritten to the enforced contract; row 14's Verdict and History
 restated to the code's universal reading; the note's Finding B
 paragraph corrected per its own "the code wins; the note is
@@ -1759,7 +1759,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    adds a divergent fixture and one source-proving test is the last
    piece of BFT-A item 1's implementation. The pair also found the five
    record-level defects the commit-2 subentry records and disposes of;
-   those land at `<SHA>`, and the source-proving test follows.
+   those land at `2b252f4`, and the source-proving test follows.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

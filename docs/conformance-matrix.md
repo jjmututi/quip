@@ -637,7 +637,7 @@ enough and the edit has not landed."
   counter-only test is replaced by
   `state_transfer_rejects_substituted_chain_digest`, which substitutes
   the bytes that carry `d_n`. Row stays `PASS`; the `Closure test` field
-  is added with this row. `<SHA>`: the note's Finding B paragraph, the
+  is added with this row. `2b252f4`: the note's Finding B paragraph, the
   `start_checkpoint` comment and the `BftCheckpoint::state_digest` doc
   comment are corrected to the code's universal-chain-check reading;
   row 8's Source is rewritten to the post-`1e45f18` contract; no code

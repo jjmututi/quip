@@ -11,7 +11,17 @@ failure without covering it in the checkpoint (BFT-A item 1). The rest
 of this note is the reasoning that led to the choice, kept as the record
 of what was considered.
 
-## The gap
+Sections marked *record* below — §"The gap", §"The prior question",
+§"The three resolutions", and §"Recommendation" — are the record of
+what the implementation was and what was considered. They are in
+present tense for the pre-contract shape (`apply(...) -> Result<()>`,
+`BftEvent::ApplyFailed` on `Err`); the contract has since landed at
+BFT-A item 1 and the §§"What changes in the code" and §"Open
+questions" sections are the record of what the contract changed. The
+§"The gap" section's `apply_failure_is_a_state_transition` paragraph
+is the update that identifies which of the two shapes is current.
+
+## The gap — *record*
 
 `BftHandler::apply(&mut self, ring_id, sequence, operation) -> Result<()>`.
 
@@ -50,7 +60,7 @@ The draft's silence does not leave the choice open; it leaves the choice
 to the implementer, which is the definition of an interoperability gap.
 
 
-## The prior question: hook or contract?
+## The prior question: hook or contract? — *record*
 
 Before the three resolutions, the draft has to answer a prior
 question: is `apply` a protocol-defined execution step — the
@@ -192,7 +202,7 @@ stated once in §10 (QUIP-CBOR) and cited from §5.3.4, so the handshake's
 open `extensions` map — and `Deps`, `app_metadata` and `app_data` — are
 not accidentally closed by it.
 
-## The three resolutions
+## The three resolutions — *record*
 
 ### (a) Infallible apply; applications validate before consensus
 
@@ -245,7 +255,7 @@ fault, and the driver's advance is correct.
 | (c) | every replica, deterministically | before or during execution | yes, deterministically | the transition and its outcome | state |
 
 
-## Recommendation: (c), explicitly
+## Recommendation: (c), explicitly — *record, and later adopted*
 
 The recommendation is (c) because the implementation already behaves as
 (c) and does not satisfy (c). Today the driver commits the failure and

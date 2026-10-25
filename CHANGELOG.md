@@ -157,12 +157,12 @@ doc-tests       4 passed (one per crate)
 | M10.4 | `quip-node-ffi`: platform signer shim | not started |
 | M10.5 | `quip-node-ffi`: end-to-end verification on Android | not started |
 | M11 | Browser substrate: local gateway, content layer, trust anchors | not started |
-| BFT-A | BFT correctness: `apply()` contract, prepared/checkpoint carry-forward | not started |
+| BFT-A | BFT correctness: `apply()` contract, prepared/checkpoint carry-forward | partly landed: the `apply()` contract is landed (BFT-A item 1, `35382d9` + `1e45f18` + the source-proving test); view-change carry-forward is not started (items 2 and 3) |
 | BFT-V | BFT validation: adversarial network simulator, property tests | not started |
 | N-Hard | Network hardening: bounded queues, peer generation, adversarial routing | in progress |
 | Pre-6b | `quip-node`: hoist the inbound dispatch into one phase-parameterised function | landed |
 | Spec | Category 3 design items: membership boundaries, pin authorization, identity types, name hints, §13.5 split episode | not started |
-| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: nine-field schema (History added at `ece3e58`), eighteen rows, and a scope statement naming what the matrix covers and what it does not. The decisive query returns zero rows over the eighteen rows that exist; the draft's unrowed statements are inventoried in the matrix's "What follows" section, not judged. The §5.3.4/§5.3.4.1 pass added rows 14–18: the transfer's two digests (row 14, `PASS` once the code gained `state_hash`), preprepare digest, new-view quorum, ring-signature validation (`PASS`), and degraded-mode admission (row 18, `FAIL` — no gate) | in progress |
+| Conformance | Conformance matrix (draft ↔ code ↔ tests) in `docs/conformance-matrix.md`: ten-field schema (History added at `ece3e58`, `Closure test` at `1e45f18`), eighteen rows, and a scope statement naming what the matrix covers and what it does not. The decisive query returns zero rows over the eighteen rows that exist; the draft's unrowed statements are inventoried in the matrix's "What follows" section, not judged. The §5.3.4/§5.3.4.1 pass added rows 14–18: the transfer's two digests (row 14, `PASS` once the code gained `state_hash`), preprepare digest, new-view quorum, ring-signature validation (`PASS`), and degraded-mode admission (row 18, `FAIL` — no gate). Row 8 (execution contract) is `PASS` since `1e45f18` and names two closure tests, one per class; row 14 names one per class as well | in progress |
 
 ---
 
@@ -1383,6 +1383,29 @@ carries `chain_digest()` — is the next commit, and the row 8
 `Closure test` field's one-test-per-class convention is unchanged
 because the source is a *second* class the row does not yet name.
 
+**BFT-A item 1 source-proving test.** The review pair's one
+code-review finding — the checkpoint's source is exercised but not
+proven, because both fixtures taking §5.3.4.1's state-format SHOULD
+return d_n from `state_digest()`, so a revert to
+`self.handler.state_digest()` passes every test — closes here.
+`ByteDigestHandler` deliberately does not take the SHOULD: its
+`state_digest()` is a byte digest over the handler's own state,
+not d_n. `checkpoint_carries_the_chain_digest_not_the_handler_digest`
+drives a round with it, asserts the emitted `BftCheckpoint`'s
+`state_digest` equals the driver's `chain_digest()` and differs from
+the handler's `state_digest()`, and asserts a state transfer from
+this handler fails closed on the chain check — the code's universal
+comparison doing what it exists for. The test fails under a revert
+to `self.handler.state_digest()` and passes with the driver's
+`self.chain_digest`. Row 8's `Closure test` field gains the second
+test alongside `apply_failure_is_a_state_transition`, one per
+class; row 14 cites it for the universal chain check's consequence.
+Editorial: `bft_driver.rs`'s module doc's "# The chain digest"
+paragraph, stale at HEAD, is corrected to the two-quantity reading
+the code enforces; `apply-contract.md`'s present-tense §"The gap" is
+framed as the record the page's own preamble already declared it to
+be.
+
 Session note: this tree is not rustfmt-clean. A `cargo fmt --all` during
 the BFT-A item 1 work reformatted about 95 files; it was reverted
 immediately, the two commits were rebuilt onto the pristine files with
@@ -1753,13 +1776,18 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
    code followed at `35382d9` and `1e45f18`, and its next step is
    the source-proving test.
 
-   The AI1/AI2 pair of `1e45f18` found that the commit's central change
-   — the checkpoint's source — is not proven by any test, because both
-   fixtures' `state_digest()` now equals d_n; the follow-up commit that
-   adds a divergent fixture and one source-proving test is the last
-   piece of BFT-A item 1's implementation. The pair also found the five
-   record-level defects the commit-2 subentry records and disposes of;
-   those land at `2b252f4`, and the source-proving test follows.
+   The pair's one code-review finding — the checkpoint's source is not
+   proven — closes at `<SHA>`: `ByteDigestHandler` (a fixture that does
+   not take §5.3.4.1's state-format SHOULD, so its `state_digest()`
+   differs from the driver's `chain_digest()`) and
+   `checkpoint_carries_the_chain_digest_not_the_handler_digest` (the
+   test that fails under a revert to `self.handler.state_digest()`)
+   land there, with `apply-contract.md`'s §"The gap" framed as the
+   record the page's preamble declared it to be. The five record-level
+   defects the commit-2 subentry disposes of landed at `2b252f4`.
+   BFT-A item 1 is complete; the next BFT-A unit is items 2 and 3
+   (view change and checkpoint carry-forward), which are a design note
+   before they are code.
 
 2. **Prepared-operation carry-forward on view change.** The new
    primary does not re-propose operations prepared in an earlier

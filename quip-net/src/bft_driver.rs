@@ -64,17 +64,18 @@
 //!
 //! # The chain digest (BFT-A item 1)
 //!
-//! The driver maintains a chain digest d_n over the committed operation
-//! sequence, computed as SHA-256(QUIP-CBOR(map{outcome, operation,
-//! prior_state_digest})). It is a quantity of its own: the handler's
-//! state_digest() reports the byte digest used by the transfer path, and
-//! the two are separate — made to agree by the handler's serialization
-//! when the handler takes §5.3.4.1's state-format SHOULD (see
-//! docs/bft-item-1-design.md's Finding B paragraph). The checkpoint does
-//! not yet carry d_n: that is §5's relation, which lands with the
-//! fixtures that make the two agree. Until then the checkpoint carries
-//! the handler's state_digest(), and the transfer path's chain check
-//! compares against that.
+//! The driver maintains a chain digest d_n over the committed
+//! operation sequence, computed as SHA-256(QUIP-CBOR(map{outcome,
+//! operation, prior_state_digest})). It is a quantity of its own: the
+//! handler's `state_digest()` is the digest the handler reports for
+//! its state, and the two are separate — made to agree by the
+//! handler's serialization when the handler takes §5.3.4.1's
+//! state-format SHOULD (see `docs/bft-item-1-design.md`'s Finding B
+//! paragraph). The checkpoint carries d_n, not the handler's
+//! `state_digest()`; the transfer path's chain check compares
+//! `state_digest_of(state)` against `checkpoint_digest` for every
+//! accepted transfer, so a handler that does not take the SHOULD
+//! fails its transfers closed — a liveness cost, not a safety gap.
 use crate::bft::{
     BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPrepare, BftPreprepare,
     BftStateTransfer, BftViewChange, Digest, Operation, RingId,
@@ -1929,9 +1930,79 @@ mod tests {
         }
     }
 
+    /// A handler whose reported `state_digest()` is *not* the chain
+    /// digest the driver carries — it is a byte digest over the
+    /// handler's own state bytes, not d_n. It exists so a test can
+    /// distinguish `let digest = self.chain_digest;` from
+    /// `let digest = self.handler.state_digest();` in
+    /// `BftDriver::start_checkpoint`: both fixtures that take
+    /// §5.3.4.1's state-format SHOULD return d_n from `state_digest()`,
+    /// so the two are indistinguishable for them. This one does not
+    /// take the SHOULD, and its transfers fail closed on the chain
+    /// check, which the driver's universal `state_digest_of` comparison
+    /// enforces.
+    #[derive(Default)]
+    struct ByteDigestHandler {
+        /// Opaque per-sequence bytes the handler hashes to produce
+        /// its digest. Twenty-four bytes, so a substitution is
+        /// unambiguous and the digest is not accidentally equal to a
+        /// d_n.
+        state: Vec<u8>,
+        applied: Vec<(RingId, u64, Operation)>,
+    }
+
+    impl BftHandler for ByteDigestHandler {
+        fn validate(&self, _: &RingId, _: &OperationContext, _: &Operation) -> bool {
+            true
+        }
+
+        fn apply(
+            &mut self,
+            ring_id: &RingId,
+            context: &OperationContext,
+            operation: &Operation,
+        ) -> OperationOutcome {
+            // The state bytes are a deterministic function of the
+            // context, so every replica produces the same value for
+            // the same committed sequence.
+            let mut seed = Vec::with_capacity(24);
+            seed.extend_from_slice(&context.committed_sequence.to_be_bytes());
+            seed.extend_from_slice(&operation.kind.as_bytes()[..8.min(operation.kind.len())]);
+            seed.resize(24, 0);
+            self.state = seed;
+            self.applied
+                .push((*ring_id, context.committed_sequence, operation.clone()));
+            OperationOutcome::Success
+        }
+
+        fn state_digest(&self) -> Digest {
+            // A byte digest over the handler's own state — not d_n.
+            sha256(&self.state)
+        }
+
+        fn state_bytes(&self) -> Vec<u8> {
+            self.state.clone()
+        }
+
+        fn state_digest_of(&self, state: &[u8]) -> Digest {
+            // The receiver's chain check compares this against
+            // `checkpoint_digest`, which for this handler is d_n. The
+            // two never agree for a nonzero sequence, so transfers
+            // from this handler fail closed — which is the code's
+            // universal chain check doing what it exists for.
+            sha256(state)
+        }
+
+        fn apply_state(&mut self, state: &[u8]) -> Result<()> {
+            self.state = state.to_vec();
+            Ok(())
+        }
+    }
+
     type Driver = BftDriver<Ed25519Signer, Ed25519Verifier, RecordingHandler>;
     type CountingDriver = BftDriver<Ed25519Signer, Ed25519Verifier, CountingHandler>;
     type ChainDigestDriver = BftDriver<Ed25519Signer, Ed25519Verifier, ChainDigestHandler>;
+    type ByteDigestDriver = BftDriver<Ed25519Signer, Ed25519Verifier, ByteDigestHandler>;
 
     /// Build drivers in canonical membership order, so `drivers[i]`
     /// has NodeId `m.members()[i]`.
@@ -2000,6 +2071,13 @@ mod tests {
                 "the fixture's state must be self-describing"
             );
         }
+        (m, drivers)
+    }
+
+    /// Build a 7-member `ByteDigestDriver` ring.
+    fn build_byte_digest_ring() -> (RingMembership, Vec<ByteDigestDriver>) {
+        let (m, signers) = ring7();
+        let drivers = drivers_in_order(&m, signers, ByteDigestHandler::default, [1; 32], 0);
         (m, drivers)
     }
 
@@ -2374,6 +2452,117 @@ mod tests {
             assert_eq!(*d.chain_digest(), expected, "every replica computes d_0");
             assert_ne!(*d.chain_digest(), genesis, "d_0 is not the genesis value");
         }
+    }
+
+    /// The checkpoint carries the driver's `chain_digest()`, not the
+    /// handler's `state_digest()`. This is the one test that fails
+    /// under a revert to `let digest = self.handler.state_digest();`
+    /// in `BftDriver::start_checkpoint` — the fixtures that take
+    /// §5.3.4.1's state-format SHOULD make the two values equal by
+    /// construction, so no earlier test could distinguish the
+    /// sources. `ByteDigestHandler` does not take the SHOULD: its
+    /// `state_digest()` is a byte digest over the state, not d_n.
+    ///
+    /// Two properties are asserted. First, the emitted checkpoint's
+    /// `state_digest` equals `drivers[0].chain_digest()`, and after at
+    /// least one `Applied` it differs from the handler's
+    /// `state_digest()`. Second, a state transfer from this handler
+    /// fails closed on the chain check — the universal comparison
+    /// `state_digest_of(state) == checkpoint_digest` in
+    /// `handle_state_transfer_response` rejects the transfer, which
+    /// is the code's enforced consequence of not taking the SHOULD.
+    #[test]
+    fn checkpoint_carries_the_chain_digest_not_the_handler_digest() {
+        let (m, mut drivers) = build_byte_digest_ring();
+
+        // Drive one round so every handler applies the same operation.
+        drivers[0].start(operation("revocation")).unwrap();
+        let _ = pump_counting(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.sequence(), 1);
+            assert_eq!(d.handler().applied.len(), 1);
+        }
+
+        // Precondition: for this fixture the handler's reported digest
+        // and the driver's chain digest are different values after the
+        // first apply, which is the whole point of the fixture.
+        let handler_digest = drivers[0].handler().state_digest();
+        let driver_digest = *drivers[0].chain_digest();
+        assert_ne!(
+            handler_digest, driver_digest,
+            "the fixture must not take §5.3.4.1's state-format SHOULD, \
+             or the source cannot be distinguished"
+        );
+
+        // Drive a checkpoint on every driver and keep each emitted
+        // message: the assertion is on the wire value, not on the
+        // promoted stable checkpoint. Both are set from the same local
+        // binding, so only the message proves what was sent.
+        for d in &mut drivers {
+            d.start_checkpoint().unwrap();
+        }
+        let mut emitted: Vec<(usize, BftCheckpoint)> = Vec::new();
+        for (i, d) in drivers.iter_mut().enumerate() {
+            let cp = match d.drain_outbound().into_iter().next() {
+                Some(BftOutbound::Checkpoint(cp)) => cp,
+                other => panic!("expected Checkpoint, got {other:?}"),
+            };
+            emitted.push((i, cp));
+        }
+        for (_, cp) in &emitted {
+            assert_eq!(
+                cp.state_digest, driver_digest,
+                "the checkpoint must carry the driver's chain_digest()"
+            );
+            assert_ne!(
+                cp.state_digest, handler_digest,
+                "the checkpoint must not carry the handler's state_digest()"
+            );
+        }
+
+        // Deliver them so one checkpoint reaches quorum.
+        for (i, cp) in &emitted {
+            for (j, d) in drivers.iter_mut().enumerate() {
+                if j != *i {
+                    let _ = d.on_checkpoint(&m.members()[*i], cp);
+                }
+            }
+        }
+        assert_eq!(drivers[0].checkpoint_sequence(), 1);
+        assert_eq!(*drivers[0].checkpoint_digest(), driver_digest);
+
+        // A state transfer from this handler fails closed on the chain
+        // check: `state_digest_of(state)` returns `sha256(state)`,
+        // which is the handler's `state_digest()` and not the
+        // checkpoint's d_n. The receiver's universal comparison rejects
+        // it, which is the code's enforced consequence of not taking
+        // the SHOULD — a liveness cost, not a safety gap.
+        drivers[3].handler_mut().state = Vec::new();
+        drivers[3].checkpoint_sequence = 0;
+        drivers[3].checkpoint_digest = [0u8; 32];
+        drivers[3].stable_checkpoint = None;
+        drivers[3].sequence = 0;
+        drivers[3].request_state_transfer().unwrap();
+        let request = match drivers[3].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferRequest(msg)) => msg,
+            other => panic!("expected StateTransferRequest, got {other:?}"),
+        };
+        drivers[2]
+            .on_state_transfer(&m.members()[3], &request)
+            .unwrap();
+        let response = match drivers[2].drain_outbound().into_iter().next() {
+            Some(BftOutbound::StateTransferResponse(msg)) => msg,
+            other => panic!("expected StateTransferResponse, got {other:?}"),
+        };
+        // The byte check passes by construction: `state_hash` was
+        // computed over the same bytes the sender transmitted.
+        assert_eq!(response.state_hash, sha256(&response.state));
+        let err = drivers[3].on_state_transfer(&m.members()[2], &response);
+        assert!(
+            matches!(&err, Err(Error::Bft(m)) if *m == "state transfer chain digest mismatch"),
+            "a transfer from a handler that does not take the SHOULD \
+             must be rejected by the chain check, got {err:?}"
+        );
     }
 
     /// Like `pump` but generic over any handler.

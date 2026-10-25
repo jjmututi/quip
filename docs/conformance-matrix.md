@@ -411,7 +411,12 @@ enough and the edit has not landed."
   recomputed outside the driver. Both tests are the row's evidence for
   its two classes; `apply_failure_is_a_state_transition` is the row's
   `Closure test`, and `chain_digest_advances_over_the_committed_sequence`
-  pins the digest construction the same row's Source describes.
+  pins the digest construction the same row's Source describes. The
+  row's `Closure test` field names `apply_failure_is_a_state_transition`
+  and `checkpoint_carries_the_chain_digest_not_the_handler_digest`, one
+  per class the verdict depends on; the second test's fixture is
+  `ByteDigestHandler`, which deliberately does not take §5.3.4.1's
+  state-format SHOULD so the source can be distinguished.
 - **Verdict.** **PASS** — the code enforces §5.3.4's contract.
   `BftHandler::validate` runs at `propose` (a false return is
   `Error::Bft`, no round is built) and at `on_preprepare` after the
@@ -453,8 +458,20 @@ enough and the edit has not landed."
   `Applied { outcome }`, and `apply_failure_is_a_state_transition`
   replaces `apply_failure_is_an_event_not_an_error`; row 8 `FAIL` →
   `PASS`. The `Closure test` field is added with this row; it names that
-  test.
-- **Closure test.** `apply_failure_is_a_state_transition`
+  test. `<SHA>`: `ByteDigestHandler` fixture and
+  `checkpoint_carries_the_chain_digest_not_the_handler_digest` land; the
+  checkpoint's source is now proven by a test that fails under a revert
+  to `self.handler.state_digest()`. The `Closure test` field gains its
+  second named class; the row's Verdict is unchanged.
+- **Closure test.** `apply_failure_is_a_state_transition` (the
+  failure-as-a-state-transition class) and
+  `checkpoint_carries_the_chain_digest_not_the_handler_digest` (the
+  checkpoint-carries-the-driver's-digest class). The first names the
+  `OperationOutcome`/`Applied` contract; the second names the
+  checkpoint's source, which no other test could distinguish because
+  the fixtures that take §5.3.4.1's state-format SHOULD make the
+  driver's `chain_digest()` and the handler's `state_digest()` equal
+  for the same sequence.
 
 ### 9. §10.1 — signing convention — PASS
 
@@ -601,7 +618,10 @@ enough and the edit has not landed."
   from the genuine state only in the bytes `8..40` that carry `d_n`,
   repairs `state_hash`, and asserts the same rejection; it is the test
   that distinguishes chain-digest coverage from whole-state substitution,
-  because the previous test differs in both ranges.
+  because the previous test differs in both ranges. Row 14 also cites
+  `checkpoint_carries_the_chain_digest_not_the_handler_digest` for the
+  universal chain check's enforced consequence: a handler that does not
+  take the SHOULD fails its transfers closed on the chain check.
 - **Verdict.** **PASS** — the bytes are bound to a signed value, and the
   binding is exactly as strong as the handler's state format. `state_hash`
   catches corruption, the ring signature binds the checkpoint triple
@@ -653,7 +673,11 @@ enough and the edit has not landed."
 - **Depends on.** none (leaf); row 8 depends on this row, and row 17 for
   the checkpoint triple — `checkpoint_digest` is the value the ring
   signature covers, so the recomputation compares against a signed value.
-  The contract is S16 in `CHANGELOG.md`.
+  The contract is S16 in `CHANGELOG.md`. Row 8's
+  `checkpoint_carries_the_chain_digest_not_the_handler_digest` exercises
+  the same chain check from the other direction — the sender's view of
+  the universal comparison — and is the evidence that a handler taking
+  only the SHOULD's byte check cannot complete a transfer.
 - **Closure test.** `state_transfer_rejects_digest_mismatch` (byte check)
   and `state_transfer_rejects_substituted_chain_digest` (chain check) —
   one per class the row's `Verdict` depends on.

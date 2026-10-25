@@ -31,7 +31,7 @@ code or the text.
 
 ## Method
 
-Each row has nine fields:
+Each row has ten fields:
 
 | Field | Meaning |
 |---|---|
@@ -44,12 +44,19 @@ Each row has nine fields:
 | Submission impact | `blocking` / `review required` / `non-blocking` |
 | Depends on | The rows whose `Source` must exist for this row's `Source` to work; empty for a leaf |
 | History | The row's verdict over time, one entry per commit that moved it; absent when the row has never moved |
+| Closure test | The test, or one test per class the row's `Verdict` depends on, that exercises the requirement end-to-end; absent when the row has never been through the closure convention. Each named test is exactly one test, and it is the deciding evidence for its class. |
 
 The first four are evidence: they are what makes the judgements
 checkable. The next three are judgements: does the code enforce the
 sentence, is the sentence sufficient, and does the sentence stop the
-draft being submitted. The last two are structure and record: what this
-row stands on, and how it got here.
+draft being submitted. The last three are structure, record and
+closure: what this row stands on, how it got here, and the test that
+closes it.
+
+A `Closure test` field names the test, or one per class, whose passing
+is the row's evidence; a row with a `Closure test` whose named test does
+not exist or does not exercise the requirement is not `PASS`, regardless
+of other tests' status.
 
 Verdict vocabulary:
 
@@ -356,7 +363,7 @@ enough and the edit has not landed."
   a direct comparison, so row 7 depends on row 12 for the level
   distinction as well as for the acceptance test.
 
-### 8. §5.3.4 — execution contract for committed operations — FAIL
+### 8. §5.3.4 — execution contract for committed operations — PASS
 
 - **Clause.** §5.3.4 now specifies the application execution contract.
   Applications supply `validate` and `apply` hooks; `validate` runs
@@ -374,15 +381,29 @@ enough and the edit has not landed."
   `BftDriver::apply_current` pushes `BftEvent::ApplyFailed` on `Err` and
   then advances `sequence`; `BftHandler::state_digest` defaults to
   all-zeros and does not include the result. There is no `validate` hook.
-- **Test.** `apply_failure_is_an_event_not_an_error` — it asserts that
-  the failure is an event and that every driver reaches sequence 1,
-  which matches the draft's "failure does not stop the sequence" but not
-  its digest or `validate` requirements.
-- **Verdict.** **FAIL** — the draft now says what execution must do and
-  the implementation does not do it: there is no `validate` hook, the
-  apply output does not enter `state_digest`, and a failure is an event
-  the checkpoint does not cover. The contract is no longer ambiguous;
-  the code is behind it.
+- **Test.** `apply_failure_is_a_state_transition` drives a handler whose
+  `apply` returns `OperationOutcome::ApplicationFailure(None)` through a
+  full round and asserts that `BftEvent::Applied` carries that outcome,
+  that the driver's `chain_digest` has advanced past the all-zero
+  genesis, and that every driver reaches sequence 1 — the failure is a
+  state transition, not an error path.
+  `chain_digest_advances_over_the_committed_sequence` pins the
+  construction: the same three-key map encoded in two literal orders
+  yields identical bytes, and every replica's `d_0` equals a value
+  recomputed outside the driver.
+- **Verdict.** **PASS** — the code enforces §5.3.4's contract.
+  `BftHandler::validate` runs at `propose` (a false return is
+  `Error::Bft`, no round is built) and at `on_preprepare` after the
+  signature is verified (a false return drops the preprepare without
+  touching round state or the sequence). `BftHandler::apply` returns
+  `OperationOutcome` and takes the deterministic `OperationContext`;
+  `OperationOutcome` is the closed, text-keyed, 256-byte-bounded map of
+  §5.3.4. The driver folds the outcome into
+  `d_n = SHA-256(QUIP-CBOR(map{outcome, operation, prior_state_digest}))`,
+  the checkpoint carries `d_n`, and `BftEvent::Applied` reports the
+  outcome — including a failure, which the sequence and the digest treat
+  like any other transition. `ApplyFailed` is gone because the draft
+  draws no such distinction.
 - **Specification status.** clear — §5.3.4 states the hook, the digest
   contract, the deterministic context, the failure contract, the
   empty-output default, the digest construction, the checkpoint relation
@@ -392,13 +413,27 @@ enough and the edit has not landed."
   state digest from the same state.
 - **Submission impact.** `non-blocking` — the draft is precise enough for
   an independent implementer. The construction and the wire form are
-  specified in §5.3.4; the implementation of `OperationOutcome`,
-  `BftHandler::validate` and the state digest over the three-key map is
-  the next BFT unit.
+  specified in §5.3.4, and the implementation of `OperationOutcome`,
+  `BftHandler::validate` and the state digest over the three-key map has
+  landed (BFT-A item 1); no submission decision depends on this row.
 - **Depends on.** rows 6 and 14 — a checkpoint is only stable at quorum
   (row 6), and the chain digest cannot be checked against a state
   transfer whose byte digest is wrong (row 14). The two digests are a
-  pair: one commits to what was applied, the other to what the state is.
+  pair: one commits to what was applied, the other to what the state is —
+  the byte digest the transfer path checks is separate from the chain
+  digest the checkpoint carries, and both checks are exercised by the S8
+  tests the fixture rewrite touches.
+- **History.** `35382d9`: commit 1 — `OperationOutcome`, `validate`, the
+  infallible `apply` with the deterministic context, and the `d_n`
+  construction land; `ApplyFailed` still fires and the checkpoint still
+  carries the handler's digest, so the row stays `FAIL`. `<SHA>`: commit
+  2 — the checkpoint carries `d_n`, the fixtures take §5.3.4.1's
+  state-format SHOULD, `ApplyFailed` is deleted in favour of
+  `Applied { outcome }`, and `apply_failure_is_a_state_transition`
+  replaces `apply_failure_is_an_event_not_an_error`; row 8 `FAIL` →
+  `PASS`. The `Closure test` field is added with this row; it names that
+  test.
+- **Closure test.** `apply_failure_is_a_state_transition`
 
 ### 9. §10.1 — signing convention — PASS
 
@@ -530,39 +565,51 @@ enough and the edit has not landed."
   SHA-256 of its own bytes in `state_hash`, and that the install stores
   the chain digest.
   `state_transfer_distinguishes_chain_digest_from_byte_digest` runs the
-  same path against a handler whose `state_digest` is a rolling digest
-  over applied operations rather than the digest of `state_bytes`, so the
-  two quantities differ; it asserts they differ before transferring, and
-  that the transfer is accepted.
+  same path against the chain-digest fixture, whose state is
+  `counter ++ d_n`, so `state_digest()` is the driver's `d_n` and
+  `sha256(state_bytes())` is a different value for any state with a
+  nonzero counter; it asserts they differ before transferring, and that
+  the transfer is accepted.
   `state_transfer_rejects_substituted_state_with_matching_state_hash`
   replaces `state` with arbitrary bytes, recomputes `state_hash` so the
   byte check passes, leaves `checkpoint_digest` and `ring_signature`
   untouched, and asserts the transfer is rejected with
   `state transfer chain digest mismatch` and nothing is installed. It
   fails against the pre-recomputation receiver, which accepted the
-  transfer. `state_transfer_rejects_counter_only_substitution` differs
-  from the genuine state only in the counter bytes `0..8`, repairs
-  `state_hash`, and asserts the same rejection; it is the test that
-  distinguishes digest coverage from whole-state substitution, because
-  the previous test differs in both ranges.
+  transfer. `state_transfer_rejects_substituted_chain_digest` differs
+  from the genuine state only in the bytes `8..40` that carry `d_n`,
+  repairs `state_hash`, and asserts the same rejection; it is the test
+  that distinguishes chain-digest coverage from whole-state substitution,
+  because the previous test differs in both ranges.
 - **Verdict.** **PASS** — the bytes are bound to a signed value, and the
-  binding is only as strong as the handler's coverage. `state_hash`
+  binding is exactly as strong as the handler's state format. `state_hash`
   catches corruption, the ring signature binds the checkpoint triple
-  including `checkpoint_digest`, and `state_digest_of` recomputes the
-  chain digest from the transmitted state and compares it with the signed
-  `checkpoint_digest`. §5.3.4.1 makes the coverage reading normative: the
-  chain digest is a digest over **every** byte of the handler's
-  serialized state, and a handler `MUST NOT` install a byte the
-  recomputed digest does not cover. Under that reading the
-  `ChainDigestHandler` fixture's digest covers all 40 bytes — counter and
-  rolling chain — and a counter-only substitution is rejected. Before
-  that amendment the row's `PASS` rested on the narrower property
-  reading, under which a handler could serialize bytes outside its digest
-  and the receiver would install them.
+  including `checkpoint_digest`, and `state_digest_of` reads the chain
+  digest out of the transmitted state and compares it with the signed
+  `checkpoint_digest`. §5.3.4.1's coverage reading — the chain digest is
+  a digest over **every** byte of the handler's serialized state, and a
+  handler `MUST NOT` install a byte the digest does not cover — was
+  retired by the draft amendment: §5.3.4.1 states the state-format rule
+  as a SHOULD, and §5.3.4 makes the chain digest `d_n` over (outcome,
+  operation, prior `d_n`). A handler that takes the SHOULD carries `d_n`
+  in its state and the two checks agree; bytes the outcome does not carry
+  — a handler's own bookkeeping — are outside `d_n` by construction and
+  no check can cover them, which is why the class the old counter-only
+  test named no longer exists. Row 14's `PASS` rests on the byte check
+  for every handler and on the chain check for handlers that take the
+  SHOULD; the amendment is what changed the justification, not the code.
 - **History.** 84c29c4: `PASS` under the property reading. `ece3e58`:
-  `PASS` under the coverage reading, §5.3.4.1 amended. Counter bytes
-  `0..8` now covered by the digest; counter-only substitution rejected
-  (`state_transfer_rejects_counter_only_substitution`).
+  `PASS` under the coverage reading, §5.3.4.1 amended; counter bytes
+  `0..8` covered by the digest, counter-only substitution rejected
+  (`state_transfer_rejects_counter_only_substitution`). `<SHA>`: the
+  fixtures take §5.3.4.1's state-format SHOULD and carry the driver's
+  `d_n`; `state_digest_of` reads it back, the checkpoint's
+  `state_digest` becomes `d_n`, and the whole-state coverage reading is
+  retired by the amendment rather than by a code change. The
+  counter-only test is replaced by
+  `state_transfer_rejects_substituted_chain_digest`, which substitutes
+  the bytes that carry `d_n`. Row stays `PASS`; the `Closure test` field
+  is added with this row.
 - **Specification status.** clear — the amendment gives the two digests
   distinct fields and distinct verification steps.
 - **Submission impact.** `non-blocking` — the code gap this row recorded
@@ -571,6 +618,9 @@ enough and the edit has not landed."
   the checkpoint triple — `checkpoint_digest` is the value the ring
   signature covers, so the recomputation compares against a signed value.
   The contract is S16 in `CHANGELOG.md`.
+- **Closure test.** `state_transfer_rejects_digest_mismatch` (byte check)
+  and `state_transfer_rejects_substituted_chain_digest` (chain check) —
+  one per class the row's `Verdict` depends on.
 
 ### 15. §5.3.4 — pre-prepare digest recomputation — PASS
 

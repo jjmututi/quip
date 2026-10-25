@@ -81,7 +81,6 @@ use crate::bft::{
 };
 use crate::error::{Error, Result};
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use quip_core::cbor::{encode, CborValue};
@@ -327,19 +326,18 @@ pub enum BftEvent {
     },
     /// The commit quorum has been reached and the operation has been
     /// applied to the handler.
+    ///
+    /// Fires for every committed operation, including one whose outcome is
+    /// [`OperationOutcome::ApplicationFailure`]: §5.3.4 makes a failure a
+    /// state transition like any other, so there is no separate failure
+    /// event.
     Applied {
         /// Sequence number.
         sequence: u64,
         /// Operation digest.
         digest: Digest,
-    },
-    /// The handler returned an error while applying a committed
-    /// operation.
-    ApplyFailed {
-        /// Sequence number.
-        sequence: u64,
-        /// Human-readable error string.
-        text: String,
+        /// The outcome the handler returned (§5.3.4).
+        outcome: OperationOutcome,
     },
     /// A view change has been initiated for `target_view`.
     ViewChangeInitiated {
@@ -922,22 +920,12 @@ where
         let outcome = self
             .handler
             .apply(&self.ring_id, &context, &current.operation);
-        if matches!(outcome, OperationOutcome::ApplicationFailure(_)) {
-            // The failure is a committed state transition (§5.3.4): the
-            // sequence advances and the digest covers the outcome. The
-            // event is still `ApplyFailed` in this revision; the event
-            // shape changes with BFT-A item 1's second half.
-            self.events.push_back(BftEvent::ApplyFailed {
-                sequence: self.sequence,
-                text: format!("{outcome:?}"),
-            });
-        } else {
-            self.events.push_back(BftEvent::Applied {
-                sequence: self.sequence,
-                digest: current.digest,
-            });
-        }
         self.advance_chain_digest(&context, &current.operation, &outcome)?;
+        self.events.push_back(BftEvent::Applied {
+            sequence: self.sequence,
+            digest: current.digest,
+            outcome,
+        });
         self.state = RoundState::Idle;
         self.sequence = self.sequence.saturating_add(1);
 
@@ -968,33 +956,16 @@ where
 
     /// Fold one committed operation into the chain digest (§5.3.4).
     ///
-    /// `d_n = SHA-256(QUIP-CBOR(map{outcome, operation,
-    /// prior_state_digest}))`, with the keys in the encoder's canonical
-    /// order. The map literal's order is irrelevant — quip-core's
-    /// encoder sorts the text keys, and the sorted order is the one
-    /// §5.3.4's "Digest construction" names.
+    /// The construction lives in [`chain_digest_for`], which the fixtures
+    /// call too, so the driver and a handler that takes §5.3.4.1's
+    /// state-format SHOULD compute the same d_n from the same inputs.
     fn advance_chain_digest(
         &mut self,
         context: &OperationContext,
         operation: &Operation,
         outcome: &OperationOutcome,
     ) -> Result<()> {
-        let map = CborValue::Map(alloc::vec![
-            (
-                CborValue::String(String::from("outcome")),
-                outcome.to_cbor(),
-            ),
-            (
-                CborValue::String(String::from("operation")),
-                operation.to_cbor(),
-            ),
-            (
-                CborValue::String(String::from("prior_state_digest")),
-                CborValue::Bytes(context.prior_state_digest.to_vec()),
-            ),
-        ]);
-        let encoded = encode(&map)?;
-        self.chain_digest = sha256(&encoded);
+        self.chain_digest = chain_digest_for(context, operation, outcome)?;
         Ok(())
     }
 
@@ -1234,13 +1205,12 @@ where
                 return Ok(());
             }
         }
-        // §4 lands the driver's d_n; §5 — the checkpoint carrying it —
-        // is commit 2, together with the fixture rewrite that makes a
-        // handler's `state_digest()` agree with d_n. Until then the
-        // checkpoint keeps the handler's digest, so the transfer path's
-        // chain check and the S8 tests keep the relation they were
-        // written against.
-        let digest = self.handler.state_digest();
+        // The checkpoint carries the chain digest d_n over the committed
+        // operation sequence (§5.3.4). The handler's `state_digest()` is
+        // the byte digest the transfer path compares against; a handler
+        // that takes §5.3.4.1's state-format SHOULD makes the two agree
+        // by carrying d_n in its state, which is what the fixtures do.
+        let digest = self.chain_digest;
 
         let mut msg = BftCheckpoint {
             ring_id: self.ring_id,
@@ -1604,6 +1574,39 @@ fn sha256(data: &[u8]) -> Digest {
     d
 }
 
+/// The chain digest over one committed operation (§5.3.4's digest
+/// construction).
+///
+/// `d_n = SHA-256(QUIP-CBOR(map{outcome, operation,
+/// prior_state_digest}))`. The map literal's order is irrelevant:
+/// quip-core's encoder sorts the text keys, and the sorted order is the
+/// one §5.3.4 names. One formula, one place — the driver's
+/// `advance_chain_digest` and the fixtures' `apply` both call this, so a
+/// handler that takes §5.3.4.1's state-format SHOULD computes exactly
+/// the digest the checkpoint carries.
+fn chain_digest_for(
+    context: &OperationContext,
+    operation: &Operation,
+    outcome: &OperationOutcome,
+) -> Result<Digest> {
+    let map = CborValue::Map(alloc::vec![
+        (
+            CborValue::String(String::from("outcome")),
+            outcome.to_cbor(),
+        ),
+        (
+            CborValue::String(String::from("operation")),
+            operation.to_cbor(),
+        ),
+        (
+            CborValue::String(String::from("prior_state_digest")),
+            CborValue::Bytes(context.prior_state_digest.to_vec()),
+        ),
+    ]);
+    let encoded = encode(&map)?;
+    Ok(sha256(&encoded))
+}
+
 /// Verify a ring signature over a checkpoint.
 ///
 /// Each signature is checked against the `bft_checkpoint` signing
@@ -1696,13 +1699,37 @@ mod tests {
         }
     }
 
-    /// A handler that tracks a single u64 counter. Each `apply`
-    /// increments it; state_bytes is the big-endian counter;
-    /// apply_state installs a transmitted counter.
+    /// A handler that tracks a single u64 counter and the chain digest.
+    ///
+    /// It takes §5.3.4.1's state-format SHOULD: `apply` computes d_n from
+    /// the context it is given, stores it, and serializes it beside the
+    /// counter, so `state_digest_of(&state_bytes()) == state_digest()` and
+    /// `state_digest()` equals the driver's `chain_digest()` for the same
+    /// sequence.
     #[derive(Default)]
     struct CountingHandler {
         counter: u64,
+        /// The driver's d_n as of this handler's last `apply`.
+        chain: Digest,
         applied: Vec<(RingId, u64, Operation)>,
+    }
+
+    impl CountingHandler {
+        /// `counter.to_be_bytes() ++ chain`: 8 bytes then 32.
+        const STATE_LEN: usize = 40;
+
+        /// The chain digest carried by a serialized state, at `8..40`, or
+        /// the all-zero sentinel when `state` is not one. The bytes are
+        /// the digest verbatim — no domain separation, because the state's
+        /// purpose is to carry d_n so a receiver can read it back.
+        fn stored_chain(state: &[u8]) -> Digest {
+            if state.len() != Self::STATE_LEN {
+                return [0u8; 32];
+            }
+            let mut d = [0u8; 32];
+            d.copy_from_slice(&state[8..Self::STATE_LEN]);
+            d
+        }
     }
 
     impl BftHandler for CountingHandler {
@@ -1717,52 +1744,70 @@ mod tests {
             operation: &Operation,
         ) -> OperationOutcome {
             self.counter = self.counter.saturating_add(1);
+            let outcome = OperationOutcome::Success;
+            self.chain = chain_digest_for(context, operation, &outcome)
+                .expect("the chain-digest map always encodes");
             self.applied
                 .push((*ring_id, context.committed_sequence, operation.clone()));
-            OperationOutcome::Success
+            outcome
         }
 
         fn state_digest(&self) -> Digest {
-            sha256(&self.counter.to_be_bytes())
+            self.chain
         }
 
         fn state_bytes(&self) -> Vec<u8> {
-            self.counter.to_be_bytes().to_vec()
+            let mut out = self.counter.to_be_bytes().to_vec();
+            out.extend_from_slice(&self.chain);
+            out
         }
 
         fn state_digest_of(&self, state: &[u8]) -> Digest {
-            // The counting handler's chain digest is the digest of its
-            // serialized state, so the recomputation is the same call.
-            sha256(state)
+            CountingHandler::stored_chain(state)
         }
 
         fn apply_state(&mut self, state: &[u8]) -> Result<()> {
-            if state.len() != 8 {
-                return Err(Error::Bft("counting state must be 8 bytes"));
+            if state.len() != CountingHandler::STATE_LEN {
+                return Err(Error::Bft("counting state must be 40 bytes"));
             }
-            let mut arr = [0u8; 8];
-            arr.copy_from_slice(state);
-            self.counter = u64::from_be_bytes(arr);
+            let mut counter = [0u8; 8];
+            counter.copy_from_slice(&state[..8]);
+            self.counter = u64::from_be_bytes(counter);
+            self.chain = CountingHandler::stored_chain(state);
             Ok(())
         }
     }
 
-    /// A handler whose chain digest is **not** the digest of its state
-    /// bytes, which is what §5.3.4 specifies: `state_digest` is a
-    /// rolling digest over the committed operation sequence, and
-    /// `state_bytes` carries that digest alongside the counter rather
-    /// than being digested to produce it. The counting handler makes the
-    /// two quantities equal, so it cannot tell whether a transfer
-    /// distinguishes them; this one can. It also satisfies §5.3.4.1's
-    /// requirement that a handler with a derived chain digest serialize
-    /// it, so `state_digest_of(&state_bytes()) == state_digest()`.
+    /// A handler whose chain digest is not the digest of its state bytes,
+    /// which is what §5.3.4 specifies: `state_digest` is the chain digest
+    /// over the committed operation sequence, and `state_bytes` carries
+    /// that digest beside the counter rather than being digested to
+    /// produce it. The counting handler has the same shape; this one
+    /// exists so a test can name the distinction — `state_digest()` is
+    /// the driver's d_n, and `sha256(state_bytes())` is a different value.
     #[derive(Default)]
     struct ChainDigestHandler {
         counter: u64,
-        /// Rolling chain digest over the applied operations. Starts at
+        /// The driver's d_n as of this handler's last `apply`. Starts at
         /// the all-zero genesis value §5.3.4 states.
         chain: Digest,
         applied: Vec<(RingId, u64, Operation)>,
+    }
+
+    impl ChainDigestHandler {
+        /// `counter.to_be_bytes() ++ chain`: 8 bytes then 32.
+        const STATE_LEN: usize = 40;
+
+        /// The chain digest carried by a serialized state, at `8..40`, or
+        /// the all-zero sentinel when `state` is not one.
+        fn stored_chain(state: &[u8]) -> Digest {
+            if state.len() != Self::STATE_LEN {
+                return [0u8; 32];
+            }
+            let mut d = [0u8; 32];
+            d.copy_from_slice(&state[8..Self::STATE_LEN]);
+            d
+        }
     }
 
     impl BftHandler for ChainDigestHandler {
@@ -1776,49 +1821,37 @@ mod tests {
             context: &OperationContext,
             operation: &Operation,
         ) -> OperationOutcome {
-            // The fixture's rolling chain digest is its own: it is not
-            // the driver's `chain_digest`, and the two are expected to
-            // differ. A handler only makes them agree by taking
-            // §5.3.4.1's state-format SHOULD (the note's Finding B).
             self.counter = self.counter.saturating_add(1);
-            let mut preimage = self.chain.to_vec();
-            preimage.extend_from_slice(&context.committed_sequence.to_be_bytes());
-            preimage.extend_from_slice(operation.kind.as_bytes());
-            preimage.extend_from_slice(&operation.subject);
-            self.chain = sha256(&preimage);
+            let outcome = OperationOutcome::Success;
+            // The driver's d_n, from the same context and outcome, so
+            // `state_digest()` equals `chain_digest()` for this sequence:
+            // §5.3.4.1's state-format SHOULD, taken.
+            self.chain = chain_digest_for(context, operation, &outcome)
+                .expect("the chain-digest map always encodes");
             self.applied
                 .push((*ring_id, context.committed_sequence, operation.clone()));
-            OperationOutcome::Success
+            outcome
         }
 
         fn state_digest(&self) -> Digest {
-            // A digest over every byte of the serialized state, per the
-            // §5.3.4.1 coverage reading, so the counter is inside it too.
-            // Domain-separated from the transport checksum, so the chain
-            // digest and `sha256(state)` remain distinguishable in this
-            // fixture — that distinction is what
-            // `state_transfer_distinguishes_chain_digest_from_byte_digest`
-            // exists to check.
-            ChainDigestHandler::chain_from_state(&self.state_bytes())
-                .expect("state_bytes always carries the rolling digest")
+            self.chain
         }
 
         fn state_bytes(&self) -> Vec<u8> {
             // §5.3.4.1: a handler whose chain digest is derived from
-            // applied operations must serialize that digest, so the
-            // receiver can recompute it from the bytes alone. Counter
-            // first, then the rolling digest.
+            // applied operations must serialize that digest, so a receiver
+            // can read it out of the bytes. Counter first, then d_n.
             let mut out = self.counter.to_be_bytes().to_vec();
             out.extend_from_slice(&self.chain);
             out
         }
 
         fn state_digest_of(&self, state: &[u8]) -> Digest {
-            // A state that does not carry the rolling digest cannot be
-            // the state that produced this checkpoint, so the all-zero
-            // value is returned and the receiver's comparison against
+            // A state that does not carry the digest cannot be the state
+            // that produced this checkpoint, so the all-zero value is
+            // returned and the receiver's comparison against
             // `checkpoint_digest` rejects it.
-            ChainDigestHandler::chain_from_state(state).unwrap_or([0u8; 32])
+            ChainDigestHandler::stored_chain(state)
         }
 
         fn apply_state(&mut self, state: &[u8]) -> Result<()> {
@@ -1828,40 +1861,8 @@ mod tests {
             let mut counter = [0u8; 8];
             counter.copy_from_slice(&state[..8]);
             self.counter = u64::from_be_bytes(counter);
-            self.chain = ChainDigestHandler::stored_chain(state).expect("length checked above");
+            self.chain = ChainDigestHandler::stored_chain(state);
             Ok(())
-        }
-    }
-
-    impl ChainDigestHandler {
-        /// `counter.to_be_bytes() ++ chain`: 8 bytes then 32.
-        const STATE_LEN: usize = 40;
-
-        /// Domain separation for the fixture's chain digest, so it commits
-        /// to every byte of the state without coinciding with the
-        /// transport checksum `sha256(state)`.
-        const CHAIN_DOMAIN: &[u8] = b"quip-chain-digest-v1";
-
-        /// The chain digest of a serialized state, or `None` if `state` is
-        /// not one. Covers every byte, per §5.3.4.1.
-        fn chain_from_state(state: &[u8]) -> Option<Digest> {
-            if state.len() != Self::STATE_LEN {
-                return None;
-            }
-            let mut preimage = Self::CHAIN_DOMAIN.to_vec();
-            preimage.extend_from_slice(state);
-            Some(sha256(&preimage))
-        }
-
-        /// The rolling digest stored inside a serialized state, at
-        /// `8..40`, or `None` if `state` is not one.
-        fn stored_chain(state: &[u8]) -> Option<Digest> {
-            if state.len() != Self::STATE_LEN {
-                return None;
-            }
-            let mut d = [0u8; 32];
-            d.copy_from_slice(&state[8..Self::STATE_LEN]);
-            Some(d)
         }
     }
 
@@ -2275,25 +2276,34 @@ mod tests {
         }
     }
 
+    /// §5.3.4's failure contract: an `apply` failure is a state
+    /// transition, not an error path. The sequence advances, `Applied`
+    /// reports the failure discriminant, and d_n covers the failure.
     #[test]
-    fn apply_failure_is_an_event_not_an_error() {
+    fn apply_failure_is_a_state_transition() {
         let signers: Vec<_> = (1..=4).map(signer).collect();
         let ids: Vec<NodeId> = signers.iter().map(|s| s.public_key()).collect();
         let m4 = RingMembership::new(ids).unwrap();
-        let mut drivers = drivers_in_order(
-            &m4,
-            signers,
-            || FailingHandler,
-            [1; 32],
-            0,
-        );
+        let genesis: Digest = [0u8; 32];
+        let mut drivers = drivers_in_order(&m4, signers, || FailingHandler, [1; 32], 0);
         drivers[0].start(operation("revocation")).unwrap();
         let events = pump_generic(&mut drivers, &m4);
 
-        let any_failed = events
-            .iter()
-            .any(|evs| evs.iter().any(|e| matches!(e, BftEvent::ApplyFailed { .. })));
-        assert!(any_failed);
+        let reported = events.iter().find_map(|evs| {
+            evs.iter().find_map(|e| match e {
+                BftEvent::Applied { outcome, .. } => Some(outcome.clone()),
+                _ => None,
+            })
+        });
+        assert!(
+            matches!(reported, Some(OperationOutcome::ApplicationFailure(_))),
+            "Applied must carry the failure outcome, got {reported:?}"
+        );
+        assert_ne!(
+            *drivers[0].chain_digest(),
+            genesis,
+            "d_n advances on a committed failure"
+        );
         for d in &drivers {
             assert_eq!(d.sequence(), 1);
         }
@@ -2701,15 +2711,19 @@ mod tests {
         }
 
         // Precondition, and the whole point of this test: this handler's
-        // chain digest is a rolling digest over applied operations, so it
-        // is not the digest of the state bytes. With the counting handler
-        // the two are equal and a conflation cannot be observed.
+        // chain digest is d_n over the committed operation sequence, and
+        // the state bytes are `counter ++ d_n`, so the chain digest is not
+        // the digest of the state bytes. The distinction is structural —
+        // d_n commits to (outcome, operation, prior d_n) and nothing else
+        // — not a domain-separation tag in the fixture. With the counting
+        // handler the shape is the same; this fixture exists so the
+        // property can be named.
         let healthy_state = drivers[3].handler().state_bytes();
         let healthy_chain = drivers[3].handler().state_digest();
         assert_ne!(
             healthy_chain,
             sha256(&healthy_state),
-            "the fixture must keep the two digests distinct"
+            "d_n is not sha256 of the state bytes that carry it"
         );
         // The same property on the post-apply state, which is the state a
         // transfer actually carries.
@@ -2853,20 +2867,25 @@ mod tests {
         assert_eq!(drivers[0].sequence(), 0);
     }
 
-    /// The counter-only substitution that the whole-state test cannot see:
-    /// bytes `8..40` are the genuine state's byte for byte, and only the
-    /// counter at `0..8` differs, with `state_hash` repaired to match.
-    /// Under the pre-coverage reading this transfer was accepted, because
-    /// `state_digest_of` read only `8..40`; with the digest covering every
-    /// byte of the serialized state the recomputation catches it.
+    /// A substitution of the bytes that carry d_n, with `state_hash`
+    /// repaired to match: the signed `checkpoint_digest` and the
+    /// `ring_signature` stay genuine, so only the chain-digest
+    /// recomputation can reject the transfer.
     ///
-    /// The assertion is on the error, not on `counter == 0` afterwards: the
-    /// reject path returns before `apply_state`, so a counter assertion
-    /// cannot observe the difference (the same reason
-    /// `state_transfer_rejects_substituted_state_with_matching_state_hash`'s
-    /// counter assertion is unreachable).
+    /// This replaces `state_transfer_rejects_counter_only_substitution`.
+    /// That test substituted the counter at `0..8` and relied on the
+    /// chain digest covering every byte of the serialized state. The
+    /// draft amendment retired that reading: §5.3.4.1's state-format
+    /// SHOULD is what makes `state_digest_of(state_bytes())` equal
+    /// `state_digest()`, and d_n commits to (outcome, operation,
+    /// prior d_n) — not to a handler's bookkeeping. A counter the
+    /// application's outcome does not carry is outside d_n by
+    /// construction, so no byte check or chain check can catch it, and
+    /// the class that test named no longer exists in this shape. The
+    /// class that does exist is a state whose d_n bytes have been
+    /// swapped for another, and that is what this asserts.
     #[test]
-    fn state_transfer_rejects_counter_only_substitution() {
+    fn state_transfer_rejects_substituted_chain_digest() {
         let (m, mut drivers) = build_chain_digest_ring();
 
         drivers[0].start(operation("revocation")).unwrap();
@@ -2907,22 +2926,22 @@ mod tests {
             other => panic!("expected response, got {other:?}"),
         };
 
-        // Flip every bit of the counter and leave bytes 8..40 alone, then
-        // repair the sender-supplied checksum. `checkpoint_digest` and
+        // Substitute the digest, leaving the counter alone, and repair the
+        // sender-supplied checksum. `checkpoint_digest` and
         // `ring_signature` stay genuine, so the signature still verifies.
         let mut substituted = genuine_state.clone();
-        for b in &mut substituted[..8] {
+        for b in &mut substituted[8..ChainDigestHandler::STATE_LEN] {
             *b ^= 0xFF;
         }
-        assert_ne!(
+        assert_eq!(
             &substituted[..8],
             &genuine_state[..8],
-            "the counter bytes differ"
+            "the counter is untouched"
         );
-        assert_eq!(
+        assert_ne!(
             &substituted[8..],
             &genuine_state[8..],
-            "the bytes carrying the digest are untouched"
+            "the bytes carrying the digest differ"
         );
         response.state = substituted;
         response.state_hash = sha256(&response.state);
@@ -2939,7 +2958,7 @@ mod tests {
         let err = drivers[0].on_state_transfer(&m.members()[2], &response);
         assert!(
             matches!(&err, Err(Error::Bft(m)) if *m == "state transfer chain digest mismatch"),
-            "a counter-only substitution must be rejected by the chain-digest check, got {err:?}"
+            "a substituted chain digest must be rejected by the chain-digest check, got {err:?}"
         );
     }
 

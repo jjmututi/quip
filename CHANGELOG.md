@@ -2158,6 +2158,19 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     would reformat the whole tree rather than check it. Until then,
     instructions check the `rustfmt --check` delta and do not reformat.
 
+37. **BFT-A items 2–3 design note.** Landed at
+    `docs/bft-items-2-3-design.md` (`<SHA>`). The note records three
+    traps: two code traps (`bft_driver.rs:1153` sends
+    `prepared_messages` empty; `bft_driver.rs:1154` sends
+    `checkpoint_messages` empty) and one draft trap (the flat "5"
+    state-transfer ring signature at draft 1457–1462 against the general
+    `n - f` rule at 1447 and `DEGRADED_QUORUM` at 1449). Two new matrix
+    rows: row 19 (`prepared_messages`, `UNTESTED`) and row 20
+    (`checkpoint_messages`, `UNTESTED`). Code lands in a later commit;
+    the note's test-per-class names are the contract for that commit.
+    The draft amendment to reconcile the flat "5" is deferred to its own
+    `docs:` commit.
+
 ---
 
 ## Tag index

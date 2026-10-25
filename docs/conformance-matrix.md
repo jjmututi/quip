@@ -759,9 +759,69 @@ enough and the edit has not landed."
   draft.
 - **Depends on.** row 6 — the quorum that defines "degraded".
 
+### 19. §5.3.4 — prepared messages in a new view — UNTESTED
+
+- **Clause.** "Each entry in `prepared_messages` is a complete
+  `bft_preprepare` message as it would appear on the wire, including the
+  primary's signature. It is not a digest. The new primary re-proposes
+  these messages, and witnesses re-verify the primary's signature."
+  (draft 1429), required by "The view change includes quorum certificates
+  for prepared messages and the latest stable checkpoint to ensure safety
+  across view changes." (draft 1515–1517).
+- **Requirement.** `MUST` carry the operations prepared in an earlier
+  view into the new view as complete signed preprepare messages, and
+  `MUST` re-verify each one on receipt.
+- **Source.** `BftDriver::maybe_emit_new_view`
+  (`quip-net/src/bft_driver.rs:1130`) populates
+  `bft_new_view.prepared_messages`; `BftDriver::on_new_view`
+  (`quip-net/src/bft_driver.rs:1083`) verifies the carried entries.
+  Neither does today: `bft_driver.rs:1153` is `prepared_messages:
+  Vec::new(),` and `bft_view_change.prepared_digests` is empty at
+  `bft_driver.rs:1003`.
+- **Test.** none yet — the class's test is named in `Closure test`.
+- **Verdict.** **UNTESTED** — the code path exists and sends the empty
+  form; no test exercises a non-empty carry.
+- **Specification status.** clear — §5.3.4 states a MUST and names the
+  wire form.
+- **Submission impact.** `non-blocking` — a code gap against a clear
+  clause.
+- **Depends on.** row 8 and the item 1 chain-digest work (`1e45f18`,
+  `476b42e`).
+- **History.** UNTESTED at `<SHA>` (design note lands; code follows).
+- **Closure test.** `view_change_carries_prepared_operations`
+
+### 20. §5.3.4 — checkpoint carry-forward in a new view — UNTESTED
+
+- **Clause.** "A `bft_new_view` message MUST contain at least `n - f`
+  valid view-change messages." (draft 1452–1453) and "The view change
+  includes quorum certificates for prepared messages and the latest
+  stable checkpoint to ensure safety across view changes." (draft
+  1515–1517).
+- **Requirement.** `MUST` carry the latest stable checkpoint into the
+  new view on the same quorum-certificate requirement as the prepared
+  messages.
+- **Source.** `BftDriver::maybe_emit_new_view`
+  (`quip-net/src/bft_driver.rs:1130`) populates
+  `bft_new_view.checkpoint_messages`; `BftDriver::on_new_view`
+  (`quip-net/src/bft_driver.rs:1083`) verifies the carried
+  `bft_checkpoint` entries against the ring's signature set.
+  `bft_driver.rs:1154` is `checkpoint_messages: Vec::new(),`;
+  `bft_view_change.checkpoint_digest` is populated at
+  `bft_driver.rs:1010`.
+- **Test.** none yet — the class's test is named in `Closure test`.
+- **Verdict.** **UNTESTED** — the code path exists and sends the empty
+  form; no test exercises a non-empty carry.
+- **Specification status.** clear.
+- **Submission impact.** `non-blocking` — a code gap against a clear
+  clause.
+- **Depends on.** row 8, row 14, and the item 1 chain-digest work
+  (`1e45f18`, `476b42e`).
+- **History.** UNTESTED at `<SHA>` (design note lands; code follows).
+- **Closure test.** `new_view_carries_the_stable_checkpoint`
+
 ## What follows
 
-**Coverage: 18 rows against 146 `MUST` and 104 `SHOULD` statements in
+**Coverage: 20 rows against 146 `MUST` and 104 `SHOULD` statements in
 104 sections.** The rows cover the decision points where the reference
 implementation gives a source to check against — the capability surface,
 the witness threshold, the BFT quorum and execution contract, the cluster
@@ -776,7 +836,7 @@ Rows by section:
 |---|---|
 | §4 Handshake and profile negotiation | 1, 4 |
 | §5.3.3 Witness statements | 2, 5, 10, 11 |
-| §5.3.4 BFT consensus, operations, execution | 6, 8, 15, 16, 17, 18 |
+| §5.3.4 BFT consensus, operations, execution | 6, 8, 15, 16, 17, 18, 19, 20 |
 | §10.1 Signing convention | 9 |
 | §13.2 Cluster acceptance | 12 |
 | §13.4 Cluster merging | 7 |

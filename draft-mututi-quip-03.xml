@@ -1295,7 +1295,7 @@ WitnessStatement = [
             <li>Key revocation</li>
             <li>Witness membership changes</li>
             <li>Resource ownership transfers</li>
-            <li>Trusted CID registrations that require witness validation</li>
+            <li>Trusted CID registrations (kind <tt>"trusted_cid_registration"</tt>) that require witness validation</li>
           </ul>
           
           <t>Regular operations (DVV writes, resource updates) MAY continue 
@@ -1546,7 +1546,11 @@ FrostRingSig = {
               <tr>
                 <td>Mandatory Consensus</td>
                 <td>Key rotations, revocations, witness membership changes, 
-                resource ownership transfers</td>
+                resource ownership transfers, and trusted CID registrations
+                that require witness validation (kinds <tt>"key_rotation"</tt>,
+                <tt>"revocation"</tt>, <tt>"witness_membership_change"</tt>,
+                <tt>"resource_ownership_transfer"</tt>, and
+                <tt>"trusted_cid_registration"</tt>)</td>
                 <td>Full BFT (5 of 7 witnesses) — MUST NOT proceed in DEGRADED mode</td>
               </tr>
               <tr>
@@ -1593,7 +1597,7 @@ FrostRingSig = {
             <t>An <em>Operation</em> is a CBOR item with the following properties:</t>
             <ul>
               <li>Its encoding <bcp14>MUST</bcp14> be canonical QUIP-CBOR (<xref target="cbor"/>). The signing payload of <tt>bft_preprepare</tt> includes the operation as encoded on the wire; non-canonical operations will cause verification failures.</li>
-              <li>An operation <bcp14>MUST</bcp14> have a <tt>kind</tt> — a text string identifying what class of state transition it represents. The kinds currently defined by this specification are <tt>"key_rotation"</tt>, <tt>"revocation"</tt>, <tt>"witness_membership_change"</tt>, and <tt>"resource_ownership_transfer"</tt>. Applications <bcp14>MAY</bcp14> define additional kinds.</li>
+              <li>An operation <bcp14>MUST</bcp14> have a <tt>kind</tt> — a text string identifying what class of state transition it represents. The kinds currently defined by this specification are <tt>"key_rotation"</tt>, <tt>"revocation"</tt>, <tt>"witness_membership_change"</tt>, <tt>"resource_ownership_transfer"</tt>, and <tt>"trusted_cid_registration"</tt>. The five are exactly the kinds whose operations require mandatory consensus; see <xref target="bft"/>'s Consensus Requirements table. Applications <bcp14>MAY</bcp14> define additional kinds.</li>
               <li>An operation <bcp14>MUST</bcp14> have a <tt>subject</tt> — the state it acts on. Two operations with different subjects never conflict.</li>
               <li>An operation <bcp14>MUST</bcp14> define, as part of its application-layer specification, a conflict relation with other operations of the same kind. Two operations of the same kind conflict if applying both produces a state that would not have been produced by applying either alone.</li>
               <li>Witnesses <bcp14>MUST NOT</bcp14> interpret operation payloads beyond the <tt>kind</tt> and <tt>subject</tt> fields. Application-layer conflict detection is performed by the operation's registered handler, not by the ring itself.</li>

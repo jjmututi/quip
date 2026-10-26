@@ -2252,6 +2252,23 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     change achieves, not what any one message carries. The wire change is
     breaking to draft-03's `bft_view_change`. The follow-up commit fills
     the `<SHA>` placeholder.
+  - Draft amendment at `<SHA>`, the fifth critical kind and the two-list
+    reconciliation (row 18's draft side): draft 1596 gains
+    "trusted_cid_registration" as the fifth defined kind and a sentence
+    stating the five defined kinds are exactly the kinds whose operations
+    require mandatory consensus. Draft 1547–1550's Mandatory Consensus
+    table gains "trusted CID registrations that require witness
+    validation" and a parenthetical naming all five kinds explicitly.
+    Draft 1298's prohibition gains the kind name in parentheses so the
+    two lists cross-reference. The `<date>` element bumps to the
+    amendment date. The reading recorded: a trusted CID is an
+    authorization root, and a degraded-quorum registration of one is a
+    class of operation the critical list exists to protect; removing the
+    clause from 1298 instead would say "registration at 3-of-4 is
+    acceptable," which contradicts the safety argument the critical list
+    states. The code gate and the row 18 FAIL → PASS move land in the
+    next commit; the kind string is now defined so the gate can name it.
+    The follow-up commit fills the `<SHA>` placeholder.
 
 ---
 

@@ -2269,7 +2269,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     states. The code gate and the row 18 FAIL → PASS move land in the
     next commit; the kind string is now defined so the gate can name it.
     The follow-up commit fills the `<SHA>` placeholder.
-  - Row 18 code gate at `<SHA>`: `CRITICAL_KINDS` (five strings) and the
+  - Row 18 code gate at `53492af`: `CRITICAL_KINDS` (five strings) and the
     admission gates in `BftDriver::propose` and
     `BftDriver::on_preprepare` in `quip-net/src/bft_driver.rs`. The
     ring-size test is `self.membership.len() < WITNESS_COUNT`; the

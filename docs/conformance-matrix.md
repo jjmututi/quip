@@ -777,7 +777,7 @@ enough and the edit has not landed."
   `BftViewChange` work is unaffected. The fifth kind
   (`"trusted_cid_registration"`) and the identity between the two draft
   lists landed at `84fa21b`.
-- **History.** FAIL at HEAD until `<SHA>`; PASS at `<SHA>` (code gate at
+- **History.** FAIL at HEAD until `53492af`; PASS at `53492af` (code gate at
   propose and on_preprepare; Class A and Class B tests pass; the draft
   lists reconciled at 84fa21b).
 - **Closure test.** `critical_operation_refused_in_degraded_mode` (all

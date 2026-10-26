@@ -24,7 +24,7 @@
         <email>jjmututicloud@gmail.com</email>
       </address>
     </author>
-    <date year="2026" month="September" day="25"/>
+    <date year="2026" month="October" day="26"/>
     
     <abstract>
       <t>QUIP defines a brokerless federation protocol for peer-to-peer 
@@ -1368,7 +1368,9 @@ bft_view_change = [
   ring_id: bytes .size 32,
   new_view: uint,
   last_sequence: uint,
-  prepared_digests: [* bytes .size 32],
+  prepared_messages: [* bytes],       ; Full encoded bft_preprepare messages
+                                      ; for operations the witness prepared
+                                      ; in previous views
   checkpoint_digest: bytes .size 32,  ; The checkpoint's state_digest (chain digest)
   witness_sig: bytes .size 64
 ]
@@ -1426,7 +1428,20 @@ FrostRingSig = {
 
           <t><strong>Pre-prepare digest semantics:</strong> For a <tt>bft_preprepare</tt> message, <tt>digest</tt> is <tt>SHA-256(ring_id || view || sequence || QUIP-CBOR-encode(operation))</tt>, where <tt>ring_id</tt> is the 32-byte ring identifier, <tt>view</tt> and <tt>sequence</tt> are encoded as 8-byte big-endian unsigned integers, and <tt>||</tt> denotes byte concatenation. Witnesses <bcp14>MUST</bcp14> recompute this digest from the received fields and reject the message with E_BFT_FAILURE (error code 0x0B) if it does not match.</t>
 
-          <t><strong>New-view prepared messages:</strong> Each entry in <tt>prepared_messages</tt> is a complete <tt>bft_preprepare</tt> message as it would appear on the wire, including the primary's signature. It is not a digest. The new primary re-proposes these messages, and witnesses re-verify the primary's signature.</t>
+          <t><strong>Prepared messages in the view change and the new
+          view:</strong> Each entry in <tt>prepared_messages</tt> is a
+          complete <tt>bft_preprepare</tt> message as it would appear on the
+          wire, including the primary's signature. It is not a digest.
+          The same form is carried in the <tt>bft_view_change</tt>'s
+          <tt>prepared_messages</tt> field: a witness that has prepared an
+          operation contributes the <tt>bft_preprepare</tt> it received, and
+          the new primary assembles the <tt>bft_new_view</tt>'s
+          <tt>prepared_messages</tt> from the entries the view-change quorum
+          carries. The new primary re-proposes these messages unmodified:
+          each <tt>bft_preprepare</tt> retains the signature of the primary
+          for its own view, and a witness verifies each entry against that
+          primary, not against the new primary. The new primary does not
+          re-sign a prepared message.</t>
 
           <t><strong>State-transfer ring signature:</strong> The
           <tt>ring_signature</tt> of a <tt>bft_state_transfer</tt> is the

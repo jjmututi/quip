@@ -2232,6 +2232,26 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `bft_view_change` is breaking and cross-references the draft
     amendment to `draft-mututi-quip-03.xml:1371` that lands separately.
     The follow-up commit fills the `<SHA>` placeholder.
+  - Draft amendment at `<SHA>`: `draft-mututi-quip-03.xml:1371` changes
+    `bft_view_change.prepared_digests: [* bytes .size 32]` to
+    `prepared_messages: [* bytes]`, matching the code at `5123399`.
+    Draft 1429's "New-view prepared messages" paragraph is reworked to
+    "Prepared messages in the view change and the new view:" and gains
+    three sentences: `bft_view_change.prepared_messages` carries the
+    same form; the new primary assembles the new-view's entries from the
+    vote entries; the new primary re-proposes unmodified and each entry
+    verifies against the primary for its own view, not the new primary.
+    The `<date>` element bumps to the amendment date. Draft 1513–1518
+    ("The view change includes quorum certificates for prepared messages
+    and the latest stable checkpoint") is unchanged and is flagged for
+    the -04 revision, where the phrase "quorum certificates for prepared
+    messages" needs reconciling with the wire form: under the amendment,
+    the vote's `prepared_messages` carries preprepares signed by each
+    witness's original primary, not by the witnesses themselves, so
+    "quorum certificates for prepared messages" describes what the view
+    change achieves, not what any one message carries. The wire change is
+    breaking to draft-03's `bft_view_change`. The follow-up commit fills
+    the `<SHA>` placeholder.
 
 ---
 

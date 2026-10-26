@@ -796,7 +796,7 @@ enough and the edit has not landed."
 - **Depends on.** row 8 and the item 1 chain-digest work (`1e45f18`,
   `476b42e`).
 - **History.** UNTESTED at `3a460f2` (design note lands; code follows),
-  PASS at `<SHA>` (code commit; Class A test passes).
+  PASS at `5123399` (code commit; Class A test passes).
 - **Closure test.** `view_change_carries_prepared_operations`
 
 ### 20. §5.3.4 — checkpoint carry-forward in a new view — PASS
@@ -834,7 +834,7 @@ enough and the edit has not landed."
 - **Depends on.** row 8, row 14, and the item 1 chain-digest work
   (`1e45f18`, `476b42e`).
 - **History.** UNTESTED at `3a460f2` (design note lands; code follows),
-  PASS at `<SHA>` (code commit; Class B test passes).
+  PASS at `5123399` (code commit; Class B test passes).
 - **Closure test.** `new_view_carries_the_stable_checkpoint`
 
 ## What follows

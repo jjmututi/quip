@@ -2211,7 +2211,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     not have."
     Resolution A was the second instance of that class in this item. The
     follow-up commit fills the `<SHA>` placeholder.
-  - Items 2–3 code commit at `<SHA>`. `BftViewChange.prepared_digests:
+  - Items 2–3 code commit at `5123399`. `BftViewChange.prepared_digests:
     Vec<Digest>` becomes `prepared_messages: Vec<Vec<u8>>`; `to_bytes`,
     `from_bytes`, and `signing_payload` switch from `digest_list` /
     `as_bytes_n32` to `bytes_list` / a bytes-list decode. `BftDriver`

@@ -2170,7 +2170,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     the note's test-per-class names are the contract for that commit.
     The draft amendment to reconcile the flat "5" is deferred to its own
     `docs:` commit.
-  - Trap 4 appended to `docs/bft-items-2-3-design.md` at `<SHA>`. The
+  - Trap 4 appended to `docs/bft-items-2-3-design.md` at `c6366f1`. The
     trap is the view-change vote's wire form
     (`bft_view_change.prepared_digests`, draft 1371) against the
     new-view's required form (`bft_new_view.prepared_messages`, draft

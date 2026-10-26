@@ -2192,6 +2192,25 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     sentence to match the four-trap body, and added the one-sentence
     reasoning for the name. The follow-up commit fills the `<SHA>`
     placeholder.
+  - Resolution A1 recorded in `docs/bft-items-2-3-design.md` at `<SHA>`:
+    Resolution A's wire form needs a preprepare the current driver does
+    not retain. `InFlight` keeps `operation`, `digest`, and vote maps
+    (`quip-net/src/bft_driver.rs:417–423`); `on_preprepare` verifies the
+    received preprepare and drops the wire message
+    (`quip-net/src/bft_driver.rs:729–735`). A1 adds
+    `last_preprepare: Option<BftPreprepare>` on `BftDriver`, set in
+    `on_preprepare` and cleared in `apply_current`, read by
+    `start_view_change` to fill `prepared_messages`. A witness that never
+    reached `PrePrepared` contributes nothing — it had nothing to carry.
+    The only loss class under A1 is an evicted preprepare, which A1's
+    single-slot retention bounds to the in-flight round. The pattern to
+    note for a future reader: the item-1 note distinguished "items that
+    implement draft clauses" from "items that are the note's own
+    decisions" but did not name the third class —
+    "items where the note must name a retained field the current code does
+    not have."
+    Resolution A was the second instance of that class in this item. The
+    follow-up commit fills the `<SHA>` placeholder.
 
 ---
 

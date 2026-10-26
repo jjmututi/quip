@@ -116,9 +116,9 @@ carrying full encoded `bft_preprepare` messages, matching
 becomes the certificate the draft at 1516 calls for, the new primary
 reassembles `prepared_messages` by concatenating what the votes already
 carry (each entry verified as a `BftPreprepare` against the new primary's
-signature per draft 1429), no reconstruction is needed, no witness needs
-state transfer to catch up on prepared operations, and the draft's three
-statements compose. The wire weight is bounded by `CHECKPOINT_INTERVAL =
+signature per draft 1429), no reconstruction is needed, and the draft's
+three statements compose. The wire weight is bounded by
+`CHECKPOINT_INTERVAL =
 100` (`quip-core/src/constants.rs:99`): anything older than the last
 stable checkpoint is covered by `checkpoint_messages` and
 `checkpoint_digest`, so a witness's prepared set at view change is at
@@ -140,6 +140,38 @@ The renamed field is `prepared_messages`, matching
 `bft_preprepare` messages, per draft 1382–1383 and 1429. The alternative
 name `prepared_preprepares` was considered and rejected because it puts a
 different name on the same wire bytes.
+
+**What Resolution A needs in the driver that the current code does not
+have.** The witness that votes is not the old primary. The full encoded
+`bft_preprepare` a Resolution A vote carries is signed by the old
+primary, not by the voter: draft 1429 requires it "as it would appear on
+the wire, including the primary's signature." The current driver does
+not retain that message. `InFlight` holds `operation`, `digest`, and the
+three vote maps (`quip-net/src/bft_driver.rs:417–423`); `on_preprepare`
+verifies the received preprepare and then constructs an `InFlight` from
+the operation and digest, dropping the wire message
+(`quip-net/src/bft_driver.rs:729–735`). A witness that prepared therefore
+has the operation and digest to vote on, and not the preprepare to
+contribute. Resolution A's wire form requires what the current shape does
+not keep.
+
+Resolution A1 adds one field: `last_preprepare: Option<BftPreprepare>` on
+`BftDriver`, set in `on_preprepare` after `verify_full` succeeds and the
+preprepare is accepted into the round, cleared in `apply_current`
+alongside the `current` reset. `start_view_change` reads
+`last_preprepare` after the in-flight round's digest is captured and
+before `self.current` is cleared, and fills `prepared_messages` with the
+single entry — the
+encoded preprepare the old primary signed. A primary that is starting its
+own view change contributes a preprepare it built and signed itself,
+which it still holds. A witness that never reached `PrePrepared`
+contributes nothing, and that is not a loss: it had no prepared operation
+to carry. The only per-witness loss case under A1 is a preprepare that
+was evicted by a later preprepare the driver never committed; A1's
+single-slot retention bounds that to the in-flight round, which is one.
+This is the version of Resolution A that satisfies draft 1516–1517's
+"prepared across view changes" guarantee without the loss class
+Resolution B carries.
 
 
 ## What it depends on
@@ -177,8 +209,12 @@ different name on the same wire bytes.
   `prepared_messages: Vec<Vec<u8>>`; its `to_bytes`, `from_bytes`, and
   `signing_payload` (`quip-net/src/bft.rs:471–526`) each change from
   `digest_list` to `bytes_list` and from `as_bytes_n32` to a bytes-list
-  decode; and the three tests named in the Resolution paragraph change
-  with it. None of these change in this commit.
+  decode; the three tests named in the Resolution paragraph change with
+  it; and `BftDriver` (`quip-net/src/bft_driver.rs`) gains a
+  `last_preprepare: Option<BftPreprepare>` field, populated in
+  `on_preprepare` and cleared in `apply_current`, with
+  `start_view_change` reading it to fill `prepared_messages`. None of
+  these change in this commit.
 
 ## What it defers
 

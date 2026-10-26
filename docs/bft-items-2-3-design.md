@@ -5,12 +5,14 @@ contract. It records what items 2 and 3 must do, the three sites where
 the code does not yet do it, and one ambiguity in the draft that the
 note names but does not resolve.
 
-**What this note implements, and what it decides.** Two of the three
+**What this note implements, and what it decides.** Two of the four
 trap entries below are code traps (draft clause clear, code does not
 satisfy). The third is a draft trap (the same section states two rules
-that a four-member ring cannot both satisfy). The note records the trap
-kinds so a later reader can tell what the code commit fixes from what a
-draft amendment fixes.
+that a four-member ring cannot both satisfy), and the fourth is a
+draft-and-reference trap (a requirement the same section's own wire
+form makes unreachable). The note records the trap kinds so a later
+reader can tell what the code commit fixes from what a draft amendment
+fixes.
 
 ## What it lands
 
@@ -98,6 +100,38 @@ four-member ring. The `quip-net/src/bft.rs:731–732` doc comment on
 site; this note records the divergence, the code commit corrects the doc
 comment, and the draft amendment is deferred.
 
+**Resolution of Trap 4 — the vote carries full preprepares.** Chosen over
+the state-transfer-assisted alternative (Resolution B, which keeps
+`prepared_digests` as digests and recovers the rest via state transfer,
+at the cost of a permanent loss class: a prepared-but-not-committed
+operation whose digest the new primary cannot reconstruct is lost across
+the view change, weakening draft 1516–1517's "prepared across view
+changes" guarantee). Under Resolution A, `bft_view_change`'s
+`prepared_digests` field changes from `[* bytes .size 32]` to `[* bytes]`
+carrying full encoded `bft_preprepare` messages, matching
+`bft_new_view.prepared_messages`' already-existing wire form. The vote
+becomes the certificate the draft at 1516 calls for, the new primary
+reassembles `prepared_messages` by concatenating what the votes already
+carry (each entry verified as a `BftPreprepare` against the new primary's
+signature per draft 1429), no reconstruction is needed, no witness needs
+state transfer to catch up on prepared operations, and the draft's three
+statements compose. The wire weight is bounded by `CHECKPOINT_INTERVAL =
+100` (`quip-core/src/constants.rs:99`): anything older than the last
+stable checkpoint is covered by `checkpoint_messages` and
+`checkpoint_digest`, so a witness's prepared set at view change is at
+most 100 operations per witness, 700 in the worst case for a
+seven-member ring, well within a view-change message budget. The wire
+change is breaking: every construction of `BftViewChange` in the tree
+(`quip-net/src/bft.rs:1263` `view_change_roundtrip`,
+`quip-net/src/bft.rs:1277` `view_change_empty_prepared_roundtrips`,
+`quip-net/src/bft_driver.rs:2662` `stale_view_change_vote_is_ignored`)
+constructs `prepared_digests: Vec<...>` and changes to
+`prepared_preprepares: Vec<Vec<u8>>` under Resolution A. The draft
+amendment is a one-line CDDL change at `draft-mututi-quip-03.xml` line
+1371 plus a prose confirmation at 1429, and lands as its own `docs:`
+commit; the code change lands as the items 2–3 code commit. Neither this
+note nor the code commit edits the draft.
+
 
 ## What it depends on
 
@@ -129,6 +163,13 @@ comment, and the draft amendment is deferred.
   `quip-core/src/constants.rs:77`; `VIEW_CHANGE_QUORUM = 5` at
   `quip-core/src/constants.rs:96`. The driver uses `membership.quorum()`
   rather than either constant, so one rule serves both ring sizes.
+- **The Resolution A wire form's downstream effect.**
+  `BftViewChange.prepared_digests` (`quip-net/src/bft.rs:464`) becomes
+  `prepared_preprepares: Vec<Vec<u8>>`; its `to_bytes`, `from_bytes`, and
+  `signing_payload` (`quip-net/src/bft.rs:471–526`) each change from
+  `digest_list` to `bytes_list` and from `as_bytes_n32` to a bytes-list
+  decode; and the three tests named in the Resolution paragraph change
+  with it. None of these change in this commit.
 
 ## What it defers
 
@@ -140,10 +181,21 @@ comment, and the draft amendment is deferred.
   with the general `n - f` rule at line 1447.** That is a draft commit,
   not a code commit, and it lands separately.
 - **Application state serialization.** Unchanged; §5.3.4.1's SHOULD.
+- **The Trap 4 draft amendment.** `draft-mututi-quip-03.xml` line 1371's
+  `prepared_digests: [* bytes .size 32]` → `[* bytes]`, plus the
+  confirming prose at 1429 that the field carries full encoded
+  `bft_preprepare` messages, not digests. The wire-format change is a
+  breaking change to draft-03's `bft_view_change`; the CHANGELOG will
+  record it under the amendment's own entry, not this note's. The code
+  change to match (`BftViewChange` field type and encoding, the three
+  test fixtures, `start_view_change`'s digest capture,
+  `maybe_emit_new_view`'s assembly, `on_new_view`'s per-entry
+  verification) is the items 2–3 code commit, which follows this note
+  and its resolution.
 
 ## The trap inventory (BFT-A items 2 and 3)
 
-The item 1 note named no traps; this one names three.
+The item 1 note named no traps; this one names four.
 
 **Trap 1 — code trap.** Draft line 1429 requires the `bft_new_view`'s
 `prepared_messages` to contain complete `bft_preprepare` messages.
@@ -171,6 +223,39 @@ the general `n - f` rule produces a state (a 3-of-4 transfer) that a
 specific rule later in the same section calls wrong. This is a draft
 trap, not a code trap: the code follows the general rule, and the draft
 is what must be corrected.
+
+**Trap 4 — draft trap and reference trap.** The `bft_view_change`
+carries `prepared_digests: [* bytes .size 32]` (draft 1371): 32-byte
+digests. The `bft_new_view` carries `prepared_messages: [* bytes]`
+(draft 1382–1383): full encoded `bft_preprepare` messages, per draft
+1429's "complete `bft_preprepare` message as it would appear on the
+wire, including the primary's signature. It is not a digest." The new
+primary is the party who builds the `bft_new_view` from the view-change
+votes it has collected, and the votes carry digests. The new primary
+cannot produce a preprepare from a digest: the operation is not in the
+digest, and no field in `bft_view_change` carries it. Draft 1429
+requires a state that the draft's own wire form makes unreachable for a
+new primary that did not itself prepare the operation.
+
+This is the fourth trap kind twice over. It is a draft trap because the
+same section states a requirement (draft 1429) that a correct
+implementation of the wire form the same section defines (draft 1371)
+cannot meet. It is also a reference trap in the current code:
+`BftViewChange.prepared_digests` (`quip-net/src/bft.rs:464`) is written
+by no producer that fills it with values a new primary can reconstruct,
+and read by no consumer that turns the digests into messages —
+`start_view_change` sets `self.current = None` before it could copy
+anything into the field (`quip-net/src/bft_driver.rs:997–1003`), and
+`maybe_emit_new_view` (`quip-net/src/bft_driver.rs:1130`) writes
+`prepared_messages: Vec::new()` unconditionally
+(`quip-net/src/bft_driver.rs:1153`).
+
+The draft's three statements do not compose: the vote carries digests,
+the new view carries full messages, and the new primary reassembles them
+from the votes. Item 1's note named no such trap. This note names it as
+Trap 4, records the resolution below, and defers the draft amendment to
+its own `docs:` commit.
+
 
 
 ## The test that proves it

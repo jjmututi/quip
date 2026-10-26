@@ -2170,6 +2170,19 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     the note's test-per-class names are the contract for that commit.
     The draft amendment to reconcile the flat "5" is deferred to its own
     `docs:` commit.
+  - Trap 4 appended to `docs/bft-items-2-3-design.md` at `<SHA>`. The
+    trap is the view-change vote's wire form
+    (`bft_view_change.prepared_digests`, draft 1371) against the
+    new-view's required form (`bft_new_view.prepared_messages`, draft
+    1382–1383, per draft 1429's "complete bft_preprepare message … It is
+    not a digest"). The new primary cannot reassemble a preprepare from a
+    32-byte digest, and no field in `bft_view_change` carries the
+    operation. Resolution A is recorded: the vote carries full
+    preprepares (`prepared_digests` becomes `[* bytes]`); the draft
+    amendment at `draft-mututi-quip-03.xml:1371` and the code change to
+    `BftViewChange` land as their own commits. The wire-format change is
+    breaking and is recorded for the draft amendment's entry, not this
+    one.
 
 ---
 

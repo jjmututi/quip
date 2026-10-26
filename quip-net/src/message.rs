@@ -1177,7 +1177,7 @@ mod tests {
                 ring_id: [1; 32],
                 new_view: 1,
                 last_sequence: 0,
-                prepared_digests: vec![],
+                prepared_messages: vec![],
                 checkpoint_digest: [0; 32],
                 witness_sig: [0xcd; 64],
             }),

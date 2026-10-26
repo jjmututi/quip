@@ -460,8 +460,13 @@ pub struct BftViewChange {
     pub new_view: u64,
     /// Last sequence number the witness has seen.
     pub last_sequence: u64,
-    /// Digests of operations the witness has prepared.
-    pub prepared_digests: Vec<Digest>,
+    /// Full encoded `bft_preprepare` messages for operations the
+    /// witness has received and prepared, per draft 1429 and
+    /// Resolution A of `docs/bft-items-2-3-design.md`. Each entry is
+    /// a `bft_preprepare` as it appeared on the wire, including the
+    /// original primary's signature; a receiver verifies each entry
+    /// against the primary for the entry's own view.
+    pub prepared_messages: Vec<Vec<u8>>,
     /// The witness's latest stable checkpoint digest.
     pub checkpoint_digest: Digest,
     /// Ed25519 signature by the voting witness.
@@ -477,7 +482,7 @@ impl BftViewChange {
                 CborValue::Bytes(self.ring_id.to_vec()),
                 CborValue::Int(self.new_view as i128),
                 CborValue::Int(self.last_sequence as i128),
-                CborValue::Array(digest_list(&self.prepared_digests)),
+                CborValue::Array(bytes_list(&self.prepared_messages)),
                 CborValue::Bytes(self.checkpoint_digest.to_vec()),
                 CborValue::Bytes(self.witness_sig.to_vec()),
             ],
@@ -495,15 +500,12 @@ impl BftViewChange {
         if f.len() != 6 {
             return Err(Error::BadFrame("bft_view_change arity"));
         }
-        let mut prepared_digests = Vec::new();
-        for item in as_array(&f[3])? {
-            prepared_digests.push(as_bytes_n32(item)?);
-        }
+        let prepared_messages = bytes_list_from(&f[3])?;
         Ok(Self {
             ring_id: as_bytes_n32(&f[0])?,
             new_view: as_u64(&f[1])?,
             last_sequence: as_u64(&f[2])?,
-            prepared_digests,
+            prepared_messages,
             checkpoint_digest: as_bytes_n32(&f[4])?,
             witness_sig: as_bytes_n64(&f[5])?,
         })
@@ -517,7 +519,7 @@ impl BftViewChange {
                 CborValue::Bytes(self.ring_id.to_vec()),
                 CborValue::Int(self.new_view as i128),
                 CborValue::Int(self.last_sequence as i128),
-                CborValue::Array(digest_list(&self.prepared_digests)),
+                CborValue::Array(bytes_list(&self.prepared_messages)),
                 CborValue::Bytes(self.checkpoint_digest.to_vec()),
             ],
         );
@@ -728,8 +730,18 @@ pub struct BftStateTransfer {
     pub state_hash: Digest,
     /// A ring signature over the transfer.
     ///
-    /// MUST be a valid `RingSignature` with at least
-    /// `VIEW_CHANGE_QUORUM` (5) signers.
+    /// MUST be a valid `RingSignature` with at least `n - f` signers,
+    /// where `n` is the ring size and `f = (n - 1) / 3` — five for a
+    /// seven-member ring, three for a four-member DEGRADED ring. The
+    /// code enforces this via `RingMembership::quorum()` in
+    /// `verify_checkpoint_ring_sig`, not via the `VIEW_CHANGE_QUORUM`
+    /// constant. Draft 1457–1462 states a flat "5" with no degraded
+    /// alternative; that sentence and the general `n - f` rule at
+    /// draft 1447, together with `DEGRADED_QUORUM = 3` at
+    /// `quip-core/src/constants.rs:77`, do not compose for a
+    /// four-member ring. The code follows the general rule; the draft
+    /// amendment is deferred to its own `docs:` commit and is recorded
+    /// under Trap 3 in `docs/bft-items-2-3-design.md`.
     pub ring_signature: RingSignature,
 }
 
@@ -820,14 +832,6 @@ fn as_bytes_n64(v: &CborValue) -> Result<[u8; 64]> {
     let mut out = [0u8; 64];
     out.copy_from_slice(&b);
     Ok(out)
-}
-
-/// Encode a list of 32-byte digests as a CBOR array.
-fn digest_list(digests: &[Digest]) -> Vec<CborValue> {
-    digests
-        .iter()
-        .map(|d| CborValue::Bytes(d.to_vec()))
-        .collect()
 }
 
 /// Encode a list of byte strings as a CBOR array.
@@ -1265,7 +1269,7 @@ mod tests {
             ring_id: rid(1),
             new_view: 4,
             last_sequence: 100,
-            prepared_digests: vec![[0x11; 32], [0x22; 32]],
+            prepared_messages: vec![vec![0x11; 10], vec![0x22; 20]],
             checkpoint_digest: [0x33; 32],
             witness_sig: [0x44; 64],
         };
@@ -1279,7 +1283,7 @@ mod tests {
             ring_id: rid(1),
             new_view: 1,
             last_sequence: 0,
-            prepared_digests: vec![],
+            prepared_messages: vec![],
             checkpoint_digest: [0; 32],
             witness_sig: [0; 64],
         };

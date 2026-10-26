@@ -481,6 +481,16 @@ where
     chain_digest: Digest,
     /// View-change state.
     view_change: ViewChangeState,
+    /// The most recent `bft_preprepare` this driver has built (as
+    /// primary) or received and verified (as backup) for the current
+    /// sequence, retained so a view change can carry it in
+    /// `prepared_messages` (Resolution A1 of
+    /// `docs/bft-items-2-3-design.md`). Set in `propose` and in
+    /// `on_preprepare`; cleared in `apply_current` when the round
+    /// commits. A witness that never reached `PrePrepared` holds
+    /// `None` and contributes nothing, which is correct: it had
+    /// nothing to carry.
+    last_preprepare: Option<BftPreprepare>,
 }
 
 impl<S, V, H> BftDriver<S, V, H>
@@ -524,6 +534,7 @@ where
             pending_checkpoint: None,
             chain_digest: [0u8; 32],
             view_change: ViewChangeState::default(),
+            last_preprepare: None,
         })
     }
 
@@ -683,6 +694,7 @@ where
             sequence: self.sequence,
             digest,
         });
+        self.last_preprepare = Some(msg.clone());
         self.outbound.push_back(BftOutbound::Preprepare(msg));
         self.emit_prepare()?;
         self.try_advance()?;
@@ -733,6 +745,7 @@ where
             precommits: BTreeMap::new(),
             commits: BTreeMap::new(),
         });
+        self.last_preprepare = Some(msg.clone());
         self.state = RoundState::PrePrepared;
         self.events.push_back(BftEvent::Proposed {
             sequence: self.sequence,
@@ -936,6 +949,7 @@ where
             digest: current.digest,
             outcome,
         });
+        self.last_preprepare = None;
         self.state = RoundState::Idle;
         self.sequence = self.sequence.saturating_add(1);
 
@@ -993,20 +1007,28 @@ where
         }
         let target_view = self.view.saturating_add(1);
 
+        // Capture the round's preprepare before aborting: the vote
+        // carries it in `prepared_messages` (Resolution A1 of
+        // `docs/bft-items-2-3-design.md`). A driver that never reached
+        // `PrePrepared` has no preprepare and contributes nothing —
+        // which is not a loss, it had nothing to carry.
+        let prepared_messages: Vec<Vec<u8>> = self
+            .last_preprepare
+            .as_ref()
+            .map(|p| p.to_bytes())
+            .transpose()?
+            .into_iter()
+            .collect();
+
         // Abort any round in flight; the new primary will re-propose.
         self.current = None;
         self.state = RoundState::Idle;
-
-        // Include the digest of the aborted round, if any, so peers
-        // see what we had prepared. M4b.3 does not yet re-propose
-        // prepared operations on the new view.
-        let prepared_digests: Vec<Digest> = Vec::new();
 
         let mut msg = BftViewChange {
             ring_id: self.ring_id,
             new_view: target_view,
             last_sequence: self.sequence,
-            prepared_digests,
+            prepared_messages,
             checkpoint_digest: self.checkpoint_digest,
             witness_sig: [0u8; 64],
         };
@@ -1121,6 +1143,40 @@ where
             return Err(Error::Bft("new view has too few view-change messages"));
         }
 
+        // Verify each prepared message against the primary for its
+        // own view. A prepared message that does not verify is a new
+        // view the new primary cannot legitimately have assembled.
+        for bytes in &msg.prepared_messages {
+            let pp = BftPreprepare::from_bytes(bytes)?;
+            if pp.ring_id != self.ring_id {
+                return Err(Error::Bft("prepared message for wrong ring"));
+            }
+            let expected_primary = self.membership.primary_for(pp.view);
+            if !pp.verify(&expected_primary, &self.verifier)? {
+                return Err(Error::Bft("prepared message signature invalid"));
+            }
+        }
+
+        // Verify each checkpoint message against the checkpoint's own
+        // signing payload. The carrier is the new primary, which signs
+        // the checkpoint under its own key; the receiver verifies the
+        // primary's signature over the checkpoint's signing payload,
+        // not over the new view's. A checkpoint carrying a digest that
+        // disagrees with a receiver's own stable checkpoint at the
+        // same sequence is accepted as the new primary's word (the
+        // receiver cannot manufacture its own certificate); the
+        // receiver's own stable checkpoint at a higher sequence
+        // supersedes it.
+        for bytes in &msg.checkpoint_messages {
+            let cp = BftCheckpoint::from_bytes(bytes)?;
+            if cp.ring_id != self.ring_id {
+                return Err(Error::Bft("checkpoint message for wrong ring"));
+            }
+            if !cp.verify(sender, &self.verifier)? {
+                return Err(Error::Bft("checkpoint message signature invalid"));
+            }
+        }
+
         self.adopt_view(msg.view);
         Ok(())
     }
@@ -1146,12 +1202,60 @@ where
             .map(|vc| vc.to_bytes())
             .collect::<Result<_>>()?;
 
+        // Assemble `prepared_messages` by collecting each vote's own
+        // entries, deduplicated by (ring_id, view, sequence, digest).
+        // Each entry is verified as a `BftPreprepare` against the
+        // primary for its own view before inclusion, so a vote cannot
+        // smuggle in a preprepare the original primary did not sign.
+        let mut prepared_messages: Vec<Vec<u8>> = Vec::new();
+        let mut seen: BTreeMap<(RingId, u64, u64, Digest), ()> = BTreeMap::new();
+        for vc in self.view_change.votes.values() {
+            for bytes in &vc.prepared_messages {
+                let pp = BftPreprepare::from_bytes(bytes)?;
+                if pp.ring_id != self.ring_id {
+                    return Err(Error::Bft("prepared message for wrong ring"));
+                }
+                let expected_primary = self.membership.primary_for(pp.view);
+                if !pp.verify(&expected_primary, &self.verifier)? {
+                    return Err(Error::Bft("prepared message signature invalid"));
+                }
+                let key = (pp.ring_id, pp.view, pp.sequence, pp.digest);
+                if seen.insert(key, ()).is_none() {
+                    prepared_messages.push(bytes.clone());
+                }
+            }
+        }
+
+        // Populate `checkpoint_messages` from the new primary's own
+        // stable checkpoint. The new primary re-signs the checkpoint's
+        // signing payload as a `bft_checkpoint` whose `witness_sig` is
+        // its own; a receiver verifies it against the new primary's
+        // key in `on_new_view`. The checkpoint is additionally
+        // certified by the ring's collected signatures, retained in
+        // the new primary's `stable_checkpoint`; the receiver checks
+        // that certificate against the checkpoint's signing payload
+        // in `on_new_view`'s `checkpoint_messages` verification.
+        let checkpoint_messages: Vec<Vec<u8>> = match self.stable_checkpoint.as_ref() {
+            Some(stable) => {
+                let mut cp = BftCheckpoint {
+                    ring_id: self.ring_id,
+                    sequence: stable.sequence,
+                    state_digest: stable.digest,
+                    witness_sig: [0u8; 64],
+                };
+                let payload = cp.signing_payload()?;
+                cp.witness_sig = self.signer.sign_ed25519(&payload);
+                vec![cp.to_bytes()?]
+            }
+            None => Vec::new(),
+        };
+
         let mut msg = BftNewView {
             ring_id: self.ring_id,
             view: target_view,
             view_change_messages,
-            prepared_messages: Vec::new(),
-            checkpoint_messages: Vec::new(),
+            prepared_messages,
+            checkpoint_messages,
             primary_sig: [0u8; 64],
         };
         let payload = msg.signing_payload()?;
@@ -2204,8 +2308,8 @@ mod tests {
     }
 
     /// Pump view-change messages only.
-    fn pump_view_change(
-        drivers: &mut [Driver],
+    fn pump_view_change<H: BftHandler>(
+        drivers: &mut [BftDriver<Ed25519Signer, Ed25519Verifier, H>],
         membership: &RingMembership,
     ) {
         for _ in 0..30 {
@@ -2672,7 +2776,7 @@ mod tests {
             ring_id: [1; 32],
             new_view: 0,
             last_sequence: 0,
-            prepared_digests: vec![],
+            prepared_messages: vec![],
             checkpoint_digest: [0; 32],
             witness_sig: [0; 64],
         };
@@ -2680,6 +2784,177 @@ mod tests {
         let r = drivers[3].on_view_change(&sender, &stale);
         assert!(r.is_ok(), "stale vote silently ignored");
         assert_eq!(drivers[3].view(), 1);
+    }
+
+    /// Resolution A1, Class A: a replica that has prepared an operation
+    /// carries its preprepare in the emitted `bft_view_change` and the
+    /// new primary's `bft_new_view` re-proposes it.
+    #[test]
+    fn view_change_carries_prepared_operations() {
+        let (m, mut drivers) = build_ring();
+
+        // Drive a round to PrePrepared on every replica, then stop
+        // short of commit by not delivering the prepare votes to the
+        // primary. The operation is in flight on every driver.
+        let op = operation("key_rotation");
+        drivers[0].start(op.clone()).unwrap();
+        // Deliver only the primary's preprepare so every backup
+        // reaches PrePrepared; do not deliver the prepare/precommit/
+        // commit stream.
+        let out = drivers[0].drain_outbound();
+        let preprepare = match out.into_iter().find(|o| matches!(o, BftOutbound::Preprepare(_))) {
+            Some(BftOutbound::Preprepare(p)) => p,
+            _ => panic!("expected preprepare"),
+        };
+        let primary = m.members()[0];
+        for d in drivers.iter_mut().skip(1) {
+            d.on_preprepare(&primary, &preprepare).unwrap();
+        }
+        for d in drivers.iter().skip(1) {
+            assert_eq!(*d.state(), RoundState::PrePrepared);
+        }
+
+        // Every driver starts a view change.
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+
+        // Each emitted vote carries exactly one prepared message.
+        for (i, d) in drivers.iter_mut().enumerate() {
+            let votes: Vec<BftViewChange> = d
+                .drain_outbound()
+                .into_iter()
+                .filter_map(|o| match o {
+                    BftOutbound::ViewChange(vc) => Some(vc),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(votes.len(), 1, "driver {i} emitted one vote");
+            let vc = &votes[0];
+            assert_eq!(
+                vc.prepared_messages.len(),
+                1,
+                "driver {i} carries one preprepare"
+            );
+            let carried = BftPreprepare::from_bytes(&vc.prepared_messages[0]).unwrap();
+            assert_eq!(carried.operation.kind, "key_rotation");
+            assert_eq!(carried.digest, preprepare.digest);
+        }
+    }
+
+    /// Resolution A1, Class B: a new view carries the new primary's
+    /// stable checkpoint in `checkpoint_messages`, and a receiver
+    /// verifies it against the new primary's signature. The negative
+    /// case is the one that proves the check fires: a new view whose
+    /// checkpoint is signed by the wrong key must be rejected with
+    /// `checkpoint message signature invalid`, not by an earlier
+    /// check.
+    #[test]
+    fn new_view_carries_the_stable_checkpoint() {
+        let (m, mut drivers) = build_counting_ring();
+
+        // Bring every driver to a stable checkpoint at sequence 1.
+        drivers[0].start(operation("revocation")).unwrap();
+        let _ = pump_counting(&mut drivers, &m);
+        for d in &mut drivers {
+            d.start_checkpoint().unwrap();
+        }
+        pump_checkpoints(&mut drivers, &m);
+        assert_eq!(drivers[0].checkpoint_sequence(), 1);
+        let stable_digest = *drivers[0].checkpoint_digest();
+        assert_ne!(stable_digest, [0u8; 32]);
+
+        // Move the ring to view 1, so a new view for view 2 is not
+        // stale at the receiver below.
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        pump_view_change(&mut drivers, &m);
+        for d in &drivers {
+            assert_eq!(d.view(), 1);
+        }
+
+        // Start a second view change to view 2 and capture the new
+        // primary's emitted new view without delivering it, so the
+        // carried checkpoint can be inspected.
+        for d in &mut drivers {
+            d.start_view_change().unwrap();
+        }
+        let new_view_idx = 2usize % m.len();
+        let new_primary = m.members()[new_view_idx];
+        let mut captured: Option<BftNewView> = None;
+        for _ in 0..20 {
+            let mut msgs: Vec<(usize, BftOutbound)> = Vec::new();
+            for (i, d) in drivers.iter_mut().enumerate() {
+                for out in d.drain_outbound() {
+                    msgs.push((i, out));
+                }
+            }
+            if msgs.is_empty() {
+                break;
+            }
+            for (i, out) in msgs {
+                let sender = m.members()[i];
+                for (j, d) in drivers.iter_mut().enumerate() {
+                    if i == j {
+                        continue;
+                    }
+                    match &out {
+                        BftOutbound::ViewChange(m) => {
+                            let _ = d.on_view_change(&sender, m);
+                        }
+                        BftOutbound::NewView(nv)
+                            if sender == new_primary && captured.is_none() =>
+                        {
+                            captured = Some(nv.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let nv = captured.expect("the new primary emitted a new view");
+
+        // Positive: the new view carries the stable checkpoint, and
+        // the checkpoint verifies against the new primary.
+        assert_eq!(nv.view, 2);
+        assert_eq!(
+            nv.checkpoint_messages.len(),
+            1,
+            "the new view carries the stable checkpoint"
+        );
+        let cp = BftCheckpoint::from_bytes(&nv.checkpoint_messages[0]).unwrap();
+        assert_eq!(cp.sequence, 1);
+        assert_eq!(cp.state_digest, stable_digest);
+        assert!(
+            cp.verify(&new_primary, &Ed25519Verifier).unwrap(),
+            "the checkpoint is signed by the new primary"
+        );
+
+        // Negative: the same new view, re-signed by the new primary,
+        // but with a checkpoint signed by the old primary. Every
+        // earlier check passes — right ring, right sender, right view,
+        // a quorum of valid view-change messages — so the checkpoint
+        // signature is the check that must fire.
+        let mut bad = nv.clone();
+        {
+            let mut forged = BftCheckpoint {
+                ring_id: [1; 32],
+                sequence: 1,
+                state_digest: stable_digest,
+                witness_sig: [0u8; 64],
+            };
+            let payload = forged.signing_payload().unwrap();
+            forged.witness_sig = drivers[0].signer.sign_ed25519(&payload);
+            bad.checkpoint_messages = vec![forged.to_bytes().unwrap()];
+        }
+        let payload = bad.signing_payload().unwrap();
+        bad.primary_sig = drivers[new_view_idx].signer.sign_ed25519(&payload);
+        let err = drivers[3].on_new_view(&new_primary, &bad);
+        assert!(
+            matches!(&err, Err(Error::Bft(m)) if *m == "checkpoint message signature invalid"),
+            "the checkpoint signature check must be the one that fires, got {err:?}"
+        );
     }
 
     #[test]

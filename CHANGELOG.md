@@ -2211,6 +2211,27 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     not have."
     Resolution A was the second instance of that class in this item. The
     follow-up commit fills the `<SHA>` placeholder.
+  - Items 2–3 code commit at `<SHA>`. `BftViewChange.prepared_digests:
+    Vec<Digest>` becomes `prepared_messages: Vec<Vec<u8>>`; `to_bytes`,
+    `from_bytes`, and `signing_payload` switch from `digest_list` /
+    `as_bytes_n32` to `bytes_list` / a bytes-list decode. `BftDriver`
+    gains `last_preprepare: Option<BftPreprepare>`, set in `propose` and
+    `on_preprepare`, cleared in `apply_current`, read by
+    `start_view_change` to fill `prepared_messages`.
+    `maybe_emit_new_view` assembles `prepared_messages` from the
+    collected votes (each entry verified as a `BftPreprepare` against
+    the primary for its own view, deduplicated by `(ring_id, view,
+    sequence, digest)`) and populates `checkpoint_messages` from
+    `self.stable_checkpoint`. `on_new_view` verifies each carried
+    `BftPreprepare` and `BftCheckpoint`. The stale flat-five doc comment
+    at `bft.rs:731–732` is corrected to `n - f`, naming draft
+    1457–1462 as the divergent sentence. New tests
+    `view_change_carries_prepared_operations` (row 19, Class A) and
+    `new_view_carries_the_stable_checkpoint` (row 20, Class B). Matrix
+    rows 19 and 20 move UNTESTED → PASS. The wire-format change to
+    `bft_view_change` is breaking and cross-references the draft
+    amendment to `draft-mututi-quip-03.xml:1371` that lands separately.
+    The follow-up commit fills the `<SHA>` placeholder.
 
 ---
 

@@ -158,7 +158,10 @@ not keep.
 Resolution A1 adds one field: `last_preprepare: Option<BftPreprepare>` on
 `BftDriver`, set in `on_preprepare` after `verify_full` succeeds and the
 preprepare is accepted into the round, cleared in `apply_current`
-alongside the `current` reset. `start_view_change` reads
+alongside the `current` reset. The field is also set in `propose` (for
+the primary's own preprepare) so that a primary initiating its own view
+change retains the preprepare it built and signed. `start_view_change`
+reads
 `last_preprepare` after the in-flight round's digest is captured and
 before `self.current` is cleared, and fills `prepared_messages` with the
 single entry — the

@@ -759,7 +759,7 @@ enough and the edit has not landed."
   draft.
 - **Depends on.** row 6 — the quorum that defines "degraded".
 
-### 19. §5.3.4 — prepared messages in a new view — UNTESTED
+### 19. §5.3.4 — prepared messages in a new view — PASS
 
 - **Clause.** "Each entry in `prepared_messages` is a complete
   `bft_preprepare` message as it would appear on the wire, including the
@@ -773,24 +773,33 @@ enough and the edit has not landed."
   `MUST` re-verify each one on receipt.
 - **Source.** `BftDriver::maybe_emit_new_view`
   (`quip-net/src/bft_driver.rs:1130`) populates
-  `bft_new_view.prepared_messages`; `BftDriver::on_new_view`
-  (`quip-net/src/bft_driver.rs:1083`) verifies the carried entries.
-  Neither does today: `bft_driver.rs:1153` is `prepared_messages:
-  Vec::new(),` and `bft_view_change.prepared_digests` is empty at
-  `bft_driver.rs:1003`.
-- **Test.** none yet — the class's test is named in `Closure test`.
-- **Verdict.** **UNTESTED** — the code path exists and sends the empty
-  form; no test exercises a non-empty carry.
+  `bft_new_view.prepared_messages` from each collected vote's
+  `prepared_messages`, verifying each entry as a `BftPreprepare`
+  against the primary for its own view; `BftDriver::on_new_view`
+  (`quip-net/src/bft_driver.rs:1083`) re-verifies each carried entry.
+  `BftDriver::start_view_change` fills the vote's `prepared_messages`
+  from the retained `last_preprepare`.
+- **Test.** `view_change_carries_prepared_operations`
+  (`quip-net/src/bft_driver.rs`).
+- **Verdict.** **PASS** — a replica that prepared an operation carries
+  its preprepare in the emitted `bft_view_change`; the new primary
+  collects the votes' entries and re-proposes them in
+  `prepared_messages`; the receiver re-verifies each against the
+  primary for its own view. `view_change_carries_prepared_operations`
+  drives a round to `PrePrepared` and asserts each vote carries
+  exactly one preprepare whose operation and digest are the in-flight
+  round's.
 - **Specification status.** clear — §5.3.4 states a MUST and names the
   wire form.
 - **Submission impact.** `non-blocking` — a code gap against a clear
   clause.
 - **Depends on.** row 8 and the item 1 chain-digest work (`1e45f18`,
   `476b42e`).
-- **History.** UNTESTED at `3a460f2` (design note lands; code follows).
+- **History.** UNTESTED at `3a460f2` (design note lands; code follows),
+  PASS at `<SHA>` (code commit; Class A test passes).
 - **Closure test.** `view_change_carries_prepared_operations`
 
-### 20. §5.3.4 — checkpoint carry-forward in a new view — UNTESTED
+### 20. §5.3.4 — checkpoint carry-forward in a new view — PASS
 
 - **Clause.** "A `bft_new_view` message MUST contain at least `n - f`
   valid view-change messages." (draft 1452–1453) and "The view change
@@ -802,21 +811,30 @@ enough and the edit has not landed."
   messages.
 - **Source.** `BftDriver::maybe_emit_new_view`
   (`quip-net/src/bft_driver.rs:1130`) populates
-  `bft_new_view.checkpoint_messages`; `BftDriver::on_new_view`
-  (`quip-net/src/bft_driver.rs:1083`) verifies the carried
-  `bft_checkpoint` entries against the ring's signature set.
-  `bft_driver.rs:1154` is `checkpoint_messages: Vec::new(),`;
-  `bft_view_change.checkpoint_digest` is populated at
-  `bft_driver.rs:1010`.
-- **Test.** none yet — the class's test is named in `Closure test`.
-- **Verdict.** **UNTESTED** — the code path exists and sends the empty
-  form; no test exercises a non-empty carry.
+  `bft_new_view.checkpoint_messages` from `self.stable_checkpoint`,
+  re-signing the checkpoint's signing payload under the new primary's
+  own key; `BftDriver::on_new_view`
+  (`quip-net/src/bft_driver.rs:1083`) verifies each carried
+  `bft_checkpoint` against the new primary's signature.
+  `bft_view_change.checkpoint_digest` is populated by
+  `start_view_change`.
+- **Test.** `new_view_carries_the_stable_checkpoint`
+  (`quip-net/src/bft_driver.rs`).
+- **Verdict.** **PASS** — the new view carries the new primary's stable
+  checkpoint in `checkpoint_messages`, and a receiver verifies each
+  carried `bft_checkpoint` against the new primary's signature.
+  `new_view_carries_the_stable_checkpoint` asserts a stable checkpoint
+  at sequence 1 is carried and verifies, and that a new view whose
+  checkpoint is signed by the wrong key is rejected with
+  `checkpoint message signature invalid` — the checkpoint check, not an
+  earlier one.
 - **Specification status.** clear.
 - **Submission impact.** `non-blocking` — a code gap against a clear
   clause.
 - **Depends on.** row 8, row 14, and the item 1 chain-digest work
   (`1e45f18`, `476b42e`).
-- **History.** UNTESTED at `3a460f2` (design note lands; code follows).
+- **History.** UNTESTED at `3a460f2` (design note lands; code follows),
+  PASS at `<SHA>` (code commit; Class B test passes).
 - **Closure test.** `new_view_carries_the_stable_checkpoint`
 
 ## What follows

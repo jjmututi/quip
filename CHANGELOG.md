@@ -2252,7 +2252,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     change achieves, not what any one message carries. The wire change is
     breaking to draft-03's `bft_view_change`. The follow-up commit fills
     the `<SHA>` placeholder.
-  - Draft amendment at `<SHA>`, the fifth critical kind and the two-list
+  - Draft amendment at `84fa21b`, the fifth critical kind and the two-list
     reconciliation (row 18's draft side): draft 1596 gains
     "trusted_cid_registration" as the fifth defined kind and a sentence
     stating the five defined kinds are exactly the kinds whose operations

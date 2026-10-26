@@ -2183,6 +2183,15 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `BftViewChange` land as their own commits. The wire-format change is
     breaking and is recorded for the draft amendment's entry, not this
     one.
+  - Conflict-1 correction to `docs/bft-items-2-3-design.md` at `<SHA>`:
+    the post-Resolution-A field is named `prepared_messages`, not
+    `prepared_preprepares`. The name matches
+    `bft_new_view.prepared_messages`' wire role; the alternative was
+    rejected because it puts two names on the same wire bytes. Also
+    corrected the Status paragraph's "three sites ... one ambiguity"
+    sentence to match the four-trap body, and added the one-sentence
+    reasoning for the name. The follow-up commit fills the `<SHA>`
+    placeholder.
 
 ---
 

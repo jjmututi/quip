@@ -1,9 +1,12 @@
 # BFT-A items 2 and 3 — prepared-operation and checkpoint carry-forward on view change
 
 **Status: design note.** Code lands in a later commit; this note is the
-contract. It records what items 2 and 3 must do, the three sites where
-the code does not yet do it, and one ambiguity in the draft that the
-note names but does not resolve.
+contract. It records what items 2 and 3 must do, the four sites named
+below where the code does not yet do it, and the two draft defects the
+note names but does not resolve — the state-transfer ring-signature rule
+that states a flat "5" against the general `n - f` rule, and the
+view-change vote's digest-only wire form that leaves the new primary
+unable to assemble a preprepare.
 
 **What this note implements, and what it decides.** Two of the four
 trap entries below are code traps (draft clause clear, code does not
@@ -126,11 +129,17 @@ change is breaking: every construction of `BftViewChange` in the tree
 `quip-net/src/bft.rs:1277` `view_change_empty_prepared_roundtrips`,
 `quip-net/src/bft_driver.rs:2662` `stale_view_change_vote_is_ignored`)
 constructs `prepared_digests: Vec<...>` and changes to
-`prepared_preprepares: Vec<Vec<u8>>` under Resolution A. The draft
+`prepared_messages: Vec<Vec<u8>>` under Resolution A. The draft
 amendment is a one-line CDDL change at `draft-mututi-quip-03.xml` line
 1371 plus a prose confirmation at 1429, and lands as its own `docs:`
 commit; the code change lands as the items 2–3 code commit. Neither this
 note nor the code commit edits the draft.
+
+The renamed field is `prepared_messages`, matching
+`bft_new_view.prepared_messages`' wire role — both carry full encoded
+`bft_preprepare` messages, per draft 1382–1383 and 1429. The alternative
+name `prepared_preprepares` was considered and rejected because it puts a
+different name on the same wire bytes.
 
 
 ## What it depends on
@@ -165,7 +174,7 @@ note nor the code commit edits the draft.
   rather than either constant, so one rule serves both ring sizes.
 - **The Resolution A wire form's downstream effect.**
   `BftViewChange.prepared_digests` (`quip-net/src/bft.rs:464`) becomes
-  `prepared_preprepares: Vec<Vec<u8>>`; its `to_bytes`, `from_bytes`, and
+  `prepared_messages: Vec<Vec<u8>>`; its `to_bytes`, `from_bytes`, and
   `signing_payload` (`quip-net/src/bft.rs:471–526`) each change from
   `digest_list` to `bytes_list` and from `as_bytes_n32` to a bytes-list
   decode; and the three tests named in the Resolution paragraph change
@@ -226,7 +235,9 @@ is what must be corrected.
 
 **Trap 4 — draft trap and reference trap.** The `bft_view_change`
 carries `prepared_digests: [* bytes .size 32]` (draft 1371): 32-byte
-digests. The `bft_new_view` carries `prepared_messages: [* bytes]`
+digests. The field is renamed `prepared_messages` by Resolution A; this
+paragraph describes the current state, and the Resolution paragraph below
+records the target. The `bft_new_view` carries `prepared_messages: [* bytes]`
 (draft 1382–1383): full encoded `bft_preprepare` messages, per draft
 1429's "complete `bft_preprepare` message as it would appear on the
 wire, including the primary's signature. It is not a digest." The new

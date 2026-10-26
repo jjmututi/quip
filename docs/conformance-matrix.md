@@ -737,7 +737,7 @@ enough and the edit has not landed."
 - **Depends on.** row 14 — the payload the signature covers is
   `checkpoint_digest`, whose meaning row 14 fixes.
 
-### 18. §5.3.4 — critical operations in degraded mode — FAIL
+### 18. §5.3.4 — critical operations in degraded mode — PASS
 
 - **Clause.** "Critical operations `MUST` be delayed until full consensus
   (5 of 7) is restored. The following operations `MUST NOT` proceed in
@@ -745,19 +745,46 @@ enough and the edit has not landed."
   changes; resource ownership transfers; Trusted CID registrations that
   require witness validation."
 - **Requirement.** `MUST NOT` proceed.
-- **Source.** none. `grep -rn DEGRADED quip-net/src/bft_driver.rs` finds a
-  doc comment and nothing else; the driver accepts any operation kind
-  whenever it has quorum, and does not distinguish a 3-of-4 ring from a
-  full one for operation admission.
-- **Test.** none.
-- **Verdict.** **FAIL** — the gate does not exist. A key rotation can
-  commit with three of four signatures on a degraded ring.
-- **Specification status.** clear — the list of operations and the
-  quorum are both stated.
+- **Source.** `quip-net/src/bft_driver.rs` — `CRITICAL_KINDS` (the five
+  kind strings) and the gates in `BftDriver::propose` (returns
+  `Err(Error::Bft("critical operation in degraded mode"))` before
+  `handler.validate`) and `BftDriver::on_preprepare` (drops the
+  preprepare silently, same pattern as a `validate` failure). The
+  ring-size test is `self.membership.len() < WITNESS_COUNT`.
+- **Test.** `critical_operation_refused_in_degraded_mode` and
+  `backup_refuses_critical_preprepare_in_degraded_mode` (both in
+  `quip-net/src/bft_driver.rs` tests module).
+- **Verdict.** **PASS** — the gate exists at `propose` (a critical kind
+  on a ring smaller than `WITNESS_COUNT` returns `Err` before entering
+  consensus) and at `on_preprepare` (a critical preprepare from a
+  primary on a degraded ring is dropped silently, so a Byzantine primary
+  cannot push it through). The ring-size reading is
+  `|R| < WITNESS_COUNT` per draft 1502, not `quorum() < QUORUM`: a 5- or
+  6-member ring also cannot restore the 5-of-7 full consensus draft 1290
+  requires, so the gate refuses on 4-, 5-, and 6-member rings. The test
+  covers all three plus a 7-member ring where the same five kinds are
+  accepted.
+- **Specification status.** `clear` — the kind names, the operations,
+  and the degraded-mode condition are all stated. **One ambiguity
+  remains** (recorded at `-04` in CHANGELOG item 37): "DEGRADED mode" is
+  defined twice — draft 1290 as 3-of-4, and draft 1502 as
+  `|R| < WITNESS_COUNT` — and this row follows 1502. The code's reading
+  is stated in the Verdict.
 - **Submission impact.** `non-blocking` — a code gap against a clear
   clause, and it belongs with the degraded-ring work rather than the
   draft.
-- **Depends on.** row 6 — the quorum that defines "degraded".
+- **Depends on.** row 6 — the quorum that defines "degraded"; row 19's
+  `BftViewChange` work is unaffected. The fifth kind
+  (`"trusted_cid_registration"`) and the identity between the two draft
+  lists landed at `84fa21b`.
+- **History.** FAIL at HEAD until `<SHA>`; PASS at `<SHA>` (code gate at
+  propose and on_preprepare; Class A and Class B tests pass; the draft
+  lists reconciled at 84fa21b).
+- **Closure test.** `critical_operation_refused_in_degraded_mode` (all
+  five kinds refused on 4-, 5-, 6-member rings; accepted on 7) and
+  `backup_refuses_critical_preprepare_in_degraded_mode` (a hand-built
+  critical preprepare from a Byzantine primary is dropped by a backup on
+  a degraded ring).
 
 ### 19. §5.3.4 — prepared messages in a new view — PASS
 

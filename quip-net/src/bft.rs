@@ -102,6 +102,12 @@ pub const MAX_OPERATION_BYTES: usize = 4 * 1024;
 /// - `"revocation"`
 /// - `"witness_membership_change"`
 /// - `"resource_ownership_transfer"`
+/// - `"trusted_cid_registration"`
+///
+/// The five are exactly the kinds whose operations require mandatory
+/// consensus (draft 1547–1553); a witness on a ring smaller than
+/// `WITNESS_COUNT` refuses them at propose and drops them on the
+/// preprepare path (see `CRITICAL_KINDS` in `crate::bft_driver`).
 ///
 /// Applications MAY define additional kinds. Witnesses MUST NOT interpret
 /// the payload beyond `kind` and `subject`; application-layer conflict

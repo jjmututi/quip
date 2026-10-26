@@ -2269,6 +2269,29 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     states. The code gate and the row 18 FAIL → PASS move land in the
     next commit; the kind string is now defined so the gate can name it.
     The follow-up commit fills the `<SHA>` placeholder.
+  - Row 18 code gate at `<SHA>`: `CRITICAL_KINDS` (five strings) and the
+    admission gates in `BftDriver::propose` and
+    `BftDriver::on_preprepare` in `quip-net/src/bft_driver.rs`. The
+    ring-size test is `self.membership.len() < WITNESS_COUNT`; the
+    two-degraded-definitions finding (draft 1290 vs 1502) is recorded in
+    row 18's Specification status and its Verdict names the code's
+    reading. `quip-net/src/bft.rs`'s Operation doc comment gains the
+    fifth kind and a sentence stating the five are exactly the
+    mandatory-consensus kinds. Two new tests:
+    `critical_operation_refused_in_degraded_mode` (four-, five-,
+    six-member rings reject all five kinds; seven-member accepts) and
+    `backup_refuses_critical_preprepare_in_degraded_mode` (a hand-built
+    critical preprepare is dropped by a backup). Row 18 FAIL → PASS.
+    Correction to the 84fa21b sub-bullet: its sentence "the `<date>`
+    element bumps to the amendment date" is a no-op — the `<date>` was
+    already `2026-10-26` and remained unchanged. Three `-04` items
+    recorded, none fixed here: the Optimistic Execution Eligibility list
+    at 1564–1569 now admits a `trusted_cid_registration` that the
+    Mandatory Consensus table forbids (read as "eligible for the
+    optimistic path, not eligible to commit without full BFT" at
+    `-04`); "quorum certificates for prepared messages" at 1528–1533;
+    Trap 3's flat "5" at draft 1457–1462. The follow-up commit fills the
+    `<SHA>` placeholder.
 
 ---
 

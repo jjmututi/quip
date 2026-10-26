@@ -85,11 +85,32 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use quip_core::cbor::{encode, CborValue};
-use quip_core::constants::{CHECKPOINT_INTERVAL, MIN_WITNESSES};
+use quip_core::constants::{CHECKPOINT_INTERVAL, MIN_WITNESSES, WITNESS_COUNT};
 use quip_core::dvv::NodeId;
 use quip_core::messages::{
     IndividualRingSig, OperationOutcome, RingSignature, Signer, Verifier,
 };
+
+/// The operation kinds whose admission requires full consensus
+/// (5 of 7). Draft 1596's five defined kinds are exactly the
+/// mandatory-consensus kinds per draft 1547–1553; the degraded-mode
+/// prohibition list at draft 1298 names the same five. A witness on
+/// a ring smaller than `WITNESS_COUNT` refuses these operations at
+/// propose and drops them on the preprepare path, so a degraded ring
+/// cannot commit one even if the primary skips its own gate.
+///
+/// `VERB_ROTATION` and `VERB_REVOCATION` in `quip_core::constants`
+/// are the *verbs* for two of these kinds, not the kind strings; the
+/// gate matches on the kind, not the verb. The other three kind
+/// strings have no `VERB_*` constant and are only defined by the
+/// draft — this constant is their first code-side home.
+const CRITICAL_KINDS: &[&str] = &[
+    "key_rotation",
+    "revocation",
+    "witness_membership_change",
+    "resource_ownership_transfer",
+    "trusted_cid_registration",
+];
 
 // -------------------------------------------------------------------------
 // RingMembership
@@ -659,6 +680,15 @@ where
     }
 
     fn propose(&mut self, operation: Operation) -> Result<()> {
+        if self.membership.len() < WITNESS_COUNT
+            && CRITICAL_KINDS.contains(&operation.kind.as_str())
+        {
+            // Draft 1298: critical operations MUST NOT proceed in
+            // DEGRADED mode. "Degraded" is `|R| < WITNESS_COUNT`
+            // (draft 1502), not "quorum is 3-of-4" — a 5- or 6-member
+            // ring cannot restore 5-of-7 full consensus either.
+            return Err(Error::Bft("critical operation in degraded mode"));
+        }
         let context = self.operation_context();
         if !self.handler.validate(&self.ring_id, &context, &operation) {
             // The operation never enters consensus: no round state, no
@@ -728,6 +758,17 @@ where
             return Ok(());
         }
         msg.verify_full(primary, &self.verifier)?;
+
+        // A primary on a degraded ring must not push a critical
+        // operation through, even if its own `propose` gate was
+        // skipped. Drop silently, like a validate failure below: the
+        // round does not form, the sequence does not advance, and the
+        // operation never enters consensus.
+        if self.membership.len() < WITNESS_COUNT
+            && CRITICAL_KINDS.contains(&msg.operation.kind.as_str())
+        {
+            return Ok(());
+        }
 
         // A backup validates before voting (§5.3.4). A rejected
         // operation is dropped, not an error: this driver keeps its
@@ -2481,7 +2522,9 @@ mod tests {
         let m4 = RingMembership::new(ids).unwrap();
         let genesis: Digest = [0u8; 32];
         let mut drivers = drivers_in_order(&m4, signers, || FailingHandler, [1; 32], 0);
-        drivers[0].start(operation("revocation")).unwrap();
+        // A non-critical kind: "revocation" is one of CRITICAL_KINDS and
+        // is refused at propose on a 4-member ring (row 18's gate).
+        drivers[0].start(operation("dvv_write")).unwrap();
         let events = pump_generic(&mut drivers, &m4);
 
         let reported = events.iter().find_map(|evs| {
@@ -2955,6 +2998,93 @@ mod tests {
             matches!(&err, Err(Error::Bft(m)) if *m == "checkpoint message signature invalid"),
             "the checkpoint signature check must be the one that fires, got {err:?}"
         );
+    }
+
+    /// Draft 1298's degraded-mode prohibition. A critical operation on
+    /// a ring smaller than `WITNESS_COUNT` is refused at propose; the
+    /// same operation on a 7-member ring proceeds.
+    #[test]
+    fn critical_operation_refused_in_degraded_mode() {
+        // A 4-member ring: all five critical kinds refused.
+        let signers: Vec<_> = (1..=4).map(signer).collect();
+        let ids: Vec<NodeId> = signers.iter().map(|s| s.public_key()).collect();
+        let m4 = RingMembership::new(ids).unwrap();
+        let mut drivers = drivers_in_order(&m4, signers, RecordingHandler::default, [1; 32], 0);
+        for kind in CRITICAL_KINDS {
+            let err = drivers[0].start(operation(kind)).unwrap_err();
+            assert!(
+                matches!(&err, Error::Bft(m) if *m == "critical operation in degraded mode"),
+                "kind {kind} must be refused on a 4-member ring, got {err:?}"
+            );
+        }
+        // A non-critical operation is accepted on the same ring.
+        drivers[0].start(operation("dvv_write")).unwrap();
+
+        // A 6-member ring: `quorum()` is 5, so a naive
+        // `quorum() < QUORUM` gate would admit; `|R| < WITNESS_COUNT`
+        // refuses, because a 6-ring cannot restore 5-of-7.
+        let signers: Vec<_> = (1..=6).map(signer).collect();
+        let ids: Vec<NodeId> = signers.iter().map(|s| s.public_key()).collect();
+        let m6 = RingMembership::new(ids).unwrap();
+        let mut drivers = drivers_in_order(&m6, signers, RecordingHandler::default, [1; 32], 0);
+        for kind in CRITICAL_KINDS {
+            assert!(
+                drivers[0].start(operation(kind)).is_err(),
+                "kind {kind} must be refused on a 6-member ring"
+            );
+        }
+
+        // A 7-member ring: the same five kinds are accepted.
+        let (_, mut drivers) = build_ring();
+        for kind in CRITICAL_KINDS {
+            drivers[0].start(operation(kind)).unwrap();
+            // Drain the round; do not deliver. This keeps the driver
+            // idle for the next start.
+            let _ = drivers[0].drain_outbound();
+            let _ = drivers[0].drain_events();
+            drivers[0].sequence = 0;
+            drivers[0].state = RoundState::Idle;
+            drivers[0].current = None;
+        }
+    }
+
+    /// A primary that skips its own `propose` gate cannot push a
+    /// critical operation through a backup on a degraded ring: the
+    /// backup drops the preprepare silently, the round does not form,
+    /// and the sequence does not advance.
+    #[test]
+    fn backup_refuses_critical_preprepare_in_degraded_mode() {
+        let signers: Vec<_> = (1..=4).map(signer).collect();
+        let ids: Vec<NodeId> = signers.iter().map(|s| s.public_key()).collect();
+        let m4 = RingMembership::new(ids).unwrap();
+        let mut drivers = drivers_in_order(&m4, signers, RecordingHandler::default, [1; 32], 0);
+
+        // Build a preprepare for a critical kind, signed by the primary
+        // for view 0. The primary's own gate would refuse it at
+        // propose, so construct it by hand — this models a Byzantine
+        // primary.
+        let primary = m4.members()[0];
+        let op = operation("key_rotation");
+        let digest = compute_digest_parts(&[1; 32], 0, 0, &op).unwrap();
+        let mut pp = BftPreprepare {
+            ring_id: [1; 32],
+            view: 0,
+            sequence: 0,
+            operation: op,
+            digest,
+            primary_sig: [0u8; 64],
+        };
+        let payload = pp.signing_payload().unwrap();
+        pp.primary_sig = drivers[0].signer.sign_ed25519(&payload);
+
+        // Deliver to a backup. The backup drops it: no error, no
+        // round, no sequence advance.
+        let before_state = drivers[1].state().clone();
+        let before_seq = drivers[1].sequence();
+        drivers[1].on_preprepare(&primary, &pp).unwrap();
+        assert_eq!(drivers[1].state(), &before_state);
+        assert_eq!(drivers[1].sequence(), before_seq);
+        assert_eq!(*drivers[1].state(), RoundState::Idle);
     }
 
     #[test]

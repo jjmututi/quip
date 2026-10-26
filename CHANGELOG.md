@@ -2232,7 +2232,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `bft_view_change` is breaking and cross-references the draft
     amendment to `draft-mututi-quip-03.xml:1371` that lands separately.
     The follow-up commit fills the `<SHA>` placeholder.
-  - Draft amendment at `<SHA>`: `draft-mututi-quip-03.xml:1371` changes
+  - Draft amendment at `12ecb1b`: `draft-mututi-quip-03.xml:1371` changes
     `bft_view_change.prepared_digests: [* bytes .size 32]` to
     `prepared_messages: [* bytes]`, matching the code at `5123399`.
     Draft 1429's "New-view prepared messages" paragraph is reworked to

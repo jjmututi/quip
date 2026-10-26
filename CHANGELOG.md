@@ -2192,7 +2192,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     sentence to match the four-trap body, and added the one-sentence
     reasoning for the name. The follow-up commit fills the `<SHA>`
     placeholder.
-  - Resolution A1 recorded in `docs/bft-items-2-3-design.md` at `<SHA>`:
+  - Resolution A1 recorded in `docs/bft-items-2-3-design.md` at `9b66768`:
     Resolution A's wire form needs a preprepare the current driver does
     not retain. `InFlight` keeps `operation`, `digest`, and vote maps
     (`quip-net/src/bft_driver.rs:417–423`); `on_preprepare` verifies the

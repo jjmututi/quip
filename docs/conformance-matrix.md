@@ -805,11 +805,18 @@ enough and the edit has not landed."
 
 - **Clause.** "Each entry in `prepared_messages` is a complete
   `bft_preprepare` message as it would appear on the wire, including the
-  primary's signature. It is not a digest. The new primary re-proposes
-  these messages, and witnesses re-verify the primary's signature."
-  (draft 1429), required by "The view change includes quorum certificates
-  for prepared messages and the latest stable checkpoint to ensure safety
-  across view changes." (draft 1515–1517).
+  primary's signature. It is not a digest. The same form is carried in the
+  `bft_view_change`'s `prepared_messages` field: a witness that has prepared
+  an operation contributes the `bft_preprepare` it received, and the new
+  primary assembles the `bft_new_view`'s `prepared_messages` from the
+  entries the view-change quorum carries. The new primary re-proposes these
+  messages unmodified: each `bft_preprepare` retains the signature of the
+  primary for its own view, and a witness verifies each entry against that
+  primary, not against the new primary. The new primary does not re-sign a
+  prepared message." (draft 1431–1444, post-`12ecb1b`), required by "The
+  view change includes quorum certificates for prepared messages and the
+  latest stable checkpoint to ensure safety across view changes." (draft
+  1530–1532, post-`12ecb1b`).
 - **Requirement.** `MUST` carry the operations prepared in an earlier
   view into the new view as complete signed preprepare messages, and
   `MUST` re-verify each one on receipt.
@@ -838,16 +845,18 @@ enough and the edit has not landed."
 - **Depends on.** row 8 and the item 1 chain-digest work (`1e45f18`,
   `476b42e`).
 - **History.** UNTESTED at `3a460f2` (design note lands; code follows),
-  PASS at `5123399` (code commit; Class A test passes).
+  PASS at `5123399` (code commit; Class A test passes). Clause text and
+  line citations re-pointed at the post-`12ecb1b` draft by this commit;
+  the verdicts are unchanged.
 - **Closure test.** `view_change_carries_prepared_operations`
 
 ### 20. §5.3.4 — checkpoint carry-forward in a new view — PASS
 
 - **Clause.** "A `bft_new_view` message MUST contain at least `n - f`
-  valid view-change messages." (draft 1452–1453) and "The view change
-  includes quorum certificates for prepared messages and the latest
-  stable checkpoint to ensure safety across view changes." (draft
-  1515–1517).
+  valid view-change messages." (draft 1467–1468, post-`12ecb1b`) and "The
+  view change includes quorum certificates for prepared messages and the
+  latest stable checkpoint to ensure safety across view changes." (draft
+  1530–1532, post-`12ecb1b`).
 - **Requirement.** `MUST` carry the latest stable checkpoint into the
   new view on the same quorum-certificate requirement as the prepared
   messages.
@@ -876,7 +885,9 @@ enough and the edit has not landed."
 - **Depends on.** row 8, row 14, and the item 1 chain-digest work
   (`1e45f18`, `476b42e`).
 - **History.** UNTESTED at `3a460f2` (design note lands; code follows),
-  PASS at `5123399` (code commit; Class B test passes).
+  PASS at `5123399` (code commit; Class B test passes). Clause text and
+  line citations re-pointed at the post-`12ecb1b` draft by this commit;
+  the verdicts are unchanged.
 - **Closure test.** `new_view_carries_the_stable_checkpoint`
 
 ## What follows

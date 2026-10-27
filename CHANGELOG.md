@@ -2195,7 +2195,14 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     92 is what `cargo fmt --all` changed on `0dd5180`. The two numbers
     refer to different events; the parent reads as if they are the
     same. A reader re-checking the parent item should treat it as
-    corrected by this bullet.
+    corrected by this bullet. The 780-pass count and the fmt-clean state
+    cited here and in `0dd5180`'s message are drawn from the batch
+    runner's own gate: 780 tests passed before and after the reformat, and
+    `cargo fmt --all -- --check` exits 0. The count is 787 at `5265187`,
+    the seven extra being the tests `e378baf` added afterwards; the CI run
+    for `5265187` shows all six jobs success, `Formatting` among them. The
+    claims are accurate for the tree they describe; this sentence records
+    the runs behind them.
   - **A limit of the `fmt` job worth stating once.** `cargo fmt --all
     -- --check` does not warn about a missing final newline, but
     `cargo fmt --all` adds one. The result on `0dd5180` was 66 files
@@ -2208,12 +2215,14 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     considered. This is not a defect in the job and is not fixed here.
 
 37. **BFT-A items 2–3 design note.** Landed at
-    `docs/bft-items-2-3-design.md` (`3a460f2`). The note records three
-    traps: two code traps (`bft_driver.rs:1153` sends
+    `docs/bft-items-2-3-design.md` (`3a460f2`). The note records four
+    traps: two code sites (`bft_driver.rs:1153` sends
     `prepared_messages` empty; `bft_driver.rs:1154` sends
-    `checkpoint_messages` empty) and one draft trap (the flat "5"
+    `checkpoint_messages` empty) and two draft defects (the flat "5"
     state-transfer ring signature at draft 1457–1462 against the general
-    `n - f` rule at 1447 and `DEGRADED_QUORUM` at 1449). Two new matrix
+    `n - f` rule at 1447 and `DEGRADED_QUORUM` at 1449; and the view-change
+    vote's digest-only wire form, disposed of by the `12ecb1b` amendment).
+    Two new matrix
     rows: row 19 (`prepared_messages`, `UNTESTED`) and row 20
     (`checkpoint_messages`, `UNTESTED`). Code lands in a later commit;
     the note's test-per-class names are the contract for that commit.
@@ -2240,7 +2249,9 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     corrected the Status paragraph's "three sites ... one ambiguity"
     sentence to match the four-trap body, and added the one-sentence
     reasoning for the name. The follow-up commit fills the `<SHA>`
-    placeholder.
+    placeholder. The count stated here ("three sites … one ambiguity") was
+    superseded: the Status paragraph's count was corrected at `<SHA>` to
+    two code sites and two draft defects.
   - Resolution A1 recorded in `docs/bft-items-2-3-design.md` at `9b66768`:
     Resolution A's wire form needs a preprepare the current driver does
     not retain. `InFlight` keeps `operation`, `digest`, and vote maps
@@ -2375,7 +2386,9 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     and the peer address book (M9.8). Row 4's caller is the binary's
     config loader, so row 4 closes in the code commit, not this one. The
     reformat commit (item 36) lands before this note. The follow-up
-    commit fills the `<SHA>` placeholder.
+    commit fills the `<SHA>` placeholder. The note's §7 ordering claim
+    ("reformat first, then this note") was not followed; `0dd5180` landed
+    after `87ab210`, and the deviation is recorded in §7 at `<SHA>`.
   - **`0dd5180` — the reformat (item 36).** The tree was reformatted once
     by `cargo fmt --all` at `0dd5180`; the reformat's SHA is in
     `.git-blame-ignore-revs` (appended at `fd67d15`) so `git blame` skips
@@ -2416,6 +2429,59 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     already said the true path; the note's prose and the matrix's other
     two mentions of the old name are a `-04` tidy, not this commit's
     scope.
+  - **Review-batch correction (A, C, D, F).** The AI1/AI2 batch over the
+    fourteen units landed since `1e45f18` produced ten concerns; four are
+    record errors in commits this session's single reviewer authored and
+    accepted, and two are claims whose evidence the pair could not reach
+    under its allow list. The corrections, each with the working paper
+    that raised it:
+    - **A — `963d2a7`'s false attribution.** The message and the
+      correction bullet under `621002c` both say 621002c introduced the
+      duplicate `.cline/` line. It did not: `git show 621002c -- .gitignore`
+      adds only the `.claude/settings.local.json` block. The three
+      `.cline/` entries predate 621002c. The attribution is wrong in two
+      places and this bullet records the correction; the landed text is
+      not rewritten. Working paper: `ai2-permission-chain.md`.
+    - **B — matrix rows 19 and 20 quote the pre-amendment draft.** Row 19
+      quotes "witnesses re-verify the primary's signature", which
+      `12ecb1b` deleted; rows 19 and 20 cite draft 1452–1453 and
+      1515–1517, which the amendment moved. This commit re-quotes and
+      re-points both rows; the verdicts do not move. Working paper:
+      `ai2-12ecb1b.md`.
+    - **C — `ed04894`'s count error.** The Status paragraph says "the
+      four sites named below where the code does not yet do it"; the
+      body classifies only two of the four trap entries as code traps.
+      This commit rewrites the Status paragraph to name code sites and
+      trap entries separately, and updates item 37's earlier "three
+      traps" count to match. Working paper: `ai2-ed04894.md`.
+    - **D — `87ab210`'s §7 ordering claim was not followed.** §7 says
+      "the reformat commit lands first … then this note". History:
+      `git merge-base --is-ancestor 0dd5180 87ab210` exits 1, so
+      `0dd5180` landed after `87ab210`. This commit appends one sentence
+      to §7 recording the deviation rather than rewriting the claim. The
+      claim was written before item 36 was scheduled; the schedule
+      inverted when the reformat was moved after the note. Working paper:
+      `ai2-87ab210.md`.
+    - **F — two claims with no recorded run behind them.** `06864fa`'s
+      "test count is unchanged at 780" and `0dd5180`'s "rustfmt-clean"
+      are both true, and both cite a run the pair's allow list could not
+      reach. This commit records the source: the batch runner's own gate
+      returned 780 tests before and after the reformat and
+      `cargo fmt --all -- --check` exit 0, and the CI run for `5265187`
+      shows all six jobs success including `Formatting`. The figure is 787
+      at `5265187` — the extra seven are `e378baf`'s tests, added after
+      the reformat — so "unchanged at 780" describes the pre-M9.7 tree,
+      which is the tree the reformat touched. Working paper:
+      `ai2-06864fa.md`, `ai2-0dd5180.md`.
+    - **The pattern, recorded once.** Five instances in this session of
+      the same class: the reviewer who wrote the instruction cannot see
+      the instruction's own error. The earlier four are the two
+      instruction contradictions in the Cline tasks, the
+      `prepared_preprepares` name, and the `Capabilities::new_checked`
+      misnomer. This batch is the fifth, and it is the one the pair
+      caught as a group rather than one at a time. The pair should not
+      stop running: it is the mechanism that resolves the class, not the
+      exception that catches it.
 
 ---
 

@@ -1,12 +1,15 @@
 # BFT-A items 2 and 3 — prepared-operation and checkpoint carry-forward on view change
 
 **Status: design note.** Code lands in a later commit; this note is the
-contract. It records what items 2 and 3 must do, the four sites named
-below where the code does not yet do it, and the two draft defects the
-note names but does not resolve — the state-transfer ring-signature rule
-that states a flat "5" against the general `n - f` rule, and the
-view-change vote's digest-only wire form that leaves the new primary
-unable to assemble a preprepare.
+contract. It records what items 2 and 3 must do, the two code sites below
+where the code does not yet do it, and the two draft defects the note
+names — the state-transfer ring-signature rule that states a flat "5"
+against the general `n - f` rule, and the view-change vote's digest-only
+wire form that leaves the new primary unable to assemble a preprepare. The
+second of those two draft defects has since been disposed of by amendment
+(`12ecb1b`); the flat "5" remains deferred to its own `docs:` commit. The
+four trap entries below are therefore two open code sites and two draft
+defects, one of them now closed by amendment.
 
 **What this note implements, and what it decides.** Two of the four
 trap entries below are code traps (draft clause clear, code does not

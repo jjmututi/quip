@@ -2316,7 +2316,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `Read`, `Edit`, `Write` allowed. `.git-blame-ignore-revs` and its
     `.gitignore` status are unchanged and remain committed. The duplicate
     `.cline/` line that 621002c introduced is removed by `963d2a7`.
-  - M9.7 design note at `docs/M9.7-design.md` (`<SHA>`): the headless
+  - M9.7 design note at `docs/M9.7-design.md` (`87ab210`): the headless
     binary is one new workspace member (`quip-node-headless`), with two
     modes selected by config — Development (defaults that make `cargo run`
     work on loopback) and Production (fail-closed on every

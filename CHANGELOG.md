@@ -2250,7 +2250,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     sentence to match the four-trap body, and added the one-sentence
     reasoning for the name. The follow-up commit fills the `<SHA>`
     placeholder. The count stated here ("three sites … one ambiguity") was
-    superseded: the Status paragraph's count was corrected at `<SHA>` to
+    superseded: the Status paragraph's count was corrected at `42d8fea` to
     two code sites and two draft defects.
   - Resolution A1 recorded in `docs/bft-items-2-3-design.md` at `9b66768`:
     Resolution A's wire form needs a preprepare the current driver does
@@ -2388,7 +2388,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     reformat commit (item 36) lands before this note. The follow-up
     commit fills the `<SHA>` placeholder. The note's §7 ordering claim
     ("reformat first, then this note") was not followed; `0dd5180` landed
-    after `87ab210`, and the deviation is recorded in §7 at `<SHA>`.
+    after `87ab210`, and the deviation is recorded in §7 at `42d8fea`.
   - **`0dd5180` — the reformat (item 36).** The tree was reformatted once
     by `cargo fmt --all` at `0dd5180`; the reformat's SHA is in
     `.git-blame-ignore-revs` (appended at `fd67d15`) so `git blame` skips

@@ -2316,6 +2316,17 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `Read`, `Edit`, `Write` allowed. `.git-blame-ignore-revs` and its
     `.gitignore` status are unchanged and remain committed. The duplicate
     `.cline/` line that 621002c introduced is removed by `963d2a7`.
+  - M9.7 design note at `docs/M9.7-design.md` (`<SHA>`): the headless
+    binary is one new workspace member (`quip-node-headless`), with two
+    modes selected by config — Development (defaults that make `cargo run`
+    work on loopback) and Production (fail-closed on every
+    security-relevant field). No protocol change; the binary is a caller
+    of `quip-node`'s public API. Two deferrals recorded: trust bootstrap
+    (M9.6c) — production-mode nodes are `Unknown` trust until it lands —
+    and the peer address book (M9.8). Row 4's caller is the binary's
+    config loader, so row 4 closes in the code commit, not this one. The
+    reformat commit (item 36) lands before this note. The follow-up
+    commit fills the `<SHA>` placeholder.
 
 ---
 

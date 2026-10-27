@@ -2292,7 +2292,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `-04`); "quorum certificates for prepared messages" at 1528–1533;
     Trap 3's flat "5" at draft 1457–1462. The follow-up commit fills the
     `<SHA>` placeholder.
-  - Claude Code permission surface at `<SHA>`. `.claude/settings.json` is
+  - Claude Code permission surface at `621002c`. `.claude/settings.json` is
     the committed allow/deny list: `cargo`, `git` (read, add, commit —
     not push, reset --hard, or checkout --), `sed`, `grep`, `sed`'s kin,
     `Read`, `Edit`, `Write` allowed; `git push`, `git reset --hard`,

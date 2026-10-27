@@ -2167,6 +2167,45 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     it. Future toolchain bumps that change rustfmt's output append a new
     SHA; the job fails until the tree is reformatted and the SHA
     appended.
+  - **Correction to the parent item (reformat `0dd5180`).** The parent's
+    sentence "`git diff --ignore-all-space` is empty for every file
+    except `quip-node-ffi/src/api.rs`" is wrong, and the error is in
+    the commit message as well as the changelog. `git diff
+    --ignore-all-space 0dd5180^ 0dd5180` names **67 files**, not one,
+    and `quip-node-ffi/src/api.rs` has **8 hunks**, not 1. The reason
+    is structural: `-w` ignores whitespace within a line, but
+    `rustfmt` re-wraps lines, and a signature or call that moves from
+    five lines to one cannot match line-for-line. Every hunk falls
+    into three categories — **line re-wrap** (a signature or call
+    collapsed to one line; a method chain joined), **import reorder**
+    (`pub mod`/`pub use` blocks sorted into rustfmt's order), and
+    **block collapse** (a single-expression `{ return x }` or `{ x }`
+    block turned into `=> x` or `=> return x`). No hunk changes a
+    token of meaning; the evidence is that `cargo test --workspace
+    --all-features --locked` returns the same 780 passes before and
+    after, and a whitespace-and-trailing-comma-normalised comparison
+    of each file's two revisions is byte-identical for the files that
+    differ only in those three ways. The largest non-ignorable diffs,
+    by changed lines, are `quip-node/src/tasks.rs` (189),
+    `quip-node/src/lib.rs` (152), `quip-net/src/discovery.rs` (150),
+    `quip-net/src/bft_driver.rs` (141) and `quip-net/src/nat.rs`
+    (132); `quip-node-ffi/src/api.rs` ranks ninth at 70, and the rest
+    are smaller re-wraps. The 95-vs-92 number in the parent item is
+    also worth reconciling: 95 was the memory of the reverted attempt,
+    92 is what `cargo fmt --all` changed on `0dd5180`. The two numbers
+    refer to different events; the parent reads as if they are the
+    same. A reader re-checking the parent item should treat it as
+    corrected by this bullet.
+  - **A limit of the `fmt` job worth stating once.** `cargo fmt --all
+    -- --check` does not warn about a missing final newline, but
+    `cargo fmt --all` adds one. The result on `0dd5180` was 66 files
+    flagged by `--check` before the reformat, 92 files changed by
+    `cargo fmt --all` — the 26-file delta is the missing newlines. The
+    tree has none now, so the job and `cargo fmt --all` agree today;
+    but "the `fmt` job is green" is slightly weaker than "the tree is
+    what `cargo fmt --all` would produce", and the difference is worth
+    knowing the next time a toolchain bump or a partial reformat is
+    considered. This is not a defect in the job and is not fixed here.
 
 37. **BFT-A items 2–3 design note.** Landed at
     `docs/bft-items-2-3-design.md` (`3a460f2`). The note records three

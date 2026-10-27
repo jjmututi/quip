@@ -2305,7 +2305,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     fills the `<SHA>` placeholder.
   - Claude Code permission surface. **Correction to the 621002c bullet:**
     the permission surface is local, not committed. `.claude/settings.json`
-    was committed at 621002c and is removed from the tree by `<SHA>`; it
+    was committed at 621002c and is removed from the tree by `963d2a7`; it
     remains in the historical commit 621002c, which is pushed and not
     amended. The surface is per-machine — `.claude/` is gitignored
     alongside `.cline/` (65b98b1) — because the permission list is a
@@ -2315,7 +2315,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `sudo` denied; `cargo`, `git` (read, add, commit), `sed`, `grep`,
     `Read`, `Edit`, `Write` allowed. `.git-blame-ignore-revs` and its
     `.gitignore` status are unchanged and remain committed. The duplicate
-    `.cline/` line that 621002c introduced is removed by `<SHA>`.
+    `.cline/` line that 621002c introduced is removed by `963d2a7`.
 
 ---
 

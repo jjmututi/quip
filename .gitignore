@@ -20,15 +20,8 @@ target/
 .vscode/
 *.iml
 
-# CLINE CHATS
-.cline/
-
 # Local AI review pipeline artifacts (prompts, reviews). Not project sources.
 .cline/
 
-# Local tooling artifacts.
-.cline/
-
-# Local Claude Code overrides. The committed settings.json is the shared
-# permission surface; this file is per-machine and must not be committed.
-.claude/settings.local.json
+# Local Claude Code permission surface. Per-machine, not a project source.
+.claude/

@@ -108,6 +108,9 @@ mod tests {
                 CborValue::Bytes(vec![0u8; 64]),
             ],
         );
-        assert!(matches!(KeyClaim::from_cbor(&cbor), Err(Error::BadEncoding(_))));
+        assert!(matches!(
+            KeyClaim::from_cbor(&cbor),
+            Err(Error::BadEncoding(_))
+        ));
     }
 }

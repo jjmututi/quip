@@ -245,7 +245,9 @@ mod tests {
 
         // Temporary notice expiring at 10_000ms
         let temp = dummy_notice(5, &[6], 10_000);
-        store.add_notice(temp, Timestamp::from_millis(1_000)).unwrap();
+        store
+            .add_notice(temp, Timestamp::from_millis(1_000))
+            .unwrap();
         assert!(store.is_quarantined(&cid(6), Timestamp::from_millis(9_999)));
         assert!(!store.is_quarantined(&cid(6), Timestamp::from_millis(10_000)));
 

@@ -142,8 +142,7 @@ impl<K: Ord + Clone> BackoffTracker<K> {
         });
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         let delay = delay_for(base_ms, max_ms, entry.consecutive_failures);
-        entry.next_retry_at =
-            Timestamp::from_millis(now.as_millis().saturating_add(delay));
+        entry.next_retry_at = Timestamp::from_millis(now.as_millis().saturating_add(delay));
         entry.next_retry_at
     }
 
@@ -151,7 +150,9 @@ impl<K: Ord + Clone> BackoffTracker<K> {
     ///
     /// Returns the number of consecutive failures the key had accumulated.
     pub fn record_success(&mut self, key: &K) -> u32 {
-        self.entries.remove(key).map_or(0, |e| e.consecutive_failures)
+        self.entries
+            .remove(key)
+            .map_or(0, |e| e.consecutive_failures)
     }
 
     /// Forget `key` without recording a success.

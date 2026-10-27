@@ -236,16 +236,18 @@ mod tests {
         };
         let bytes = ra.to_bytes().unwrap();
         let v = decode(&bytes).unwrap();
-        let CborValue::Array(arr) = &v else { panic!("expected array") };
+        let CborValue::Array(arr) = &v else {
+            panic!("expected array")
+        };
         // ["quip-v1", "resource_announce", rid, cid, ring, dht, relay]
         assert_eq!(arr.len(), 7);
         assert_eq!(arr[0], CborValue::String("quip-v1".into()));
         assert_eq!(arr[1], CborValue::String("resource_announce".into()));
         assert!(matches!(&arr[2], CborValue::Bytes(_)));
-        assert!(matches!(&arr[3], CborValue::Bytes(_)));       // raw CID
-        assert!(matches!(&arr[4], CborValue::Array(_)));        // ring
-        assert!(matches!(&arr[5], CborValue::Array(_)));        // dht
-        assert!(matches!(&arr[6], CborValue::Array(_)));        // relay
+        assert!(matches!(&arr[3], CborValue::Bytes(_))); // raw CID
+        assert!(matches!(&arr[4], CborValue::Array(_))); // ring
+        assert!(matches!(&arr[5], CborValue::Array(_))); // dht
+        assert!(matches!(&arr[6], CborValue::Array(_))); // relay
     }
 
     #[test]

@@ -293,7 +293,17 @@ mod tests {
 
     #[test]
     fn varint_roundtrip_boundaries() {
-        for v in [0u64, 1, 63, 64, 16_383, 16_384, 1_073_741_823, 1_073_741_824, (1u64 << 62) - 1] {
+        for v in [
+            0u64,
+            1,
+            63,
+            64,
+            16_383,
+            16_384,
+            1_073_741_823,
+            1_073_741_824,
+            (1u64 << 62) - 1,
+        ] {
             let mut buf = Vec::new();
             encode_varint(v, &mut buf).unwrap();
             let (back, used) = decode_varint(&buf).unwrap();
@@ -349,10 +359,7 @@ mod tests {
         // Forge a 4-byte varint declaring 1 MiB.
         let mut buf = Vec::new();
         encode_varint(1_048_576, &mut buf).unwrap();
-        assert!(matches!(
-            try_deframe(&buf),
-            Err(Error::TooLarge { .. })
-        ));
+        assert!(matches!(try_deframe(&buf), Err(Error::TooLarge { .. })));
     }
 
     #[test]
@@ -364,7 +371,10 @@ mod tests {
         // Trailing partial message.
         stream.extend_from_slice(&encode_message(b"four").unwrap()[..1]);
         let (msgs, rest) = deframe_all(&stream).unwrap();
-        assert_eq!(msgs, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+        assert_eq!(
+            msgs,
+            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+        );
         assert_eq!(rest.len(), 1);
     }
 }

@@ -14,16 +14,14 @@
 use crate::error::Result;
 use crate::message::Message;
 use crate::nat::{NatConfig, NatEvent, NatTraversal, Outbound};
-use crate::nat_wire::{
-    CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery, RelayResponse,
-};
+use crate::nat_wire::{CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery, RelayResponse};
 use crate::transport::ConnectionDriver;
 use alloc::string::String;
 use alloc::vec::Vec;
 use quip_core::address::Address;
 use quip_core::dvv::NodeId;
-use quip_core::time::Timestamp;
 use quip_core::messages::Signer;
+use quip_core::time::Timestamp;
 
 /// A sink for outbound DHT requests and a source for inbound results.
 ///
@@ -295,13 +293,8 @@ impl<D: DhtClient> NatDriver<D> {
                 max_hops,
                 request_id,
             } => {
-                let msg = self.build_relay_discovery(
-                    signer,
-                    *target,
-                    *max_hops,
-                    *request_id,
-                    now,
-                )?;
+                let msg =
+                    self.build_relay_discovery(signer, *target, *max_hops, *request_id, now)?;
                 app.send_relay_discovery(msg);
             }
             _ => {}
@@ -343,26 +336,15 @@ impl<D: DhtClient> NatDriver<D> {
     /// conversion instead.
     pub fn on_peer_message(&mut self, msg: &Message, now: Timestamp) {
         match msg {
-            Message::ConnectivityAnnounce(a) => {
-                self.state.on_connectivity_announce(a.clone(), now)
-            }
-            Message::CandidateAnnounce(a) => {
-                self.state.on_candidate_announce(a.clone(), now)
-            }
-            Message::RelayResponse(r) => {
-                self.state.on_relay_response(r.clone(), now)
-            }
+            Message::ConnectivityAnnounce(a) => self.state.on_connectivity_announce(a.clone(), now),
+            Message::CandidateAnnounce(a) => self.state.on_candidate_announce(a.clone(), now),
+            Message::RelayResponse(r) => self.state.on_relay_response(r.clone(), now),
             _ => {}
         }
     }
 
     /// Record an address observation from a DHT peer.
-    pub fn on_address_observed(
-        &mut self,
-        observer: NodeId,
-        observed: Address,
-        now: Timestamp,
-    ) {
+    pub fn on_address_observed(&mut self, observer: NodeId, observed: Address, now: Timestamp) {
         self.state.on_address_observed(observer, observed, now);
     }
 
@@ -379,8 +361,7 @@ impl<D: DhtClient> NatDriver<D> {
         success: bool,
         now: Timestamp,
     ) {
-        self.state
-            .on_probe_result(session_id, addr, success, now);
+        self.state.on_probe_result(session_id, addr, success, now);
     }
 
     /// Record the outcome of attempting to use a relay for a session.
@@ -432,12 +413,12 @@ impl<D: DhtClient> NatDriver<D> {
 mod tests {
     use super::*;
     use crate::nat::{AddressState, CandidateTable, NatConfig};
-    use alloc::vec::Vec;
+    use crate::nat_wire::RelayDiscovery;
+    use crate::test_support::FakeSigner;
     use alloc::string::ToString;
+    use alloc::vec::Vec;
     use quip_core::address::Address;
     use quip_core::time::Timestamp;
-    use crate::test_support::FakeSigner;
-    use crate::nat_wire::RelayDiscovery;
 
     #[derive(Default)]
     struct RecordingApp {
@@ -646,7 +627,12 @@ mod tests {
 
     #[test]
     fn start_session_emits_publish_and_lookup() {
-        let mut d = NatDriver::new(nid(1), addr(1), NatConfig::default(), RecordingDht::default());
+        let mut d = NatDriver::new(
+            nid(1),
+            addr(1),
+            NatConfig::default(),
+            RecordingDht::default(),
+        );
         d.state_mut().on_address_observed(nid(2), addr(10), now());
         d.start_session(nid(3), [7u8; 16], now());
         // Drain via a fake "drain_dht + poll" without a connection:
@@ -706,9 +692,7 @@ mod tests {
 
     #[test]
     fn candidate_table_orders_by_priority_class() {
-        use crate::nat_wire::{
-            Candidate, CANDIDATE_HOST, CANDIDATE_RELAYED,
-        };
+        use crate::nat_wire::{Candidate, CANDIDATE_HOST, CANDIDATE_RELAYED};
         let mut t = CandidateTable::new(nid(1), [0u8; 16]);
         let relayed = Candidate {
             addr: addr(10),

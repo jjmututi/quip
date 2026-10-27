@@ -19,9 +19,7 @@
 //! ([`Candidate`], [`RelayEntry`]) are not separately signed; they are
 //! covered by the enclosing message's signature.
 
-use crate::codec::{
-    as_array, as_bool, as_bytes_n, as_node_id, as_u64, envelope, fields, verb_of,
-};
+use crate::codec::{as_array, as_bool, as_bytes_n, as_node_id, as_u64, envelope, fields, verb_of};
 use crate::error::{Error, Result};
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -129,9 +127,7 @@ impl Candidate {
                     _ => return Err(Error::BadFrame("foundation must be a string")),
                 },
                 CborValue::String(s) if s == "component" => component = Some(as_u64(val)?),
-                CborValue::String(_) => {
-                    return Err(Error::BadFrame("unknown key in Candidate"))
-                }
+                CborValue::String(_) => return Err(Error::BadFrame("unknown key in Candidate")),
                 _ => return Err(Error::BadFrame("Candidate keys must be text")),
             }
         }
@@ -234,9 +230,7 @@ impl RelayEntry {
                 CborValue::String(s) if s == "capacity" => capacity = Some(as_u64(val)?),
                 CborValue::String(s) if s == "load" => load = Some(as_u64(val)?),
                 CborValue::String(s) if s == "cost" => cost = Some(as_u64(val)?),
-                CborValue::String(_) => {
-                    return Err(Error::BadFrame("unknown key in RelayEntry"))
-                }
+                CborValue::String(_) => return Err(Error::BadFrame("unknown key in RelayEntry")),
                 _ => return Err(Error::BadFrame("RelayEntry keys must be text")),
             }
         }
@@ -607,11 +601,7 @@ impl RelayResponse {
     /// learns from the enclosing envelope. This method takes an explicit
     /// `responder` because the wire format carries the requester, not
     /// the responder.
-    pub fn verify(
-        &self,
-        responder: &NodeId,
-        v: &impl Verifier,
-    ) -> Result<bool> {
+    pub fn verify(&self, responder: &NodeId, v: &impl Verifier) -> Result<bool> {
         let payload = self.signing_payload()?;
         Ok(v.verify_ed25519(responder, &payload, &self.signature))
     }
@@ -823,7 +813,7 @@ mod tests {
         let bytes = m.to_bytes().unwrap();
         assert_eq!(RelayDiscovery::from_bytes(&bytes).unwrap(), m);
     }
-    
+
     #[test]
     fn relay_discovery_signing_payload_excludes_signature() {
         let m = RelayDiscovery {
@@ -837,7 +827,11 @@ mod tests {
         let payload = m.signing_payload().unwrap();
         let decoded = decode(&payload).unwrap();
         let f = crate::codec::fields(&decoded, "relay_discovery").unwrap();
-        assert_eq!(f.len(), 5, "request_id + requester + target + max_hops + timestamp");
+        assert_eq!(
+            f.len(),
+            5,
+            "request_id + requester + target + max_hops + timestamp"
+        );
     }
 
     // ---- RelayResponse ----
@@ -845,7 +839,6 @@ mod tests {
     #[test]
     fn relay_response_roundtrip() {
         let m = RelayResponse {
-            
             request_id: [0x42; 16],
             target: nid(2),
             requester: nid(1),

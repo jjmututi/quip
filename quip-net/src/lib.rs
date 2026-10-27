@@ -70,15 +70,15 @@ pub mod backoff;
 pub mod bft;
 pub mod bulk;
 pub mod clock;
+pub mod cluster;
 pub(crate) mod codec;
 pub mod conn;
 pub mod constants;
 pub mod coral;
-pub mod cluster;
 pub mod dht;
 pub mod discovery;
-pub mod establishment;
 pub mod error;
+pub mod establishment;
 pub mod event;
 pub mod flow;
 pub mod frame;
@@ -123,46 +123,47 @@ pub mod bft_driver;
 // -------------------------------------------------------------------------
 
 pub use backoff::{BackoffTracker, DEFAULT_BASE_MS, DEFAULT_MAX_KEYS, DEFAULT_MAX_MS};
+pub use bft::{
+    BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPrepare, BftPreprepare,
+    BftStateTransfer, BftViewChange, Digest, Operation, RingId,
+};
 pub use bulk::{BulkReceiver, BulkSender, BulkTransferConfig, CHUNK_SIZE};
 #[cfg(feature = "std")]
 pub use clock::unix_now;
+#[cfg(feature = "crypto")]
+pub use cluster::{center_lookup_key, far_cluster_id, fresh_cluster_id, near_cluster_id};
+pub use cluster::{
+    estimate_size_from_routing_table, ClusterConfig, ClusterId, ClusterInfo, ClusterInfoAnnounce,
+    ClusterLevel, ClusterState, MergeDecision, SplitAction, ACCEPTANCE_MIN_SAMPLES,
+};
 pub use conn::{BackpressureAction, Connection, ConnectionPhase, QuipNetConfig};
 pub use constants::{
     ALPN_QUIP, BULK_STREAM_BASE_ID, CANDIDATE_TTL_S, CHECKPOINT_INTERVAL,
     CLUSTER_ACCEPTANCE_PERCENTILE, CLUSTER_HEARTBEAT_S, CLUSTER_LEVELS, CONNECTIVITY_TTL_S,
     COORDINATOR_INTERVAL_S, CTRL_STREAM_ID, DEGRADED_QUORUM, GATEWAY_ROUTER_COUNT,
     HANDSHAKE_TIMEOUT_MS, LOOKUP_PATHS, MAX_CHUNK_BYTES, MAX_CLUSTER_SIZE, MAX_DGRAM_BYTES,
-    MAX_MESSAGE_SIZE, MAX_RANGES, MAX_SPLIT_ATTEMPTS, MERGE_DELTA_INTERVAL_S,
-    MIN_ACTIVE_WITNESSES, MIN_CLUSTER_SIZE, MIN_WITNESSES, PROTOCOL_VERSION, QUORUM,
-    RELAY_CAPACITY, RELAY_HOP_LIMIT, RTT_GLOBAL_MS, RTT_LOCAL_MS, RTT_REGIONAL_MS,
-    SPILLOVER_CACHE_TTL_S, SPILLOVER_THRESHOLD, SYNC_STREAM_ID, T0_MAX_STREAMS, T1_MAX_STREAMS,
-    T2_MAX_STREAMS, T3_MAX_DATAGRAMS, VIEW_CHANGE_QUORUM, WITNESS_COUNT,
-};
-pub use dht::{
-    CoralConfig, CrossPathCheck, LookupPathState, LookupProgress, LookupState, RttClass,
-    WitnessLoad, WitnessRingCache, ACCEPTANCE_PERCENTILE, DEFAULT_MAX_RINGS, GLOBAL_CLUSTER,
-    LOCAL_CLUSTER, REGIONAL_CLUSTER,
+    MAX_MESSAGE_SIZE, MAX_RANGES, MAX_SPLIT_ATTEMPTS, MERGE_DELTA_INTERVAL_S, MIN_ACTIVE_WITNESSES,
+    MIN_CLUSTER_SIZE, MIN_WITNESSES, PROTOCOL_VERSION, QUORUM, RELAY_CAPACITY, RELAY_HOP_LIMIT,
+    RTT_GLOBAL_MS, RTT_LOCAL_MS, RTT_REGIONAL_MS, SPILLOVER_CACHE_TTL_S, SPILLOVER_THRESHOLD,
+    SYNC_STREAM_ID, T0_MAX_STREAMS, T1_MAX_STREAMS, T2_MAX_STREAMS, T3_MAX_DATAGRAMS,
+    VIEW_CHANGE_QUORUM, WITNESS_COUNT,
 };
 pub use coral::{
     compare_by_distance, cross_path_consensus, select_witness_ring, xor_distance, CoralLookup,
     CrossPathResult, CrossPathValidation, Key, LookupPath, LookupResponse, PathId, PathProof,
     SpilloverRequest, SpilloverResponse,
 };
-pub use cluster::{
-    estimate_size_from_routing_table, ClusterConfig, ClusterId, ClusterInfo,
-    ClusterInfoAnnounce, ClusterLevel, ClusterState, MergeDecision, SplitAction,
-    ACCEPTANCE_MIN_SAMPLES,
+pub use dht::{
+    CoralConfig, CrossPathCheck, LookupPathState, LookupProgress, LookupState, RttClass,
+    WitnessLoad, WitnessRingCache, ACCEPTANCE_PERCENTILE, DEFAULT_MAX_RINGS, GLOBAL_CLUSTER,
+    LOCAL_CLUSTER, REGIONAL_CLUSTER,
 };
-#[cfg(feature = "crypto")]
-pub use cluster::{center_lookup_key, far_cluster_id, fresh_cluster_id, near_cluster_id};
 pub use discovery::{
     DiscoveryFailure, DiscoveryPhaseKind, DiscoveryStatus, Outbound, SpilloverResponseCache,
     StartOutcome, WitnessDiscovery, DEFAULT_SPILLOVER_CACHE_CAPACITY,
 };
-pub use establishment::{
-    ConnectionFlow, FlowAction, FlowConfig, FlowFailure, FlowPhase, KtStatus,
-};
 pub use error::{Error, Result};
+pub use establishment::{ConnectionFlow, FlowAction, FlowConfig, FlowFailure, FlowPhase, KtStatus};
 pub use event::{EmitEvent, PinAnnounce};
 pub use flow::{
     dispatch_flow, FlowFrame, FlowState, FlowStateMachine, BLOCK_KIND, UNBLOCK_KIND, WINDOW_KIND,
@@ -175,10 +176,21 @@ pub use handshake::{Capabilities, ExtensionId, Handshake};
 pub use message::{
     dispatch, dispatch_inbound, ErrorMessage, Message, SendChunk, SendComplete, SendStart,
 };
-pub use query::Query;
-pub use rate::{
-    BucketConfig, OperationKind, RateLimiter, RateLimiterConfig, DEFAULT_MAX_ENTRIES,
+pub use nat::{
+    AddressState, CandidateTable, ConnectivityState, HolePunchRole, HolePunchSession, NatConfig,
+    NatEvent, NatKind, NatTraversal, Outbound as NatOutbound, RelayManager, SessionState,
 };
+pub use nat_wire::{
+    Candidate, CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery, RelayEntry, RelayResponse,
+    CANDIDATE_HOST, CANDIDATE_PEER_REFLEXIVE, CANDIDATE_RELAYED, CANDIDATE_SERVER_REFLEXIVE,
+    NAT_TYPE_CONE, NAT_TYPE_OPEN, NAT_TYPE_RESTRICTED, NAT_TYPE_SYMMETRIC, NAT_TYPE_UNKNOWN,
+};
+pub use query::Query;
+pub use range::{
+    is_blake3, split_range, FetchRange, NoQuarantine, QuarantineCheck, RangeResponse,
+    MAX_RANGE_IN_SINGLE_RESPONSE,
+};
+pub use rate::{BucketConfig, OperationKind, RateLimiter, RateLimiterConfig, DEFAULT_MAX_ENTRIES};
 pub use resource::{QueryResource, ResourceAnnounce};
 pub use sync::{
     Fingerprint, FingerprintAlgo, GetRequest, PinList, PinQuery, QueryPins, QueryQuarantined,
@@ -186,25 +198,6 @@ pub use sync::{
     UnpinRequest, XorFingerprint,
 };
 pub use sync_stream::{SyncEvent, SyncState, SyncStream};
-pub use nat::{
-    AddressState, CandidateTable, ConnectivityState, HolePunchRole, HolePunchSession,
-    NatConfig, NatEvent, NatKind, NatTraversal, Outbound as NatOutbound, RelayManager,
-    SessionState,
-};
-pub use nat_wire::{
-    Candidate, CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery, RelayEntry,
-    RelayResponse, CANDIDATE_HOST, CANDIDATE_PEER_REFLEXIVE, CANDIDATE_RELAYED,
-    CANDIDATE_SERVER_REFLEXIVE, NAT_TYPE_CONE, NAT_TYPE_OPEN, NAT_TYPE_RESTRICTED,
-    NAT_TYPE_SYMMETRIC, NAT_TYPE_UNKNOWN,
-};
-pub use range::{
-    is_blake3, split_range, FetchRange, NoQuarantine, QuarantineCheck, RangeResponse,
-    MAX_RANGE_IN_SINGLE_RESPONSE,
-};
-pub use bft::{
-    BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPreprepare, BftPrepare,
-    BftStateTransfer, BftViewChange, Digest, Operation, RingId,
-};
 
 #[cfg(feature = "crypto")]
 pub use range::bao_support;
@@ -237,6 +230,4 @@ pub use relay_hpke::{ed25519_to_x25519, HpkeRelayHopSealer, RELAY_HOP_INFO};
 pub(crate) mod test_support;
 
 #[cfg(feature = "crypto")]
-pub use bft_driver::{
-    BftDriver, BftEvent, BftHandler, BftOutbound, RingMembership, RoundState,
-};
+pub use bft_driver::{BftDriver, BftEvent, BftHandler, BftOutbound, RingMembership, RoundState};

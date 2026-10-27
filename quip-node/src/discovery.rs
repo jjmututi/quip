@@ -42,16 +42,13 @@
 use quip_core::cbor::{encode, CborValue};
 use quip_core::cid::HashAlgo;
 use quip_core::dvv::NodeId;
-use quip_core::time::Timestamp;
 use quip_core::messages::Signer;
+use quip_core::time::Timestamp;
 use quip_net::coral::{
-    CoralLookup, LookupPath, LookupResponse, PathId, PathProof, SpilloverRequest,
-    SpilloverResponse,
+    CoralLookup, LookupPath, LookupResponse, PathId, PathProof, SpilloverRequest, SpilloverResponse,
 };
 use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
-use quip_net::discovery::{
-    DiscoveryStatus, Outbound, StartOutcome, WitnessDiscovery,
-};
+use quip_net::discovery::{DiscoveryStatus, Outbound, StartOutcome, WitnessDiscovery};
 use quip_net::{Error, Result};
 use quip_storage::ContentHasher;
 
@@ -124,11 +121,7 @@ impl DiscoveryHandle {
     }
 
     /// Feed a `SpilloverResponse` into the discovery.
-    pub fn ingest_spillover_response(
-        &self,
-        resp: SpilloverResponse,
-        now: Timestamp,
-    ) -> Result<()> {
+    pub fn ingest_spillover_response(&self, resp: SpilloverResponse, now: Timestamp) -> Result<()> {
         self.lock()?.ingest_spillover_response(resp, now)
     }
 
@@ -172,11 +165,7 @@ impl DiscoveryHandle {
     /// shape has one shared value list, not one per path (§3 of
     /// `docs/M9.6a-design.md`). Each proof is marked `responded: true`;
     /// the response is signed with the node's own key, matching §10.1.
-    pub fn respond_to_lookup(
-        &self,
-        lookup: &CoralLookup,
-        now: Timestamp,
-    ) -> LookupResponse {
+    pub fn respond_to_lookup(&self, lookup: &CoralLookup, now: Timestamp) -> LookupResponse {
         let values: Vec<Vec<u8>> = self
             .witness
             .statements_for(&lookup.key, &self.claim_log, now)
@@ -250,12 +239,7 @@ impl DiscoveryHandle {
 /// receives on the wire; an empty list hashes to SHA-256 of `80` (the
 /// CBOR empty array), not to zero.
 fn values_hash(values: &[Vec<u8>]) -> [u8; 32] {
-    let array = CborValue::Array(
-        values
-            .iter()
-            .map(|v| CborValue::Bytes(v.clone()))
-            .collect(),
-    );
+    let array = CborValue::Array(values.iter().map(|v| CborValue::Bytes(v.clone())).collect());
     let blob = encode(&array).unwrap_or_default();
     Sha256Hasher
         .digest(HashAlgo::Sha256, &blob)
@@ -323,12 +307,7 @@ mod tests {
         let witness = WitnessStore::new();
         let claim_log = ClaimLog::new();
         claim_log.observe(witness_signer.public_key(), t(0));
-        let stmt = crate::witness::issue_statement(
-            nid(1),
-            [0u8; 32],
-            &witness_signer,
-            t(0),
-        );
+        let stmt = crate::witness::issue_statement(nid(1), [0u8; 32], &witness_signer, t(0));
         assert!(witness.ingest(stmt, t(0)));
 
         let h = DiscoveryHandle::new(

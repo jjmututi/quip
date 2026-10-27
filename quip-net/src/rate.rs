@@ -387,12 +387,17 @@ mod tests {
             rl.check(nid(1), OperationKind::General, clock.now())
                 .unwrap();
         }
-        assert!(rl.check(nid(1), OperationKind::General, clock.now()).is_err());
+        assert!(rl
+            .check(nid(1), OperationKind::General, clock.now())
+            .is_err());
 
         // Advance 1 second. General refills at 1000/min ≈ 16.67/sec.
         clock.advance(1000);
         let mut allowed = 0u64;
-        while rl.check(nid(1), OperationKind::General, clock.now()).is_ok() {
+        while rl
+            .check(nid(1), OperationKind::General, clock.now())
+            .is_ok()
+        {
             allowed += 1;
             if allowed > 100 {
                 panic!("refill produced too many tokens");
@@ -413,7 +418,9 @@ mod tests {
             rl.check(nid(1), OperationKind::General, clock.now())
                 .unwrap();
         }
-        assert!(rl.check(nid(1), OperationKind::General, clock.now()).is_err());
+        assert!(rl
+            .check(nid(1), OperationKind::General, clock.now())
+            .is_err());
         // Governance is a separate bucket.
         rl.check(nid(1), OperationKind::Governance, clock.now())
             .unwrap();
@@ -428,7 +435,9 @@ mod tests {
             rl.check(nid(1), OperationKind::General, clock.now())
                 .unwrap();
         }
-        assert!(rl.check(nid(1), OperationKind::General, clock.now()).is_err());
+        assert!(rl
+            .check(nid(1), OperationKind::General, clock.now())
+            .is_err());
         rl.check(nid(2), OperationKind::General, clock.now())
             .unwrap();
     }
@@ -501,11 +510,7 @@ mod tests {
             rl.check(nid(i), OperationKind::General, clock.now())
                 .unwrap();
         }
-        assert!(
-            rl.len() <= 3,
-            "map size exceeded max_entries: {}",
-            rl.len()
-        );
+        assert!(rl.len() <= 3, "map size exceeded max_entries: {}", rl.len());
     }
 
     #[test]

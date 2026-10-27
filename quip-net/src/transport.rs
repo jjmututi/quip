@@ -170,15 +170,13 @@ use crate::sync_stream::{SyncEvent, SyncStream};
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+use quinn::Endpoint as QuinnEndpoint;
 use quip_core::cbor::CborValue;
 use quip_core::dvv::NodeId;
 use quip_core::messages::KeyClaim;
 use quip_core::time::Timestamp;
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::Endpoint as QuinnEndpoint;
-use rustls::client::danger::{
-    HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier,
-};
+use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use rustls::{DigitallySignedStruct, SignatureScheme};
 use std::net::SocketAddr;
@@ -431,11 +429,7 @@ impl Endpoint {
     ///
     /// Uses the endpoint's own [`QuipNetConfig`]; callers that want a
     /// different config construct a second endpoint.
-    pub async fn connect(
-        &self,
-        addr: SocketAddr,
-        server_name: &str,
-    ) -> Result<ConnectionDriver> {
+    pub async fn connect(&self, addr: SocketAddr, server_name: &str) -> Result<ConnectionDriver> {
         let connecting = self
             .inner
             .connect(addr, server_name)
@@ -1209,24 +1203,31 @@ impl ConnectionDriver {
 
         if let Some(recv) = self.control_recv.take() {
             let tx = tx.clone();
-            self.read_tasks
-                .push(tokio::spawn(read_loop(recv, Tier::Ctrl, CTRL_STREAM_ID, tx)));
+            self.read_tasks.push(tokio::spawn(read_loop(
+                recv,
+                Tier::Ctrl,
+                CTRL_STREAM_ID,
+                tx,
+            )));
         }
 
         if let Some(recv) = self.t1_recv_scratch.take() {
             let tx = tx.clone();
-            self.read_tasks
-                .push(tokio::spawn(read_loop(recv, Tier::Sync, SYNC_STREAM_ID, tx)));
+            self.read_tasks.push(tokio::spawn(read_loop(
+                recv,
+                Tier::Sync,
+                SYNC_STREAM_ID,
+                tx,
+            )));
         }
 
         let conn_t2 = self.conn.clone();
         let tx_t2 = tx.clone();
-        self.read_tasks
-            .push(tokio::spawn(accept_bulk_loop(
-                conn_t2,
-                tx_t2,
-                T2_MAX_STREAMS,
-            )));
+        self.read_tasks.push(tokio::spawn(accept_bulk_loop(
+            conn_t2,
+            tx_t2,
+            T2_MAX_STREAMS,
+        )));
 
         let conn_t3 = self.conn.clone();
         let tx_t3 = tx;
@@ -1386,8 +1387,9 @@ fn operation_kind_for(msg: &IncomingMessage) -> OperationKind {
         "pin_announce" => OperationKind::PinAnnounce,
         "spillover" | "spillover_response" => OperationKind::Spillover,
         "relay_discovery" | "relay_response" => OperationKind::Relay,
-        "register_tcid" | "delegation" | "quarantine" | "unquarantine"
-        | "derivative_link" => OperationKind::Governance,
+        "register_tcid" | "delegation" | "quarantine" | "unquarantine" | "derivative_link" => {
+            OperationKind::Governance
+        }
         _ => OperationKind::General,
     }
 }
@@ -1398,12 +1400,7 @@ fn operation_kind_for(msg: &IncomingMessage) -> OperationKind {
 
 /// Read framed messages from `recv`, dispatch each, and forward events
 /// on `tx` until the stream closes or a protocol error is encountered.
-async fn read_loop(
-    mut recv: quinn::RecvStream,
-    tier: Tier,
-    stream: u64,
-    tx: mpsc::Sender<Event>,
-) {
+async fn read_loop(mut recv: quinn::RecvStream, tier: Tier, stream: u64, tx: mpsc::Sender<Event>) {
     let mut buf: Vec<u8> = Vec::with_capacity(1024);
     let mut tmp = [0u8; 4096];
 
@@ -1502,11 +1499,7 @@ fn route_message(bytes: &[u8], tier: Tier, stream: u64) -> Option<Event> {
 /// for that stream ends, so a peer that opens more concurrent bulk
 /// streams than the cap gets QUIC-level backpressure rather than the
 /// driver queueing unboundedly.
-async fn accept_bulk_loop(
-    conn: quinn::Connection,
-    tx: mpsc::Sender<Event>,
-    max_streams: usize,
-) {
+async fn accept_bulk_loop(conn: quinn::Connection, tx: mpsc::Sender<Event>, max_streams: usize) {
     let permits = Arc::new(Semaphore::new(max_streams.max(1)));
 
     loop {
@@ -1683,8 +1676,7 @@ mod tests {
 
     fn make_cert() -> (Vec<u8>, Vec<u8>) {
         let CertifiedKey { cert, key_pair } =
-            generate_simple_self_signed(vec!["localhost".to_string()])
-                .expect("rcgen self-signed");
+            generate_simple_self_signed(vec!["localhost".to_string()]).expect("rcgen self-signed");
         (cert.der().to_vec(), key_pair.serialize_der())
     }
 
@@ -1734,15 +1726,14 @@ mod tests {
     }
 
     fn server_endpoint(seed: u8) -> (Endpoint, SocketAddr) {
-        let server = Endpoint::server(server_config(seed, Capabilities::baseline()))
-            .expect("server bind");
+        let server =
+            Endpoint::server(server_config(seed, Capabilities::baseline())).expect("server bind");
         let addr = server.local_addr().expect("server local addr");
         (server, addr)
     }
 
     fn client_endpoint(seed: u8) -> Endpoint {
-        Endpoint::client(client_config(seed, Capabilities::baseline()))
-            .expect("client bind")
+        Endpoint::client(client_config(seed, Capabilities::baseline())).expect("client bind")
     }
 
     /// Drive both sides through the handshake and Key Claim exchange
@@ -1768,8 +1759,7 @@ mod tests {
         client_seed: u8,
         caps: Capabilities,
     ) -> (ConnectionDriver, ConnectionDriver) {
-        let server =
-            Endpoint::server(server_config(server_seed, caps)).expect("server bind");
+        let server = Endpoint::server(server_config(server_seed, caps)).expect("server bind");
         let server_addr = server.local_addr().expect("server local addr");
 
         let server_fut = async move {
@@ -1783,8 +1773,7 @@ mod tests {
         };
 
         let client_fut = async {
-            let client = Endpoint::client(client_config(client_seed, caps))
-                .expect("client bind");
+            let client = Endpoint::client(client_config(client_seed, caps)).expect("client bind");
             let mut driver = client
                 .connect(server_addr, "localhost")
                 .await
@@ -1851,10 +1840,7 @@ mod tests {
         });
 
         let client = client_endpoint(2);
-        let client_driver = client
-            .connect(server_addr, "localhost")
-            .await
-            .unwrap();
+        let client_driver = client.connect(server_addr, "localhost").await.unwrap();
 
         assert_eq!(client_driver.role(), Role::Initiator);
         assert_eq!(server_handle.await.unwrap(), Role::Responder);
@@ -1958,14 +1944,13 @@ mod tests {
     async fn capability_gate_rejects_governance_without_capability() {
         let (mut server, mut client) = handshake_pair(1, 2).await;
 
-        let msg =
-            Message::RegisterTcid(quip_core::messages::TrustedCidRegistration {
-                cid: quip_core::cid::CidOrV1::Raw(quip_core::cid::Cid([0x10; 32])),
-                app_metadata: vec![],
-                owner: nid(1),
-                timestamp: now(),
-                signature: [0xef; 64],
-            });
+        let msg = Message::RegisterTcid(quip_core::messages::TrustedCidRegistration {
+            cid: quip_core::cid::CidOrV1::Raw(quip_core::cid::Cid([0x10; 32])),
+            app_metadata: vec![],
+            owner: nid(1),
+            timestamp: now(),
+            signature: [0xef; 64],
+        });
         let err = client.send(&msg, now()).await.expect_err("must reject");
         assert!(matches!(err, Error::CapabilityViolation { .. }));
 
@@ -1979,14 +1964,13 @@ mod tests {
     async fn injected_frame_is_rejected_by_dispatch_inbound() {
         let (mut server, mut client) = handshake_pair(1, 2).await;
 
-        let msg =
-            Message::RegisterTcid(quip_core::messages::TrustedCidRegistration {
-                cid: quip_core::cid::CidOrV1::Raw(quip_core::cid::Cid([0x10; 32])),
-                app_metadata: vec![],
-                owner: nid(1),
-                timestamp: now(),
-                signature: [0xef; 64],
-            });
+        let msg = Message::RegisterTcid(quip_core::messages::TrustedCidRegistration {
+            cid: quip_core::cid::CidOrV1::Raw(quip_core::cid::Cid([0x10; 32])),
+            app_metadata: vec![],
+            owner: nid(1),
+            timestamp: now(),
+            signature: [0xef; 64],
+        });
         // `send` would refuse: neither side negotiated GOVERNANCE. This
         // models a peer that constructs the frame itself.
         server
@@ -2099,8 +2083,14 @@ mod tests {
             .peer_key_claim()
             .expect("server stored the peer's claim");
 
-        assert_eq!(client_sees.node_id, [1u8; 32], "client sees server's NodeId");
-        assert_eq!(server_sees.node_id, [2u8; 32], "server sees client's NodeId");
+        assert_eq!(
+            client_sees.node_id, [1u8; 32],
+            "client sees server's NodeId"
+        );
+        assert_eq!(
+            server_sees.node_id, [2u8; 32],
+            "server sees client's NodeId"
+        );
 
         // Local claims are also exposed.
         assert_eq!(client.local_key_claim().node_id, [2u8; 32]);
@@ -2274,7 +2264,10 @@ mod tests {
             }
         }
 
-        assert_eq!(bulk_frames, 6, "expected 6 bulk frames (start + 4 + complete)");
+        assert_eq!(
+            bulk_frames, 6,
+            "expected 6 bulk frames (start + 4 + complete)"
+        );
         assert_eq!(rate_errors, 0, "bulk frames must not be rate-limited");
     }
 
@@ -2696,9 +2689,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn rtt_is_none_before_handshake() {
         let (server, addr) = server_endpoint(1);
-        let server_task = tokio::spawn(async move {
-            server.accept().await.unwrap().unwrap()
-        });
+        let server_task = tokio::spawn(async move { server.accept().await.unwrap().unwrap() });
         let client = client_endpoint(2);
         let client_driver = client.connect(addr, "localhost").await.unwrap();
         assert_eq!(

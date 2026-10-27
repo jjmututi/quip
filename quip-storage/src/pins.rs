@@ -27,7 +27,14 @@ use quip_core::messages::PinEntry;
 use quip_core::time::Timestamp;
 
 /// Keys accepted by [`PinRecord::from_cbor`].
-const PIN_RECORD_KEYS: &[&str] = &["resource_id", "cid", "pinned_at", "ttl", "ref_count", "local"];
+const PIN_RECORD_KEYS: &[&str] = &[
+    "resource_id",
+    "cid",
+    "pinned_at",
+    "ttl",
+    "ref_count",
+    "local",
+];
 
 /// A pin held locally or observed from a remote peer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -133,7 +140,10 @@ impl PinRecord {
                 CborValue::String("ref_count".into()),
                 CborValue::Int(self.ref_count as i128),
             ),
-            (CborValue::String("local".into()), CborValue::Bool(self.local)),
+            (
+                CborValue::String("local".into()),
+                CborValue::Bool(self.local)
+            ),
         ])
     }
 
@@ -601,7 +611,11 @@ mod tests {
         assert_eq!(table.unpin(b"a", Some(&cid(1))), 1);
         assert!(table.get(b"a", &cid(1)).is_none());
         assert_eq!(table.unpin(b"a", Some(&cid(1))), 0);
-        assert_eq!(table.unpin(b"a", None), 1, "removes every remaining version");
+        assert_eq!(
+            table.unpin(b"a", None),
+            1,
+            "removes every remaining version"
+        );
         assert_eq!(table.len(), 1);
     }
 

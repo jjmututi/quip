@@ -12,8 +12,8 @@
 //!   and [`quip_core::messages::Verifier`] implementations for
 //!   `KeyClaim` (§5.1) and witness/governance signatures (§5.4, §7).
 
-use quip_core::messages::{Signer, Verifier};
 use quip_core::cid::HashAlgo;
+use quip_core::messages::{Signer, Verifier};
 use quip_storage::ContentHasher;
 
 // -----------------------------------------------------------------------------
@@ -117,12 +117,7 @@ impl Signer for Ed25519Signer {
 pub struct Ed25519Verifier;
 
 impl Verifier for Ed25519Verifier {
-    fn verify_ed25519(
-        &self,
-        public_key: &[u8; 32],
-        message: &[u8],
-        signature: &[u8; 64],
-    ) -> bool {
+    fn verify_ed25519(&self, public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
         // The `Verifier` trait provides `.verify()`; `ed25519-dalek`
         // re-exports it from the `signature` crate and it is not in
         // scope by default.

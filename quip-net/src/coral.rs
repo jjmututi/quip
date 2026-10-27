@@ -94,9 +94,7 @@ impl LookupPath {
                     value_hash = Some(as_bytes_n::<32>(val)?)
                 }
                 CborValue::String(s) if s == "ttl" => ttl = Some(as_u64(val)?),
-                CborValue::String(_) => {
-                    return Err(Error::BadFrame("unknown key in LookupPath"))
-                }
+                CborValue::String(_) => return Err(Error::BadFrame("unknown key in LookupPath")),
                 _ => return Err(Error::BadFrame("LookupPath keys must be text")),
             }
         }
@@ -184,16 +182,13 @@ impl PathProof {
                     value_hash = Some(as_bytes_n::<32>(val)?)
                 }
                 CborValue::String(s) if s == "responded" => responded = Some(as_bool(val)?),
-                CborValue::String(_) => {
-                    return Err(Error::BadFrame("unknown key in PathProof"))
-                }
+                CborValue::String(_) => return Err(Error::BadFrame("unknown key in PathProof")),
                 _ => return Err(Error::BadFrame("PathProof keys must be text")),
             }
         }
         Ok(Self {
             path_id: path_id.ok_or(Error::BadFrame("missing path_id"))?,
-            node_signatures: node_signatures
-                .ok_or(Error::BadFrame("missing node_signatures"))?,
+            node_signatures: node_signatures.ok_or(Error::BadFrame("missing node_signatures"))?,
             value_hash: value_hash.ok_or(Error::BadFrame("missing value_hash"))?,
             responded: responded.ok_or(Error::BadFrame("missing responded"))?,
         })
@@ -1036,8 +1031,7 @@ mod tests {
         let decoded = decode(&payload).unwrap();
         let f = crate::codec::fields(&decoded, "cross_path_validation").unwrap();
         let responses = as_array(&f[1]).unwrap();
-        let inner_decoded =
-            LookupResponse::from_bytes(&encode(&responses[0]).unwrap()).unwrap();
+        let inner_decoded = LookupResponse::from_bytes(&encode(&responses[0]).unwrap()).unwrap();
         assert_eq!(inner_decoded.signature, [0xaa; 64]);
     }
 

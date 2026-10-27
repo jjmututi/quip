@@ -368,10 +368,7 @@ mod tests {
     #[test]
     fn reserve_send_for_unregistered_stream_errors() {
         let mut c = Connection::new_initiator(QuipNetConfig::default());
-        assert!(matches!(
-            c.reserve_send(4, 1),
-            Err(Error::BadStream(_))
-        ));
+        assert!(matches!(c.reserve_send(4, 1), Err(Error::BadStream(_))));
     }
 
     #[test]

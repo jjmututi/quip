@@ -175,9 +175,7 @@ impl Capabilities {
 
         for &(dependent, required) in RULES {
             if bits & dependent != 0 && bits & required != required {
-                return Err(Error::Handshake(
-                    "capability dependency closure violated",
-                ));
+                return Err(Error::Handshake("capability dependency closure violated"));
             }
         }
         Ok(())
@@ -431,18 +429,14 @@ mod tests {
 
     #[test]
     fn closure_rejects_merkle_range_without_blake3() {
-        let caps = Capabilities(
-            Capabilities::MERKLE_RANGE | Capabilities::CID_ADDRESSING,
-        );
+        let caps = Capabilities(Capabilities::MERKLE_RANGE | Capabilities::CID_ADDRESSING);
         assert!(caps.validate_closure().is_err());
     }
 
     #[test]
     fn closure_accepts_merkle_range_with_blake3_and_cid_addressing() {
         let caps = Capabilities(
-            Capabilities::MERKLE_RANGE
-                | Capabilities::BLAKE3
-                | Capabilities::CID_ADDRESSING,
+            Capabilities::MERKLE_RANGE | Capabilities::BLAKE3 | Capabilities::CID_ADDRESSING,
         );
         assert!(caps.validate_closure().is_ok());
     }
@@ -467,14 +461,20 @@ mod tests {
 
     #[test]
     fn handshake_roundtrip() {
-        let h = Handshake::new(Capabilities::baseline() | Capabilities(Capabilities::BLAKE3 | Capabilities::CID_ADDRESSING))
-            .with_extension(ExtensionId::HashAlgo, CborValue::Int(1))
-            .with_extension(ExtensionId::MaxRanges, CborValue::Int(1024));
+        let h = Handshake::new(
+            Capabilities::baseline()
+                | Capabilities(Capabilities::BLAKE3 | Capabilities::CID_ADDRESSING),
+        )
+        .with_extension(ExtensionId::HashAlgo, CborValue::Int(1))
+        .with_extension(ExtensionId::MaxRanges, CborValue::Int(1024));
         let bytes = h.to_bytes().unwrap();
         let back = Handshake::from_bytes(&bytes).unwrap();
         assert_eq!(back.version, h.version);
         assert_eq!(back.capabilities, h.capabilities);
-        assert_eq!(back.extension(ExtensionId::HashAlgo), Some(&CborValue::Int(1)));
+        assert_eq!(
+            back.extension(ExtensionId::HashAlgo),
+            Some(&CborValue::Int(1))
+        );
         assert_eq!(
             back.extension(ExtensionId::MaxRanges),
             Some(&CborValue::Int(1024))
@@ -533,7 +533,7 @@ mod tests {
         assert_eq!(back.to_bytes().unwrap(), bytes);
     }
 
-        #[test]
+    #[test]
     fn merkle_range_roundtrips_through_wire_path() {
         // A valid local config: MERKLE_RANGE requires BLAKE3 and
         // CID_ADDRESSING (spec §4 capability closure).

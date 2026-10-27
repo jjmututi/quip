@@ -66,7 +66,11 @@ fn encode_bignum(tag: u64, magnitude: u128, out: &mut Vec<u8>) {
     let bytes = magnitude.to_be_bytes();
     let start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len());
     let minimal = &bytes[start..];
-    let minimal = if minimal.is_empty() { &[0u8][..] } else { minimal };
+    let minimal = if minimal.is_empty() {
+        &[0u8][..]
+    } else {
+        minimal
+    };
     encode_head(2, minimal.len() as u64, out);
     out.extend_from_slice(minimal);
 }

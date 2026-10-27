@@ -321,7 +321,10 @@ mod tests {
     fn lookup_starts_with_three_pending_paths() {
         let l = LookupProgress::start(nid(1), t(0));
         assert_eq!(l.paths.len(), crate::constants::LOOKUP_PATHS);
-        assert!(l.paths.iter().all(|p| matches!(p, LookupPathState::Pending)));
+        assert!(l
+            .paths
+            .iter()
+            .all(|p| matches!(p, LookupPathState::Pending)));
         assert!(!l.has_consensus());
     }
 

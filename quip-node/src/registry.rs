@@ -218,13 +218,9 @@ pub(crate) async fn unregister_peer(
     };
     if removed {
         let mut tasks = peer_tasks.lock().await;
-        let is_ours = tasks
-            .get(peer)
-            .map(|(s, _)| s == slot)
-            .unwrap_or(false);
+        let is_ours = tasks.get(peer).map(|(s, _)| s == slot).unwrap_or(false);
         if is_ours {
             tasks.remove(peer);
         }
     }
 }
-

@@ -14,9 +14,7 @@ use quip_core::time::Timestamp;
 use quip_net::cluster::{ClusterMergeReject, MergeRejectReason};
 use quip_net::coral::{LookupPath, LookupResponse};
 use quip_net::crypto::{Ed25519Signer, Ed25519Verifier};
-use quip_net::discovery::{
-    DiscoveryPhaseKind, Outbound as DiscoveryOutbound, StartOutcome,
-};
+use quip_net::discovery::{DiscoveryPhaseKind, Outbound as DiscoveryOutbound, StartOutcome};
 use quip_net::establishment::{
     ConnectionFlow, FlowAction, FlowConfig, FlowFailure, FlowPhase, KtStatus,
 };
@@ -25,13 +23,9 @@ use quip_net::handshake::Capabilities;
 use quip_net::message::{self, Message};
 use quip_net::nat::{NatConfig, NatEvent as DriverNatEvent};
 use quip_net::nat_driver::{DhtResult, NatDriver};
-use quip_net::nat_wire::{
-    Candidate, CandidateAnnounce, RelayEntry, RelayResponse, CANDIDATE_HOST,
-};
-use quip_net::transport::{
-    ClientConfig, ConnectionDriver, Endpoint, Event,
-};
-use quip_net::{Error, GATEWAY_ROUTER_COUNT, Result, CLUSTER_HEARTBEAT_S};
+use quip_net::nat_wire::{Candidate, CandidateAnnounce, RelayEntry, RelayResponse, CANDIDATE_HOST};
+use quip_net::transport::{ClientConfig, ConnectionDriver, Endpoint, Event};
+use quip_net::{Error, Result, CLUSTER_HEARTBEAT_S, GATEWAY_ROUTER_COUNT};
 use quip_storage::blob::BlobStore;
 use quip_storage::QuipStore;
 
@@ -41,18 +35,18 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
 use crate::cluster::ClusterHandle;
+use crate::config::{make_key_claim, SharedClock, SharedSigner};
 use crate::dht;
 use crate::dht::DhtHandle;
 use crate::discovery::DiscoveryHandle;
-use crate::config::{make_key_claim, SharedClock, SharedSigner};
 use crate::event::NodeEvent;
 use crate::peer::{PeerLifecycle, PeerSlot};
 use crate::registry::{register_peer, unregister_peer, PeerRegistry, TaskMap};
 use crate::trust::PeerTrust;
 use crate::witness::{issue_statement, WitnessStore};
 use crate::{
-    set_peer_lifecycle, DISCOVERY_WAIT_MS, LOCAL_CANDIDATE_PRIORITY, NAT_PHASE_TIMEOUT_MS,
-    OUTBOUND_CAPACITY, SharedTrust,
+    set_peer_lifecycle, SharedTrust, DISCOVERY_WAIT_MS, LOCAL_CANDIDATE_PRIORITY,
+    NAT_PHASE_TIMEOUT_MS, OUTBOUND_CAPACITY,
 };
 
 /// Drain the DHT's outbound queue and forward each message to every
@@ -70,10 +64,7 @@ pub(crate) async fn dht_router_task(
         let senders: Vec<mpsc::Sender<Message>> = {
             let reg = peers.lock().await;
             match out.target {
-                Some(peer) => reg
-                    .outbound_of(&peer)
-                    .into_iter()
-                    .collect(),
+                Some(peer) => reg.outbound_of(&peer).into_iter().collect(),
                 None => {
                     // Mesh verb: forward to the k closest routing-eligible
                     // peers by XOR distance, not the whole mesh. A mesh verb
@@ -170,7 +161,10 @@ pub(crate) async fn accept_loop<B>(
             Ok(None) => return,
             Err(e) => {
                 let _ = events_tx
-                    .send(NodeEvent::Error { peer: None, error: e })
+                    .send(NodeEvent::Error {
+                        peer: None,
+                        error: e,
+                    })
                     .await;
                 return;
             }
@@ -208,14 +202,16 @@ pub(crate) async fn accept_loop<B>(
                 Ok(p) => p,
                 Err(e) => {
                     let _ = events_tx
-                        .send(NodeEvent::Error { peer: None, error: e })
+                        .send(NodeEvent::Error {
+                            peer: None,
+                            error: e,
+                        })
                         .await;
                     return;
                 }
             };
             let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAPACITY);
-            let slot =
-                register_peer(&peers, &peer_tasks, peer, out_tx).await;
+            let slot = register_peer(&peers, &peer_tasks, peer, out_tx).await;
             dht.note_peer(peer, slot, None, clock.now());
 
             // M10.3: same as Node::connect — record the claim, then
@@ -226,9 +222,7 @@ pub(crate) async fn accept_loop<B>(
                     let _ = events_tx
                         .send(NodeEvent::Error {
                             peer: Some(peer),
-                            error: Error::Transport(
-                                "peer claim missing after handshake".into(),
-                            ),
+                            error: Error::Transport("peer claim missing after handshake".into()),
                         })
                         .await;
                     unregister_peer(&peers, &peer_tasks, &peer, &slot).await;
@@ -319,13 +313,8 @@ where
                     if let Ok(m) = parse_inbound(driver, &msg.raw, tier) {
                         let peer = driver.peer_node_id();
                         let local_id = driver.local_key_claim().node_id;
-                        let action = classify_inbound(
-                            &m,
-                            InboundOptions::HANDSHAKE,
-                            peer,
-                            &local_id,
-                            false,
-                        );
+                        let action =
+                            classify_inbound(&m, InboundOptions::HANDSHAKE, peer, &local_id, false);
                         let _ = apply_inbound(
                             action, m, driver, clock, peer, local_id, false, &deps, None,
                         )
@@ -406,9 +395,9 @@ fn is_coral_verb(m: &Message) -> bool {
 /// parsing without the capability check would make §4's negotiation
 /// advisory on receive.
 fn parse_inbound(driver: &ConnectionDriver, raw: &[u8], tier: Tier) -> Result<Message> {
-    let negotiated = driver
-        .agreed()
-        .ok_or(Error::Handshake("inbound frame before capability negotiation"))?;
+    let negotiated = driver.agreed().ok_or(Error::Handshake(
+        "inbound frame before capability negotiation",
+    ))?;
     message::dispatch_inbound(negotiated, raw, tier)
 }
 
@@ -634,10 +623,7 @@ where
                     let _ = deps.witness.ingest(stmt.clone(), now);
                     if let Some(flow) = flow.as_deref_mut() {
                         if flow.remote_node_id() == Some(stmt.subject) {
-                            let _ = flow.on_message(
-                                &Message::AnnounceWitness(stmt.clone()),
-                                now,
-                            );
+                            let _ = flow.on_message(&Message::AnnounceWitness(stmt.clone()), now);
                         }
                     }
                 }
@@ -660,22 +646,12 @@ where
             }
             InboundOutcome::Handled
         }
-        InboundAction::Nat => {
-            match peer.and_then(|peer| dht::dht_result_from(&msg, &peer)) {
-                Some(result) => InboundOutcome::Nat(result),
-                None => InboundOutcome::Unhandled(msg),
-            }
-        }
+        InboundAction::Nat => match peer.and_then(|peer| dht::dht_result_from(&msg, &peer)) {
+            Some(result) => InboundOutcome::Nat(result),
+            None => InboundOutcome::Unhandled(msg),
+        },
         InboundAction::Coral => {
-            handle_discovery_event(
-                driver,
-                clock,
-                deps.discovery,
-                msg,
-                flow,
-                deps.witness,
-            )
-            .await;
+            handle_discovery_event(driver, clock, deps.discovery, msg, flow, deps.witness).await;
             InboundOutcome::Handled
         }
         InboundAction::ClusterInfo => {
@@ -759,9 +735,7 @@ where
             InboundOutcome::Handled
         }
         InboundAction::Pins => {
-            if let Some(Some(reply)) =
-                try_auto_serve_pins(deps.store, &msg, now).await
-            {
+            if let Some(Some(reply)) = try_auto_serve_pins(deps.store, &msg, now).await {
                 let _ = driver.send(&reply, now).await;
             }
             InboundOutcome::Handled
@@ -936,8 +910,7 @@ async fn run_discovery_phase<B>(
     }
 
     // Wait for a resolution, bounded by a real-time deadline.
-    let deadline =
-        std::time::Instant::now() + Duration::from_millis(DISCOVERY_WAIT_MS);
+    let deadline = std::time::Instant::now() + Duration::from_millis(DISCOVERY_WAIT_MS);
 
     loop {
         let now = clock.now();
@@ -1124,12 +1097,7 @@ where
         ..NatConfig::default()
     };
 
-    let mut nat_driver = NatDriver::new(
-        local_id,
-        local_addr,
-        nat_config,
-        dht.clone(),
-    );
+    let mut nat_driver = NatDriver::new(local_id, local_addr, nat_config, dht.clone());
 
     // Register the session so `publish_candidates` routes to `peer`.
     dht.note_session(session_id, peer);
@@ -1189,8 +1157,7 @@ where
         dht_mut.publish_candidates(our_announce);
     }
 
-    let deadline =
-        std::time::Instant::now() + Duration::from_millis(NAT_PHASE_TIMEOUT_MS);
+    let deadline = std::time::Instant::now() + Duration::from_millis(NAT_PHASE_TIMEOUT_MS);
 
     let outcome = 'outer: loop {
         let now = clock.now();
@@ -1211,9 +1178,7 @@ where
                     break 'outer NatPhaseOutcome::Failed;
                 }
                 DriverNatEvent::ProbeRequested {
-                    session_id,
-                    addr,
-                    ..
+                    session_id, addr, ..
                 } => {
                     let success = if addr == transport_addr {
                         // The live connection is the proof.
@@ -1238,26 +1203,17 @@ where
                         Ok(m) => m,
                         Err(_) => continue,
                     };
-                    let _ = driver
-                        .send(&Message::RelayDiscovery(msg), now)
-                        .await;
+                    let _ = driver.send(&Message::RelayDiscovery(msg), now).await;
                 }
                 DriverNatEvent::RelayPathAvailable {
-                    session_id,
-                    relay,
-                    ..
+                    session_id, relay, ..
                 } => {
                     // The state machine surfaced a relay; attempt it.
                     // On loopback the relay is the peer itself, which
                     // the transport already proves reachable, so the
                     // attempt trivially succeeds. A real network would
                     // route through the relay and report the outcome.
-                    nat_driver.on_relay_result(
-                        session_id,
-                        relay.relay_id,
-                        true,
-                        now,
-                    );
+                    nat_driver.on_relay_result(session_id, relay.relay_id, true, now);
                 }
                 _ => {}
             }
@@ -1586,8 +1542,7 @@ where
         // overdue phase fails here rather than being advanced.
         for action in flow.poll(now) {
             if let FlowAction::Failed(failure) = action {
-                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed)
-                    .await;
+                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed).await;
                 let trust_level = current_trust(trust, &peer).await;
                 let _ = events_tx
                     .send(NodeEvent::EstablishmentFailed {
@@ -1618,23 +1573,11 @@ where
                 match outcome {
                     NatPhaseOutcome::Direct => {
                         let _ = flow.on_nat_complete(true, now);
-                        set_peer_lifecycle(
-                            peers,
-                            dht,
-                            &slot,
-                            PeerLifecycle::NatDirect,
-                        )
-                        .await;
+                        set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::NatDirect).await;
                     }
                     NatPhaseOutcome::Relayed => {
                         let _ = flow.on_nat_complete(true, now);
-                        set_peer_lifecycle(
-                            peers,
-                            dht,
-                            &slot,
-                            PeerLifecycle::NatRelayed,
-                        )
-                        .await;
+                        set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::NatRelayed).await;
                     }
                     NatPhaseOutcome::Failed => {
                         let _ = flow.on_nat_complete(false, now);
@@ -1681,8 +1624,7 @@ where
             }
             FlowPhase::Failed(failure) => {
                 let failure = *failure;
-                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed)
-                    .await;
+                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed).await;
                 let trust_level = current_trust(trust, &peer).await;
                 let _ = events_tx
                     .send(NodeEvent::EstablishmentFailed {
@@ -1698,11 +1640,8 @@ where
                 // `NatTraversal`, so reaching these phases here is a
                 // bug, not a runtime condition. Emit a protocol error
                 // and give up.
-                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed)
-                    .await;
-                let error = Error::Transport(
-                    "establishment flow in a pre-NAT phase".into(),
-                );
+                set_peer_lifecycle(peers, dht, &slot, PeerLifecycle::Failed).await;
+                let error = Error::Transport("establishment flow in a pre-NAT phase".into());
                 let _ = events_tx
                     .send(NodeEvent::Error {
                         peer: Some(peer),
@@ -1786,8 +1725,7 @@ pub(crate) async fn peer_run<B>(
         None => {
             // Unreachable in practice; guard defensively in case the
             // transport's guarantees change.
-            set_peer_lifecycle(&peers, &dht, &slot, PeerLifecycle::Failed)
-                .await;
+            set_peer_lifecycle(&peers, &dht, &slot, PeerLifecycle::Failed).await;
             let failure = FlowFailure::KeyClaimTimeout;
             let trust_level = current_trust(&trust, &peer).await;
             let _ = events_tx
@@ -1950,8 +1888,7 @@ async fn run_peer_loop<B>(
                     .collect()
             };
             for subject in due {
-                let stmt =
-                    issue_statement(subject, [0u8; 32], deps.signer.as_ref(), now);
+                let stmt = issue_statement(subject, [0u8; 32], deps.signer.as_ref(), now);
                 let msg = Message::AnnounceWitness(stmt);
                 for tx in &senders {
                     let _ = tx.send(msg.clone()).await;
@@ -1979,94 +1916,82 @@ async fn run_peer_loop<B>(
 
         for e in events {
             let node_event = match e {
-                Event::Frame { tier, msg, .. } => {
-                    match parse_inbound(driver, &msg.raw, tier) {
-                        Ok(m) => {
-                            let opts = InboundOptions {
-                                serve_pins: auto_serve_pins,
-                                ..InboundOptions::STEADY
-                            };
-                            let action = classify_inbound(
-                                &m,
-                                opts,
-                                Some(peer),
-                                &local_id,
-                                relay_capable,
-                            );
-                            match apply_inbound(
-                                action,
-                                m,
-                                driver,
-                                clock,
-                                Some(peer),
-                                local_id,
-                                relay_capable,
-                                deps,
-                                None,
-                            )
-                            .await
-                            {
-                                InboundOutcome::Unhandled(m) => {
-                                    NodeEvent::Message { peer, tier, msg: m }
-                                }
-                                InboundOutcome::Nat(result) => {
-                                    dht.note_peer(peer, slot, None, now);
-                                    dht.enqueue(result);
-                                    continue;
-                                }
-                                InboundOutcome::Handled => continue,
+                Event::Frame { tier, msg, .. } => match parse_inbound(driver, &msg.raw, tier) {
+                    Ok(m) => {
+                        let opts = InboundOptions {
+                            serve_pins: auto_serve_pins,
+                            ..InboundOptions::STEADY
+                        };
+                        let action =
+                            classify_inbound(&m, opts, Some(peer), &local_id, relay_capable);
+                        match apply_inbound(
+                            action,
+                            m,
+                            driver,
+                            clock,
+                            Some(peer),
+                            local_id,
+                            relay_capable,
+                            deps,
+                            None,
+                        )
+                        .await
+                        {
+                            InboundOutcome::Unhandled(m) => {
+                                NodeEvent::Message { peer, tier, msg: m }
                             }
-                        }
-                        Err(err) => NodeEvent::Error {
-                            peer: Some(peer),
-                            error: err,
-                        },
-                    }
-                }
-                Event::Datagram { msg } => {
-                    match parse_inbound(driver, &msg.raw, Tier::Event) {
-                        Ok(m) => {
-                            let action = classify_inbound(
-                                &m,
-                                InboundOptions::DATAGRAM,
-                                Some(peer),
-                                &local_id,
-                                relay_capable,
-                            );
-                            match apply_inbound(
-                                action,
-                                m,
-                                driver,
-                                clock,
-                                Some(peer),
-                                local_id,
-                                relay_capable,
-                                deps,
-                                None,
-                            )
-                            .await
-                            {
-                                InboundOutcome::Unhandled(m) => {
-                                    NodeEvent::Datagram { peer, msg: m }
-                                }
-                                InboundOutcome::Nat(result) => {
-                                    dht.note_peer(peer, slot, None, now);
-                                    dht.enqueue(result);
-                                    continue;
-                                }
-                                InboundOutcome::Handled => continue,
+                            InboundOutcome::Nat(result) => {
+                                dht.note_peer(peer, slot, None, now);
+                                dht.enqueue(result);
+                                continue;
                             }
+                            InboundOutcome::Handled => continue,
                         }
-                        Err(err) => NodeEvent::Error {
-                            peer: Some(peer),
-                            error: err,
-                        },
                     }
-                }
+                    Err(err) => NodeEvent::Error {
+                        peer: Some(peer),
+                        error: err,
+                    },
+                },
+                Event::Datagram { msg } => match parse_inbound(driver, &msg.raw, Tier::Event) {
+                    Ok(m) => {
+                        let action = classify_inbound(
+                            &m,
+                            InboundOptions::DATAGRAM,
+                            Some(peer),
+                            &local_id,
+                            relay_capable,
+                        );
+                        match apply_inbound(
+                            action,
+                            m,
+                            driver,
+                            clock,
+                            Some(peer),
+                            local_id,
+                            relay_capable,
+                            deps,
+                            None,
+                        )
+                        .await
+                        {
+                            InboundOutcome::Unhandled(m) => NodeEvent::Datagram { peer, msg: m },
+                            InboundOutcome::Nat(result) => {
+                                dht.note_peer(peer, slot, None, now);
+                                dht.enqueue(result);
+                                continue;
+                            }
+                            InboundOutcome::Handled => continue,
+                        }
+                    }
+                    Err(err) => NodeEvent::Error {
+                        peer: Some(peer),
+                        error: err,
+                    },
+                },
                 // Bulk streams are not surfaced by the first cut; a
                 // future iteration will hand them to a `BulkReceiver`.
-                Event::BulkStreamOpened { .. }
-                | Event::ControlConnected { .. } => continue,
+                Event::BulkStreamOpened { .. } | Event::ControlConnected { .. } => continue,
                 Event::Error { error, .. } => NodeEvent::Error {
                     peer: Some(peer),
                     error,
@@ -2115,8 +2040,7 @@ where
         }
         Message::QueryPins(q) => {
             let s = store.lock().await;
-            let pins =
-                s.query_pins(q.resource_id.as_deref(), q.cid.as_ref(), now);
+            let pins = s.query_pins(q.resource_id.as_deref(), q.cid.as_ref(), now);
             Some(Message::PinList(quip_net::sync::PinList { pins }))
         }
         _ => return None,
@@ -2350,13 +2274,7 @@ mod tests {
             "pre-establishment frames are not answered",
         );
         assert_eq!(
-            classify_inbound(
-                &msg,
-                InboundOptions::DISCOVERY,
-                Some(peer),
-                &nid(9),
-                false,
-            ),
+            classify_inbound(&msg, InboundOptions::DISCOVERY, Some(peer), &nid(9), false,),
             InboundAction::Unhandled,
             "a relay-incapable node does not answer",
         );
@@ -2435,4 +2353,3 @@ mod tests {
         }
     }
 }
-

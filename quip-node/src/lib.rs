@@ -337,8 +337,8 @@ pub mod discovery;
 pub mod event;
 pub mod peer;
 mod registry;
-pub mod trust;
 mod tasks;
+pub mod trust;
 pub mod witness;
 
 use quip_core::cid::{CidOrV1, HashAlgo};
@@ -359,9 +359,9 @@ use std::time::Duration;
 use tokio::sync::{mpsc, Mutex, MutexGuard};
 use tokio::task::JoinHandle;
 
+use claim_log::ClaimLog;
 use dht::DhtHandle;
 use discovery::DiscoveryHandle;
-use claim_log::ClaimLog;
 use witness::WitnessStore;
 // M9.5b-b: peer-slot and lifecycle vocabulary.
 // M9.5b-c: `PeerLifecycle::is_routing_eligible` is the sole routing-
@@ -514,10 +514,7 @@ where
     ///
     /// The store is moved into the node and shared across all peers.
     /// Use [`Self::store`] to access it directly.
-    pub async fn bind_with_store(
-        config: NodeConfig,
-        store: QuipStore<B>,
-    ) -> Result<Self> {
+    pub async fn bind_with_store(config: NodeConfig, store: QuipStore<B>) -> Result<Self> {
         let (cert_der, key_der) = generate_self_signed_cert()?;
         let server_config = ServerConfig {
             bind: config.bind,
@@ -540,9 +537,8 @@ where
         let claim_log = ClaimLog::new();
         let witness = WitnessStore::new();
         // M10.3: initialize the trust policy.
-        let trust: SharedTrust = Arc::new(Mutex::new(
-            TrustPolicy::with_claim_log(claim_log.clone()),
-        ));
+        let trust: SharedTrust =
+            Arc::new(Mutex::new(TrustPolicy::with_claim_log(claim_log.clone())));
 
         let local_id = config.key_claim.node_id;
         let (dht, dht_outbound_rx) = DhtHandle::new(local_id);
@@ -652,11 +648,7 @@ where
     /// previous task is aborted and this connection becomes the
     /// current generation. See the module docs under "Peer
     /// generation."
-    pub async fn connect(
-        &mut self,
-        addr: SocketAddr,
-        server_name: &str,
-    ) -> Result<NodeId> {
+    pub async fn connect(&mut self, addr: SocketAddr, server_name: &str) -> Result<NodeId> {
         let client_config = ClientConfig {
             bind: "0.0.0.0:0".parse().expect("valid bind"),
             key_claim: self.local_claim.clone(),
@@ -678,8 +670,7 @@ where
         .await?;
 
         let (out_tx, out_rx) = mpsc::channel(OUTBOUND_CAPACITY);
-        let slot =
-            register_peer(&self.peers, &self.peer_tasks, peer, out_tx).await;
+        let slot = register_peer(&self.peers, &self.peer_tasks, peer, out_tx).await;
         self.dht.note_peer(peer, slot, Some(addr), clock.now());
 
         // M10.3: record the peer's claim before emitting Connected.
@@ -688,8 +679,7 @@ where
         let peer_claim = match driver.peer_key_claim().cloned() {
             Some(c) => c,
             None => {
-                unregister_peer(&self.peers, &self.peer_tasks, &peer, &slot)
-                    .await;
+                unregister_peer(&self.peers, &self.peer_tasks, &peer, &slot).await;
                 self.dht.forget_peer(&peer, &slot);
                 return Err(Error::Transport(
                     "peer claim missing after handshake".into(),
@@ -772,16 +762,9 @@ where
             }
         };
         let mut events = Vec::new();
-        match tokio::time::timeout(
-            Duration::from_millis(POLL_TIMEOUT_MS),
-            rx.recv(),
-        )
-        .await
-        {
+        match tokio::time::timeout(Duration::from_millis(POLL_TIMEOUT_MS), rx.recv()).await {
             Ok(Some(e)) => events.push(e),
-            Ok(None) => {
-                return Err(Error::Transport("event channel closed".into()))
-            }
+            Ok(None) => return Err(Error::Transport("event channel closed".into())),
             Err(_) => return Ok(events),
         }
         while let Ok(e) = rx.try_recv() {
@@ -810,9 +793,8 @@ where
     pub async fn send_to(&self, peer: &NodeId, msg: Message) -> Result<()> {
         let tx = {
             let reg = self.peers.lock().await;
-            reg.outbound_of(peer).ok_or_else(|| {
-                Error::Transport(format!("unknown peer {peer:?}"))
-            })?
+            reg.outbound_of(peer)
+                .ok_or_else(|| Error::Transport(format!("unknown peer {peer:?}")))?
         };
         tx.send(msg)
             .await
@@ -973,11 +955,7 @@ where
     /// Returns `true` if the decision was recorded. On a successful
     /// change, a [`NodeEvent::PeerTrustChanged`] fires on the event
     /// stream.
-    pub async fn trust_peer(
-        &self,
-        peer: &NodeId,
-        decision: PeerTrust,
-    ) -> bool {
+    pub async fn trust_peer(&self, peer: &NodeId, decision: PeerTrust) -> bool {
         let now = self.clock.now();
         let (accepted, changed, resulting) = {
             let mut policy = self.trust.lock().await;
@@ -1004,9 +982,7 @@ where
     }
 
     /// Snapshot of the trust store.
-    pub async fn trust_snapshot(
-        &self,
-    ) -> Vec<(NodeId, trust::StoredClaim)> {
+    pub async fn trust_snapshot(&self) -> Vec<(NodeId, trust::StoredClaim)> {
         self.trust.lock().await.snapshot()
     }
 
@@ -1017,23 +993,13 @@ where
     /// This updates only the local store; the pin is not propagated to
     /// peers. Propagation is an application concern (see `pin_announce`
     /// on T3 for the gossip mechanism).
-    pub async fn pin(
-        &self,
-        resource_id: &[u8],
-        cid: &CidOrV1,
-        ttl_seconds: u64,
-        now: Timestamp,
-    ) {
+    pub async fn pin(&self, resource_id: &[u8], cid: &CidOrV1, ttl_seconds: u64, now: Timestamp) {
         let mut s = self.store.lock().await;
         let _ = s.pin(resource_id, cid, ttl_seconds, now);
     }
 
     /// Drop a pin.
-    pub async fn unpin(
-        &self,
-        resource_id: &[u8],
-        cid: Option<&CidOrV1>,
-    ) -> usize {
+    pub async fn unpin(&self, resource_id: &[u8], cid: Option<&CidOrV1>) -> usize {
         let mut s = self.store.lock().await;
         s.unpin(resource_id, cid)
     }
@@ -1110,7 +1076,6 @@ impl<B> Drop for Node<B> {
     }
 }
 
-
 // -------------------------------------------------------------------------
 // Certificates
 // -------------------------------------------------------------------------
@@ -1135,20 +1100,18 @@ fn generate_self_signed_cert() -> Result<(Vec<u8>, Vec<u8>)> {
 mod tests {
     use super::*;
     use crate::tasks::make_lookup_paths;
-    use crate::witness::{
-        WITNESS_FIRST_SEEN_SECONDS, WITNESS_REISSUE_INTERVAL_SECONDS,
-    };
+    use crate::witness::{WITNESS_FIRST_SEEN_SECONDS, WITNESS_REISSUE_INTERVAL_SECONDS};
     use quip_core::address::Address;
     use quip_core::cid::Cid;
     use quip_core::dvv::Dvv;
     use quip_core::messages::Signer;
     use quip_core::time::{Clock, ManualClock};
-    use quip_net::GATEWAY_ROUTER_COUNT;
     use quip_net::crypto::{Ed25519Signer, Sha256Hasher};
     use quip_net::establishment::KtStatus;
     use quip_net::nat_driver::DhtClient;
     use quip_net::nat_wire::{ConnectivityAnnounce, NAT_TYPE_OPEN};
     use quip_net::sync::{GetRequest, QueryPins};
+    use quip_net::GATEWAY_ROUTER_COUNT;
     use quip_storage::CidTagging;
     use std::collections::BTreeSet;
 
@@ -1196,9 +1159,7 @@ mod tests {
     /// side: A skips the direct probe ladder and sends a signed
     /// `relay_discovery`. A does not need `relay_capable` — it is the
     /// requester, not the relay.
-    async fn make_forced_relay_node(
-        seed_byte: u8,
-    ) -> (Node, Arc<ManualClock>) {
+    async fn make_forced_relay_node(seed_byte: u8) -> (Node, Arc<ManualClock>) {
         let signer = Ed25519Signer::from_seed(&seed(seed_byte));
         let clock = frozen_clock();
         let config = NodeConfig::new(addr_zero(), Arc::new(signer), clock.now())
@@ -1215,9 +1176,7 @@ mod tests {
     /// side: B replies to A's discovery with a signed
     /// `relay_response` naming itself. B is not forced onto the relay
     /// branch — it takes the direct path and reaches `NatDirect`.
-    async fn make_relay_capable_node(
-        seed_byte: u8,
-    ) -> (Node, Arc<ManualClock>) {
+    async fn make_relay_capable_node(seed_byte: u8) -> (Node, Arc<ManualClock>) {
         let signer = Ed25519Signer::from_seed(&seed(seed_byte));
         let clock = frozen_clock();
         let config = NodeConfig::new(addr_zero(), Arc::new(signer), clock.now())
@@ -1235,8 +1194,7 @@ mod tests {
         expected: NodeId,
         timeout_ms: u64,
     ) -> Option<PeerTrust> {
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
             if let Ok(events) = node.poll().await {
                 for e in events {
@@ -1258,12 +1216,16 @@ mod tests {
         expected: NodeId,
         timeout_ms: u64,
     ) -> Option<(KtStatus, PeerTrust)> {
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
             if let Ok(events) = node.poll().await {
                 for e in events {
-                    if let NodeEvent::Ready { peer, kt_status, trust } = e {
+                    if let NodeEvent::Ready {
+                        peer,
+                        kt_status,
+                        trust,
+                    } = e
+                    {
                         if peer == expected {
                             return Some((kt_status, trust));
                         }
@@ -1281,8 +1243,7 @@ mod tests {
         expected: NodeId,
         timeout_ms: u64,
     ) -> Option<Vec<PinEntry>> {
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
         while std::time::Instant::now() < deadline {
             if let Ok(events) = node.poll().await {
                 for e in events {
@@ -1300,10 +1261,7 @@ mod tests {
     }
 
     /// Sign a `ConnectivityAnnounce` with the signer for `seed_byte`.
-    fn signed_connectivity(
-        seed_byte: u8,
-        now: Timestamp,
-    ) -> ConnectivityAnnounce {
+    fn signed_connectivity(seed_byte: u8, now: Timestamp) -> ConnectivityAnnounce {
         let signer = Ed25519Signer::from_seed(&seed(seed_byte));
         let unsigned = ConnectivityAnnounce {
             node_id: signer.public_key(),
@@ -1434,8 +1392,7 @@ mod tests {
         .await
         .unwrap();
 
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(5_000);
+        let deadline = std::time::Instant::now() + Duration::from_millis(5_000);
         let mut received = false;
         while std::time::Instant::now() < deadline && !received {
             if let Ok(events) = b.poll().await {
@@ -1603,8 +1560,7 @@ mod tests {
         .unwrap();
 
         // Poll B a few times to let the peer task process the pin.
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(5_000);
+        let deadline = std::time::Instant::now() + Duration::from_millis(5_000);
         let mut found = false;
         while std::time::Instant::now() < deadline && !found {
             let _ = b.poll().await;
@@ -1640,19 +1596,15 @@ mod tests {
         a_dht.publish_connectivity(announce.clone());
 
         let mut b_dht = b.dht();
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(5_000);
+        let deadline = std::time::Instant::now() + Duration::from_millis(5_000);
         let mut received: Option<ConnectivityAnnounce> = None;
         while std::time::Instant::now() < deadline && received.is_none() {
-            if let Some(quip_net::nat_driver::DhtResult::Connectivity(got)) =
-                b_dht.poll()
-            {
+            if let Some(quip_net::nat_driver::DhtResult::Connectivity(got)) = b_dht.poll() {
                 received = Some(got);
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
-        let received =
-            received.expect("B did not receive the connectivity_announce");
+        let received = received.expect("B did not receive the connectivity_announce");
         assert_eq!(received.node_id, a_node_id);
         assert_eq!(received.signature, announce.signature);
     }
@@ -1735,8 +1687,7 @@ mod tests {
         a_dht.publish_connectivity(announce);
 
         let mut b_dht = b.dht();
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(500);
+        let deadline = std::time::Instant::now() + Duration::from_millis(500);
         while std::time::Instant::now() < deadline {
             while let Some(result) = b_dht.poll() {
                 if let quip_net::nat_driver::DhtResult::Connectivity(a) = result {
@@ -1834,8 +1785,7 @@ mod tests {
         let _ = a.trust_peer(&b_node_id, PeerTrust::Trusted).await;
 
         // Poll until we see the event.
-        let deadline =
-            std::time::Instant::now() + Duration::from_millis(2_000);
+        let deadline = std::time::Instant::now() + Duration::from_millis(2_000);
         let mut saw = false;
         while std::time::Instant::now() < deadline && !saw {
             if let Ok(events) = a.poll().await {
@@ -2195,8 +2145,7 @@ mod tests {
         /// other node, up to `timeout_ms`. Returns `true` when the full
         /// mesh is ready.
         async fn wait_all_ready(&mut self, timeout_ms: u64) -> bool {
-            let deadline =
-                std::time::Instant::now() + Duration::from_millis(timeout_ms);
+            let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
             let n = self.nodes.len();
             let ids = self.node_ids();
             loop {
@@ -2204,8 +2153,7 @@ mod tests {
                     self.poll_ready(i).await;
                 }
                 let ready = &self.ready;
-                let all = (0..n)
-                    .all(|i| (0..n).all(|j| i == j || ready[i].contains(&ids[j])));
+                let all = (0..n).all(|i| (0..n).all(|j| i == j || ready[i].contains(&ids[j])));
                 if all {
                     return true;
                 }
@@ -2233,8 +2181,7 @@ mod tests {
             peer: NodeId,
             timeout_ms: u64,
         ) -> Option<KtStatus> {
-            let deadline =
-                std::time::Instant::now() + Duration::from_millis(timeout_ms);
+            let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
             while std::time::Instant::now() < deadline {
                 if let Ok(events) = self.nodes[idx].0.poll().await {
                     for event in events {
@@ -2255,14 +2202,8 @@ mod tests {
         }
 
         /// Wait until node `idx` holds at least `n` witness statements.
-        async fn wait_witnesses(
-            &mut self,
-            idx: usize,
-            n: usize,
-            timeout_ms: u64,
-        ) -> bool {
-            let deadline =
-                std::time::Instant::now() + Duration::from_millis(timeout_ms);
+        async fn wait_witnesses(&mut self, idx: usize, n: usize, timeout_ms: u64) -> bool {
+            let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
             while std::time::Instant::now() < deadline {
                 if self.nodes[idx].0.witness_store().len() >= n {
                     return true;
@@ -2324,10 +2265,7 @@ mod tests {
 
     /// Have the four witnesses accept the peer, then move every clock
     /// forward by `advance_ms`.
-    async fn trust_and_advance(
-        h: &mut MeshHarness,
-        advance_ms: u64,
-    ) -> (NodeId, NodeId) {
+    async fn trust_and_advance(h: &mut MeshHarness, advance_ms: u64) -> (NodeId, NodeId) {
         let ids = h.node_ids();
         let peer = ids[0];
         let subject = ids[1];
@@ -2348,9 +2286,7 @@ mod tests {
     async fn six_nodes_reach_verified_after_first_seen_window() {
         let mut h = six_node_mesh().await;
         // Past the first-seen window and one re-issuance interval.
-        let advance_ms =
-            (WITNESS_FIRST_SEEN_SECONDS + WITNESS_REISSUE_INTERVAL_SECONDS)
-                * 1_000;
+        let advance_ms = (WITNESS_FIRST_SEEN_SECONDS + WITNESS_REISSUE_INTERVAL_SECONDS) * 1_000;
         let (peer, subject) = trust_and_advance(&mut h, advance_ms).await;
 
         assert!(

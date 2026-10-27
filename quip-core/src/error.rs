@@ -359,10 +359,7 @@ mod tests {
         // `name_of` is exhaustive; every variant of `ErrorCode` must
         // produce a distinct name, which in turn means every variant
         // appears exactly once in `ALL_DEFINED`.
-        let mut names: Vec<&str> = ErrorCode::ALL_DEFINED
-            .iter()
-            .map(|c| name_of(*c))
-            .collect();
+        let mut names: Vec<&str> = ErrorCode::ALL_DEFINED.iter().map(|c| name_of(*c)).collect();
         let before = names.len();
         names.sort_unstable();
         names.dedup();

@@ -55,8 +55,8 @@
 //! the spillover cache answers "what did the last re-lookup return?".
 
 use crate::coral::{
-    cross_path_consensus, CoralLookup, LookupPath, LookupResponse, PathId,
-    SpilloverRequest, SpilloverResponse,
+    cross_path_consensus, CoralLookup, LookupPath, LookupResponse, PathId, SpilloverRequest,
+    SpilloverResponse,
 };
 use crate::dht::WitnessRingCache;
 use crate::error::{Error, Result};
@@ -342,10 +342,7 @@ impl<S: Signer> WitnessDiscovery<S> {
         now: Timestamp,
     ) -> Result<StartOutcome> {
         // 1. Cache hit?
-        if let Some(ring) = self
-            .ring_cache
-            .get(&target, now, ROTATION_INTERVAL_S)
-        {
+        if let Some(ring) = self.ring_cache.get(&target, now, ROTATION_INTERVAL_S) {
             return Ok(StartOutcome::Cached(ring.to_vec()));
         }
 
@@ -468,9 +465,7 @@ impl<S: Signer> WitnessDiscovery<S> {
         // DHT re-asking the same question.
         self.spillover_cache.insert(resp.clone(), now);
 
-        if resp.consensus == 0
-            || resp.alternate_witnesses.len() < DEGRADED_QUORUM
-        {
+        if resp.consensus == 0 || resp.alternate_witnesses.len() < DEGRADED_QUORUM {
             if let Some(s) = self.active.get_mut(&target) {
                 s.phase = DiscoveryPhase::Failed(DiscoveryFailure::SpilloverFailed);
             }
@@ -555,11 +550,7 @@ impl<S: Signer> WitnessDiscovery<S> {
     // Internal
     // ---------------------------------------------------------------------
 
-    fn try_resolve(
-        &mut self,
-        target: &NodeId,
-        now: Timestamp,
-    ) -> Result<Vec<Outbound>> {
+    fn try_resolve(&mut self, target: &NodeId, now: Timestamp) -> Result<Vec<Outbound>> {
         let resolution = {
             let state = match self.active.get(target) {
                 Some(s) => s,
@@ -584,8 +575,7 @@ impl<S: Signer> WitnessDiscovery<S> {
                     let consensus = cached.consensus;
                     if consensus == 0 || ring.len() < DEGRADED_QUORUM {
                         if let Some(s) = self.active.get_mut(target) {
-                            s.phase =
-                                DiscoveryPhase::Failed(DiscoveryFailure::SpilloverFailed);
+                            s.phase = DiscoveryPhase::Failed(DiscoveryFailure::SpilloverFailed);
                         }
                     } else {
                         if let Some(s) = self.active.get_mut(target) {
@@ -624,9 +614,7 @@ fn compute_resolution<S: Signer>(
 ) -> Result<Resolution> {
     // Already resolved?
     match state.phase {
-        DiscoveryPhase::Done(_)
-        | DiscoveryPhase::Failed(_)
-        | DiscoveryPhase::AwaitingSpillover => {
+        DiscoveryPhase::Done(_) | DiscoveryPhase::Failed(_) | DiscoveryPhase::AwaitingSpillover => {
             return Ok(Resolution::Wait);
         }
         DiscoveryPhase::AwaitingResponses => {}
@@ -638,14 +626,10 @@ fn compute_resolution<S: Signer>(
 
     // Try consensus whenever at least two paths have responded.
     if responded >= SPILLOVER_THRESHOLD {
-        let path_lists: Vec<Vec<NodeId>> =
-            state.witnesses_by_path.values().cloned().collect();
-        if let Some(ring) = cross_path_consensus(
-            target,
-            &path_lists,
-            SPILLOVER_THRESHOLD,
-            DEGRADED_QUORUM,
-        ) {
+        let path_lists: Vec<Vec<NodeId>> = state.witnesses_by_path.values().cloned().collect();
+        if let Some(ring) =
+            cross_path_consensus(target, &path_lists, SPILLOVER_THRESHOLD, DEGRADED_QUORUM)
+        {
             return Ok(Resolution::Done(ring));
         }
     }
@@ -809,7 +793,8 @@ mod tests {
     fn start_returns_cached_when_ring_is_present() {
         let mut d = WitnessDiscovery::new(FakeSigner::new(1));
         let target = nid(0x10);
-        d.ring_cache.insert(target, vec![nid(1), nid(2), nid(3)], t(0));
+        d.ring_cache
+            .insert(target, vec![nid(1), nid(2), nid(3)], t(0));
 
         let outcome = d.start(target, three_paths(), t(100)).unwrap();
         match outcome {
@@ -860,11 +845,18 @@ mod tests {
         let _ = d.start(target, three_paths(), t(0)).unwrap();
 
         let ring = vec![nid(1), nid(2), nid(3), nid(4)];
-        let out = d.ingest_lookup_response(response(target, 1, &ring), t(1)).unwrap();
+        let out = d
+            .ingest_lookup_response(response(target, 1, &ring), t(1))
+            .unwrap();
         assert!(out.is_empty(), "one path is not enough");
 
-        let out = d.ingest_lookup_response(response(target, 2, &ring), t(2)).unwrap();
-        assert!(out.is_empty(), "two agreeing paths complete without spillover");
+        let out = d
+            .ingest_lookup_response(response(target, 2, &ring), t(2))
+            .unwrap();
+        assert!(
+            out.is_empty(),
+            "two agreeing paths complete without spillover"
+        );
 
         let taken = d.take_ring(&target).unwrap();
         assert_eq!(taken, ring);
@@ -880,8 +872,12 @@ mod tests {
         let a = vec![nid(1), nid(2), nid(3), nid(4)];
         let b = vec![nid(5), nid(6), nid(7), nid(8)];
 
-        let _ = d.ingest_lookup_response(response(target, 1, &a), t(1)).unwrap();
-        let out = d.ingest_lookup_response(response(target, 2, &b), t(2)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &a), t(1))
+            .unwrap();
+        let out = d
+            .ingest_lookup_response(response(target, 2, &b), t(2))
+            .unwrap();
         assert!(out.is_empty(), "two disagreeing paths wait for the third");
         assert!(d.take_ring(&target).is_none());
     }
@@ -896,11 +892,17 @@ mod tests {
         let ring = vec![nid(1), nid(2), nid(3), nid(4)];
         let other = vec![nid(9), nid(10), nid(11), nid(12)];
 
-        let _ = d.ingest_lookup_response(response(target, 1, &ring), t(1)).unwrap();
-        let out = d.ingest_lookup_response(response(target, 2, &other), t(2)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &ring), t(1))
+            .unwrap();
+        let out = d
+            .ingest_lookup_response(response(target, 2, &other), t(2))
+            .unwrap();
         assert!(out.is_empty(), "no consensus with 2 disagreeing paths");
 
-        let out = d.ingest_lookup_response(response(target, 3, &ring), t(3)).unwrap();
+        let out = d
+            .ingest_lookup_response(response(target, 3, &ring), t(3))
+            .unwrap();
         assert!(out.is_empty(), "consensus reached, no spillover");
 
         assert_eq!(d.take_ring(&target).unwrap(), ring);
@@ -916,9 +918,15 @@ mod tests {
         let b = vec![nid(4), nid(5), nid(6)];
         let c = vec![nid(7), nid(8), nid(9)];
 
-        let _ = d.ingest_lookup_response(response(target, 1, &a), t(1)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 2, &b), t(2)).unwrap();
-        let out = d.ingest_lookup_response(response(target, 3, &c), t(3)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &a), t(1))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 2, &b), t(2))
+            .unwrap();
+        let out = d
+            .ingest_lookup_response(response(target, 3, &c), t(3))
+            .unwrap();
 
         assert_eq!(out.len(), 1);
         match &out[0] {
@@ -942,8 +950,12 @@ mod tests {
         let _ = d.start(target, three_paths(), t(0)).unwrap();
 
         let ring = vec![nid(1), nid(2), nid(3), nid(4)];
-        let _ = d.ingest_lookup_response(response(target, 1, &ring), t(1)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 2, &ring), t(2)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &ring), t(1))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 2, &ring), t(2))
+            .unwrap();
 
         // Both agree; discovery should already be done.
         assert_eq!(d.take_ring(&target).unwrap(), ring);
@@ -982,9 +994,15 @@ mod tests {
         let _ = d.start(target, three_paths(), t(0)).unwrap();
 
         // Force into AwaitingSpillover by feeding three disagreeing paths.
-        let _ = d.ingest_lookup_response(response(target, 1, &[nid(1)]), t(1)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 2, &[nid(2)]), t(2)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 3, &[nid(3)]), t(3)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &[nid(1)]), t(1))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 2, &[nid(2)]), t(2))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 3, &[nid(3)]), t(3))
+            .unwrap();
 
         let ring = vec![nid(11), nid(12), nid(13), nid(14)];
         let resp = spillover(target, &ring, 1);
@@ -1000,9 +1018,15 @@ mod tests {
         let mut d = WitnessDiscovery::new(FakeSigner::new(1));
         let target = nid(0x10);
         let _ = d.start(target, three_paths(), t(0)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 1, &[nid(1)]), t(1)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 2, &[nid(2)]), t(2)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 3, &[nid(3)]), t(3)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &[nid(1)]), t(1))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 2, &[nid(2)]), t(2))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 3, &[nid(3)]), t(3))
+            .unwrap();
 
         let resp = spillover(target, &[nid(11), nid(12), nid(13)], 0);
         d.ingest_spillover_response(resp, t(4)).unwrap();
@@ -1017,9 +1041,15 @@ mod tests {
         let mut d = WitnessDiscovery::new(FakeSigner::new(1));
         let target = nid(0x10);
         let _ = d.start(target, three_paths(), t(0)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 1, &[nid(1)]), t(1)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 2, &[nid(2)]), t(2)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 3, &[nid(3)]), t(3)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &[nid(1)]), t(1))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 2, &[nid(2)]), t(2))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 3, &[nid(3)]), t(3))
+            .unwrap();
 
         // consensus = 1 but only 2 witnesses.
         let resp = spillover(target, &[nid(11), nid(12)], 1);
@@ -1040,9 +1070,15 @@ mod tests {
         // Start and force the initial lookup into AwaitingSpillover-
         // eligible state.
         let _ = d.start(target, three_paths(), t(0)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 1, &[nid(1)]), t(1)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 2, &[nid(2)]), t(2)).unwrap();
-        let out = d.ingest_lookup_response(response(target, 3, &[nid(3)]), t(3)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &[nid(1)]), t(1))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 2, &[nid(2)]), t(2))
+            .unwrap();
+        let out = d
+            .ingest_lookup_response(response(target, 3, &[nid(3)]), t(3))
+            .unwrap();
 
         // The cache hit short-circuits the spillover.
         assert!(out.is_empty(), "cached response avoids a new spillover");
@@ -1065,8 +1101,12 @@ mod tests {
         let target = nid(0x10);
         let _ = d.start(target, three_paths(), t(0)).unwrap();
         let ring = vec![nid(1), nid(2), nid(3), nid(4)];
-        let _ = d.ingest_lookup_response(response(target, 1, &ring), t(1)).unwrap();
-        let _ = d.ingest_lookup_response(response(target, 2, &ring), t(2)).unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 1, &ring), t(1))
+            .unwrap();
+        let _ = d
+            .ingest_lookup_response(response(target, 2, &ring), t(2))
+            .unwrap();
 
         assert!(d.take_ring(&target).is_some());
         assert_eq!(d.active_count(), 0);

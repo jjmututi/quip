@@ -18,10 +18,13 @@ pub struct EmitEvent {
 impl EmitEvent {
     /// Encode to QUIP-CBOR bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let msg = envelope("emit", alloc::vec![
-            CborValue::String(self.event_type.clone()),
-            self.payload.clone(),
-        ]);
+        let msg = envelope(
+            "emit",
+            alloc::vec![
+                CborValue::String(self.event_type.clone()),
+                self.payload.clone(),
+            ],
+        );
         Ok(encode(&msg)?)
     }
     /// Decode from QUIP-CBOR bytes.
@@ -37,7 +40,10 @@ impl EmitEvent {
         let CborValue::String(event_type) = &f[0] else {
             return Err(Error::BadFrame("event_type must be text"));
         };
-        Ok(Self { event_type: event_type.clone(), payload: f[1].clone() })
+        Ok(Self {
+            event_type: event_type.clone(),
+            payload: f[1].clone(),
+        })
     }
 }
 
@@ -57,12 +63,15 @@ pub struct PinAnnounce {
 impl PinAnnounce {
     /// Encode to QUIP-CBOR bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        let msg = envelope("pin_announce", alloc::vec![
-            CborValue::Bytes(self.resource_id.clone()),
-            self.cid.to_cbor(),
-            CborValue::Int(self.ttl_seconds as i128),
-            CborValue::Bytes(self.witness_sig.to_vec()),
-        ]);
+        let msg = envelope(
+            "pin_announce",
+            alloc::vec![
+                CborValue::Bytes(self.resource_id.clone()),
+                self.cid.to_cbor(),
+                CborValue::Int(self.ttl_seconds as i128),
+                CborValue::Bytes(self.witness_sig.to_vec()),
+            ],
+        );
         Ok(encode(&msg)?)
     }
     /// Decode from QUIP-CBOR bytes.
@@ -84,6 +93,11 @@ impl PinAnnounce {
         }
         let mut witness_sig = [0u8; 64];
         witness_sig.copy_from_slice(&sig);
-        Ok(Self { resource_id, cid, ttl_seconds, witness_sig })
+        Ok(Self {
+            resource_id,
+            cid,
+            ttl_seconds,
+            witness_sig,
+        })
     }
 }

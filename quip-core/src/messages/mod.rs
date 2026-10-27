@@ -10,35 +10,35 @@ use alloc::vec::Vec;
 
 pub mod delegation;
 pub mod derivative;
+pub mod discontinuity;
 pub mod key_claim;
 pub mod operation_outcome;
 pub mod pin;
 pub mod quarantine;
+pub mod quarantine_request;
 pub mod revocation;
 pub mod ring_signature;
 pub mod rotation;
+pub mod seq_reset;
 pub mod trusted_cid;
 pub mod verifier;
 pub mod witness;
-pub mod discontinuity;
-pub mod quarantine_request;
-pub mod seq_reset;
 
 pub use delegation::DelegationCertificate;
 pub use derivative::DerivativeLink;
+pub use discontinuity::Discontinuity;
 pub use key_claim::KeyClaim;
 pub use operation_outcome::OperationOutcome;
 pub use pin::PinEntry;
 pub use quarantine::QuarantineNotice;
+pub use quarantine_request::{QuarantineRequest, UnquarantineRequest};
 pub use revocation::RevocationNotice;
 pub use ring_signature::{FrostRingSig, IndividualRingSig, RingSignature};
 pub use rotation::KeyRotation;
+pub use seq_reset::SeqReset;
 pub use trusted_cid::TrustedCidRegistration;
 pub use verifier::{Signer, Verifier};
 pub use witness::WitnessStatement;
-pub use discontinuity::Discontinuity;
-pub use quarantine_request::{QuarantineRequest, UnquarantineRequest};
-pub use seq_reset::SeqReset;
 
 // -------------------------------------------------------------------------
 // Internal helpers shared by all message types.
@@ -54,10 +54,7 @@ pub(crate) fn wrap(verb: &str, fields: Vec<CborValue>) -> CborValue {
 }
 
 /// Validate the `["quip-v1", verb]` prefix and return the trailing fields.
-pub(crate) fn unwrap<'a>(
-    value: &'a CborValue,
-    expected_verb: &str,
-) -> Result<&'a [CborValue]> {
+pub(crate) fn unwrap<'a>(value: &'a CborValue, expected_verb: &str) -> Result<&'a [CborValue]> {
     let CborValue::Array(arr) = value else {
         return Err(Error::BadEncoding("message must be an array"));
     };

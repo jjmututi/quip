@@ -220,8 +220,14 @@ mod tests {
         let c = PeerSlot::new(nid(1), 2);
         let d = PeerSlot::new(nid(2), 1);
         assert_eq!(a, b);
-        assert_ne!(a, c, "same NodeId, different generation is a different slot");
-        assert_ne!(a, d, "same generation, different NodeId is a different slot");
+        assert_ne!(
+            a, c,
+            "same NodeId, different generation is a different slot"
+        );
+        assert_ne!(
+            a, d,
+            "same generation, different NodeId is a different slot"
+        );
     }
 
     #[test]
@@ -237,30 +243,24 @@ mod tests {
 
     #[test]
     fn connecting_to_established_is_allowed() {
-        assert!(PeerLifecycle::Connecting
-            .can_transition(PeerLifecycle::Established));
+        assert!(PeerLifecycle::Connecting.can_transition(PeerLifecycle::Established));
     }
 
     #[test]
     fn established_to_nat_direct_and_relayed() {
-        assert!(PeerLifecycle::Established
-            .can_transition(PeerLifecycle::NatDirect));
-        assert!(PeerLifecycle::Established
-            .can_transition(PeerLifecycle::NatRelayed));
+        assert!(PeerLifecycle::Established.can_transition(PeerLifecycle::NatDirect));
+        assert!(PeerLifecycle::Established.can_transition(PeerLifecycle::NatRelayed));
     }
 
     #[test]
     fn established_to_failed_is_allowed() {
-        assert!(PeerLifecycle::Established
-            .can_transition(PeerLifecycle::Failed));
+        assert!(PeerLifecycle::Established.can_transition(PeerLifecycle::Failed));
     }
 
     #[test]
     fn nat_states_are_bidirectional() {
-        assert!(PeerLifecycle::NatDirect
-            .can_transition(PeerLifecycle::NatRelayed));
-        assert!(PeerLifecycle::NatRelayed
-            .can_transition(PeerLifecycle::NatDirect));
+        assert!(PeerLifecycle::NatDirect.can_transition(PeerLifecycle::NatRelayed));
+        assert!(PeerLifecycle::NatRelayed.can_transition(PeerLifecycle::NatDirect));
     }
 
     #[test]
@@ -321,18 +321,15 @@ mod tests {
 
     #[test]
     fn connecting_cannot_go_directly_to_nat() {
-        assert!(!PeerLifecycle::Connecting
-            .can_transition(PeerLifecycle::NatDirect));
-        assert!(!PeerLifecycle::Connecting
-            .can_transition(PeerLifecycle::NatRelayed));
+        assert!(!PeerLifecycle::Connecting.can_transition(PeerLifecycle::NatDirect));
+        assert!(!PeerLifecycle::Connecting.can_transition(PeerLifecycle::NatRelayed));
     }
 
     #[test]
     fn connecting_cannot_fail_directly() {
         // §2a lists no Connecting -> Failed edge. A connect attempt
         // that gives up goes through Closing.
-        assert!(!PeerLifecycle::Connecting
-            .can_transition(PeerLifecycle::Failed));
+        assert!(!PeerLifecycle::Connecting.can_transition(PeerLifecycle::Failed));
     }
 
     #[test]
@@ -340,8 +337,7 @@ mod tests {
         // The transition Connecting -> Established is the only edge
         // into Established. Re-establishing on the same slot is not
         // permitted; that is what a new PeerSlot is for.
-        assert!(!PeerLifecycle::Established
-            .can_transition(PeerLifecycle::Established));
+        assert!(!PeerLifecycle::Established.can_transition(PeerLifecycle::Established));
     }
 
     // ---- transition_to ----

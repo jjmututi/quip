@@ -29,7 +29,9 @@ pub struct BulkTransferConfig {
 
 impl Default for BulkTransferConfig {
     fn default() -> Self {
-        Self { chunk_size: CHUNK_SIZE }
+        Self {
+            chunk_size: CHUNK_SIZE,
+        }
     }
 }
 
@@ -336,7 +338,9 @@ mod tests {
         msgs.push(sender.send_complete().unwrap());
 
         let r = ingest_all(&msgs);
-        let bytes = r.reassemble_verified(HashAlgo::Sha256, &FakeHasher).unwrap();
+        let bytes = r
+            .reassemble_verified(HashAlgo::Sha256, &FakeHasher)
+            .unwrap();
         assert_eq!(bytes, payload);
     }
 
@@ -347,12 +351,8 @@ mod tests {
         let wrong = b"tampered payload".to_vec();
         let cid = cid_for(&real, HashAlgo::Sha256);
 
-        let mut sender = BulkSender::new(
-            b"res".to_vec(),
-            wrong,
-            cid,
-            BulkTransferConfig::default(),
-        );
+        let mut sender =
+            BulkSender::new(b"res".to_vec(), wrong, cid, BulkTransferConfig::default());
         let mut msgs = vec![sender.send_start().unwrap()];
         while let Some(c) = sender.next_chunk().unwrap() {
             msgs.push(c);
@@ -377,12 +377,8 @@ mod tests {
         // fail.
         let payload = b"some bytes".to_vec();
         let cid = cid_for(&payload, HashAlgo::Sha256);
-        let mut sender = BulkSender::new(
-            b"res".to_vec(),
-            payload,
-            cid,
-            BulkTransferConfig::default(),
-        );
+        let mut sender =
+            BulkSender::new(b"res".to_vec(), payload, cid, BulkTransferConfig::default());
         let mut msgs = vec![sender.send_start().unwrap()];
         while let Some(c) = sender.next_chunk().unwrap() {
             msgs.push(c);
@@ -391,9 +387,7 @@ mod tests {
 
         let r = ingest_all(&msgs);
         // SHA-256 negotiated: succeeds.
-        assert!(r
-            .reassemble_verified(HashAlgo::Sha256, &FakeHasher)
-            .is_ok());
+        assert!(r.reassemble_verified(HashAlgo::Sha256, &FakeHasher).is_ok());
         // BLAKE3 negotiated: fails because the digest differs.
         assert!(matches!(
             r.reassemble_verified(HashAlgo::Blake3, &FakeHasher),
@@ -426,7 +420,9 @@ mod tests {
 
         let r = ingest_all(&msgs);
         assert_eq!(r.total_size(), Some(100));
-        let bytes = r.reassemble_verified(HashAlgo::Sha256, &FakeHasher).unwrap();
+        let bytes = r
+            .reassemble_verified(HashAlgo::Sha256, &FakeHasher)
+            .unwrap();
         assert_eq!(bytes, payload);
     }
 
@@ -458,8 +454,12 @@ mod tests {
     fn resource_id_and_total_size_are_exposed() {
         let payload = b"abc".to_vec();
         let cid = cid_for(&payload, HashAlgo::Sha256);
-        let mut sender =
-            BulkSender::new(b"my-resource".to_vec(), payload, cid, BulkTransferConfig::default());
+        let mut sender = BulkSender::new(
+            b"my-resource".to_vec(),
+            payload,
+            cid,
+            BulkTransferConfig::default(),
+        );
         let start = sender.send_start().unwrap();
         let r = ingest_all(&[start]);
         assert_eq!(r.resource_id(), Some(b"my-resource".as_slice()));

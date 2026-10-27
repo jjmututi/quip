@@ -59,8 +59,8 @@ use crate::nat_wire::{
     Candidate, CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery, RelayEntry, RelayResponse,
 };
 use alloc::collections::{BTreeMap, VecDeque};
-use alloc::vec::Vec;
 use alloc::string::ToString;
+use alloc::vec::Vec;
 use quip_core::address::Address;
 use quip_core::cbor::{encode, CborValue};
 use quip_core::dvv::NodeId;
@@ -284,10 +284,7 @@ impl RelayManager {
                         b.entry.available().cmp(&a.entry.available())
                     })
                     .then_with(|| a.entry.cost.cmp(&b.entry.cost))
-                    .then_with(|| {
-                        b.reliability_permille()
-                            .cmp(&a.reliability_permille())
-                    })
+                    .then_with(|| b.reliability_permille().cmp(&a.reliability_permille()))
             })
             .map(|r| r.entry.clone())
     }
@@ -635,8 +632,7 @@ fn encode_addr(a: &Address) -> Vec<u8> {
 /// Infer the NAT type from a set of observations, per §12.1.
 fn infer_nat_type(observations: &BTreeMap<NodeId, Address>) -> u64 {
     use crate::nat_wire::{
-        NAT_TYPE_OPEN, NAT_TYPE_RESTRICTED, NAT_TYPE_SYMMETRIC,
-        NAT_TYPE_UNKNOWN,
+        NAT_TYPE_OPEN, NAT_TYPE_RESTRICTED, NAT_TYPE_SYMMETRIC, NAT_TYPE_UNKNOWN,
     };
 
     if observations.is_empty() {
@@ -1072,7 +1068,8 @@ impl NatTraversal {
     pub fn poll(&mut self, now: Timestamp) -> Vec<Outbound> {
         // Periodic connectivity announcement.
         let percent = self.current_reannounce_percent(now);
-        let interval = self.config
+        let interval = self
+            .config
             .connectivity_ttl_s
             .saturating_mul(1000)
             .saturating_mul(percent)
@@ -1140,9 +1137,7 @@ impl NatTraversal {
                     .started_at
                     .as_millis()
                     .saturating_add(candidate_window_ms);
-                if now.as_millis() < candidate_deadline
-                    && session.candidates.remote_len() == 0
-                {
+                if now.as_millis() < candidate_deadline && session.candidates.remote_len() == 0 {
                     continue;
                 }
             }
@@ -1201,12 +1196,7 @@ impl NatTraversal {
     }
 
     /// Record an address observation from a DHT peer.
-    pub fn on_address_observed(
-        &mut self,
-        observer: NodeId,
-        observed: Address,
-        now: Timestamp,
-    ) {
+    pub fn on_address_observed(&mut self, observer: NodeId, observed: Address, now: Timestamp) {
         let before = (self.address.external(), self.address.nat_type());
         self.address.observe_at(observer, observed, now);
         let after = (self.address.external(), self.address.nat_type());
@@ -1224,11 +1214,7 @@ impl NatTraversal {
     ///
     /// We learn the announcer's address but not what it can reach, so
     /// the relay (if any) is registered without a target.
-    pub fn on_connectivity_announce(
-        &mut self,
-        announce: ConnectivityAnnounce,
-        now: Timestamp,
-    ) {
+    pub fn on_connectivity_announce(&mut self, announce: ConnectivityAnnounce, now: Timestamp) {
         if announce.relay_capable && announce.capacity > 0 {
             let window = self
                 .relay_announce_windows
@@ -1460,16 +1446,15 @@ impl NatTraversal {
                 timestamp: now,
                 signature: [0u8; 64], // signed by the caller
             };
-            self.outbound.push_back(Outbound::PublishCandidates(announce));
+            self.outbound
+                .push_back(Outbound::PublishCandidates(announce));
         }
         self.outbound.push_back(Outbound::LookupCandidates {
             target: peer,
             session_id,
         });
-        self.events.push_back(NatEvent::SessionStarted {
-            peer,
-            session_id,
-        });
+        self.events
+            .push_back(NatEvent::SessionStarted { peer, session_id });
     }
 
     /// Force `session_id` onto the relay branch.
@@ -1510,12 +1495,11 @@ impl NatTraversal {
             None => return,
         };
         if success {
-            self.events.push_back(NatEvent::CandidateReachable {
-                session_id,
-                addr,
-            });
+            self.events
+                .push_back(NatEvent::CandidateReachable { session_id, addr });
             if let Some(a) = established {
-                self.events.push_back(NatEvent::DirectPathEstablished { peer, addr: a });
+                self.events
+                    .push_back(NatEvent::DirectPathEstablished { peer, addr: a });
             }
         }
     }
@@ -1649,12 +1633,18 @@ impl RelayHop {
     /// Encode as a CBOR map (spec §12.2).
     pub fn to_cbor(&self) -> CborValue {
         CborValue::Map(alloc::vec![
-            (CborValue::String("relay_id".to_string()),
-             CborValue::Bytes(self.relay_id.to_vec())),
-            (CborValue::String("next_hop".to_string()),
-             self.next_hop.to_cbor()),
-            (CborValue::String("encrypted_key".to_string()),
-             CborValue::Bytes(self.encrypted_key.clone())),
+            (
+                CborValue::String("relay_id".to_string()),
+                CborValue::Bytes(self.relay_id.to_vec())
+            ),
+            (
+                CborValue::String("next_hop".to_string()),
+                self.next_hop.to_cbor()
+            ),
+            (
+                CborValue::String("encrypted_key".to_string()),
+                CborValue::Bytes(self.encrypted_key.clone())
+            ),
         ])
     }
 
@@ -1704,12 +1694,18 @@ impl RelayChain {
     /// Encode as a CBOR map.
     pub fn to_cbor(&self) -> CborValue {
         CborValue::Map(alloc::vec![
-            (CborValue::String("hops".to_string()),
-             CborValue::Array(self.hops.iter().map(|h| h.to_cbor()).collect())),
-            (CborValue::String("target".to_string()),
-             CborValue::Bytes(self.target.to_vec())),
-            (CborValue::String("ttl".to_string()),
-             CborValue::Int(self.ttl as i128)),
+            (
+                CborValue::String("hops".to_string()),
+                CborValue::Array(self.hops.iter().map(|h| h.to_cbor()).collect())
+            ),
+            (
+                CborValue::String("target".to_string()),
+                CborValue::Bytes(self.target.to_vec())
+            ),
+            (
+                CborValue::String("ttl".to_string()),
+                CborValue::Int(self.ttl as i128)
+            ),
         ])
     }
 
@@ -2065,7 +2061,9 @@ mod tests {
         );
 
         let out = n.poll(now());
-        assert!(out.iter().any(|o| matches!(o, Outbound::ProbeCandidate { .. })));
+        assert!(out
+            .iter()
+            .any(|o| matches!(o, Outbound::ProbeCandidate { .. })));
         n.on_probe_result([0u8; 16], c.addr, false, now());
 
         let out = n.poll(now());
@@ -2083,9 +2081,7 @@ mod tests {
     /// `RelayPathAvailable`, returning the relay that was offered.
     ///
     /// Shared setup for the `on_relay_result` tests.
-    fn drive_to_relay_path_available(
-        n: &mut NatTraversal,
-    ) -> RelayEntry {
+    fn drive_to_relay_path_available(n: &mut NatTraversal) -> RelayEntry {
         use crate::nat_wire::{Candidate, RelayEntry, CANDIDATE_HOST};
         n.start_session(nid(2), [0u8; 16], now());
         let _ = n.poll(now());
@@ -2176,7 +2172,10 @@ mod tests {
         // A subsequent poll leaves the session alone: no probe, no
         // relay request.
         let out = n.poll(now());
-        assert!(out.is_empty(), "concluded session should emit nothing: {out:?}");
+        assert!(
+            out.is_empty(),
+            "concluded session should emit nothing: {out:?}"
+        );
     }
 
     #[test]
@@ -2189,11 +2188,16 @@ mod tests {
 
         let events = n.drain_events();
         assert!(
-            !events.iter().any(|e| matches!(e, NatEvent::RelayedPathEstablished { .. })),
+            !events
+                .iter()
+                .any(|e| matches!(e, NatEvent::RelayedPathEstablished { .. })),
             "failure must not emit RelayedPathEstablished"
         );
         let session = n.session(&[0u8; 16]).expect("session still alive");
-        assert!(session.relays.is_empty(), "failed relay removed from session");
+        assert!(
+            session.relays.is_empty(),
+            "failed relay removed from session"
+        );
         assert!(session.relay_outcome.is_none());
     }
 
@@ -2222,17 +2226,13 @@ mod tests {
         // Jump past the candidate window so we fall straight to relays,
         // then past the relay window without a response.
         let cfg = n.config().clone();
-        let t1 = Timestamp::from_millis(
-            now().as_millis() + cfg.candidate_phase_timeout_ms + 1,
-        );
+        let t1 = Timestamp::from_millis(now().as_millis() + cfg.candidate_phase_timeout_ms + 1);
         let out = n.poll(t1);
         assert!(out
             .iter()
             .any(|o| matches!(o, Outbound::RequestRelays { .. })));
 
-        let t2 = Timestamp::from_millis(
-            t1.as_millis() + cfg.relay_discovery_timeout_ms + 1,
-        );
+        let t2 = Timestamp::from_millis(t1.as_millis() + cfg.relay_discovery_timeout_ms + 1);
         let _ = n.poll(t2);
 
         let events = n.drain_events();
@@ -2249,9 +2249,7 @@ mod tests {
         n.start_session(nid(3), [1u8; 16], now());
 
         let cfg = n.config().clone();
-        let later = Timestamp::from_millis(
-            now().as_millis() + cfg.candidate_phase_timeout_ms + 1,
-        );
+        let later = Timestamp::from_millis(now().as_millis() + cfg.candidate_phase_timeout_ms + 1);
         let out = n.poll(later);
 
         let ids: Vec<[u8; 16]> = out
@@ -2272,7 +2270,13 @@ mod tests {
         s.observe(nid(2), addr(10));
         assert!(s.port_preservation());
 
-        s.observe(nid(3), Address::V4 { ip: [127, 0, 0, 20], port: 9999 });
+        s.observe(
+            nid(3),
+            Address::V4 {
+                ip: [127, 0, 0, 20],
+                port: 9999,
+            },
+        );
         assert!(!s.port_preservation());
     }
 
@@ -2312,7 +2316,8 @@ mod tests {
 
         let out = n.poll(now());
         assert!(
-            !out.iter().any(|o| matches!(o, Outbound::ProbeCandidate { .. })),
+            !out.iter()
+                .any(|o| matches!(o, Outbound::ProbeCandidate { .. })),
             "forced session must not probe: {out:?}",
         );
         assert!(
@@ -2340,7 +2345,8 @@ mod tests {
 
         let out = n.poll(now());
         assert!(
-            out.iter().any(|o| matches!(o, Outbound::RequestRelays { .. })),
+            out.iter()
+                .any(|o| matches!(o, Outbound::RequestRelays { .. })),
             "expected RequestRelays after force_relay_for: {out:?}",
         );
     }

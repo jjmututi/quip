@@ -137,10 +137,10 @@ impl WitnessStore {
         claim_log: &ClaimLog,
         now: Timestamp,
     ) -> Vec<WitnessStatement> {
-        let first_seen_cutoff =
-            Timestamp::from_millis(now.as_millis().saturating_sub(
-                WITNESS_FIRST_SEEN_SECONDS.saturating_mul(1000),
-            ));
+        let first_seen_cutoff = Timestamp::from_millis(
+            now.as_millis()
+                .saturating_sub(WITNESS_FIRST_SEEN_SECONDS.saturating_mul(1000)),
+        );
 
         let inner = self.inner.lock().expect("witness store poisoned");
         let mut out: Vec<WitnessStatement> = inner
@@ -211,18 +211,13 @@ impl WitnessStore {
     /// The caller signs and sends the statement; this method only
     /// decides *whether* to, and returns the subject so the caller
     /// does not have to enumerate.
-    pub fn maybe_issue(
-        &self,
-        trust: &TrustPolicy,
-        now: Timestamp,
-    ) -> Vec<NodeId> {
+    pub fn maybe_issue(&self, trust: &TrustPolicy, now: Timestamp) -> Vec<NodeId> {
         let trusted = trust.trusted_peers();
         if trusted.is_empty() {
             return Vec::new();
         }
 
-        let interval_ms =
-            WITNESS_REISSUE_INTERVAL_SECONDS.saturating_mul(1000);
+        let interval_ms = WITNESS_REISSUE_INTERVAL_SECONDS.saturating_mul(1000);
         let mut due = Vec::new();
 
         {
@@ -231,10 +226,7 @@ impl WitnessStore {
                 let last = inner.last_issued.get(&subject).copied();
                 let due_now = match last {
                     None => true,
-                    Some(at) => now
-                        .as_millis()
-                        .saturating_sub(at.as_millis())
-                        >= interval_ms,
+                    Some(at) => now.as_millis().saturating_sub(at.as_millis()) >= interval_ms,
                 };
                 if due_now {
                     due.push(subject);
@@ -306,11 +298,7 @@ mod tests {
 
     /// Build a signed statement for tests. The signer is the witness;
     /// `valid_until` is deliberately far in the future.
-    fn statement(
-        subject: u8,
-        witness: u8,
-        issued_at: u64,
-    ) -> WitnessStatement {
+    fn statement(subject: u8, witness: u8, issued_at: u64) -> WitnessStatement {
         use quip_core::messages::Signer;
         let signer = Ed25519Signer::from_seed(&[witness; 32]);
         let unsigned = WitnessStatement {
@@ -389,8 +377,7 @@ mod tests {
         assert!(store.ingest(older.clone(), t(6_000)));
         assert!(store.ingest(newer.clone(), t(6_000)));
         assert_eq!(store.len(), 1);
-        let stored = store
-            .statements_for(&nid(1), &claim_log_with(&[2], 0), t(6_000));
+        let stored = store.statements_for(&nid(1), &claim_log_with(&[2], 0), t(6_000));
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].timestamp, newer.timestamp);
     }
@@ -471,7 +458,9 @@ mod tests {
         // no longer counts, whether or not the witness has re-issued.
         let expired_ms = 100_001_000;
         assert!(
-            store.statements_for(&nid(1), &log, t(expired_ms)).is_empty(),
+            store
+                .statements_for(&nid(1), &log, t(expired_ms))
+                .is_empty(),
             "§5.3.3: a statement past valid_until no longer counts"
         );
     }

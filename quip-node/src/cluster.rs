@@ -503,10 +503,7 @@ impl ClusterHandle {
             };
             info.id == *candidate
                 && info.size >= MIN_CLUSTER_SIZE as u64
-                && record
-                    .rtt_ms
-                    .map(|ms| ms <= threshold)
-                    .unwrap_or(false)
+                && record.rtt_ms.map(|ms| ms <= threshold).unwrap_or(false)
         })
     }
 
@@ -778,7 +775,11 @@ mod split_tests {
             dht.update_lifecycle(&nid(i), &slot(i, 1), PeerLifecycle::NatDirect);
         }
         let cluster = ClusterHandle::new(CID, ClusterLevel::Local, t(0));
-        Mesh { dht, cluster, local }
+        Mesh {
+            dht,
+            cluster,
+            local,
+        }
     }
 
     fn set_rtt(m: &Mesh, peer: &NodeId, ms: u64) {
@@ -799,7 +800,11 @@ mod split_tests {
             dht.update_lifecycle(&nid(i), &slot(i, 1), PeerLifecycle::NatDirect);
         }
         let cluster = ClusterHandle::new(CID, ClusterLevel::Local, t(0));
-        Mesh { dht, cluster, local }
+        Mesh {
+            dht,
+            cluster,
+            local,
+        }
     }
 
     fn announce(m: &Mesh, peer: NodeId, id: [u8; 16], size: u64) {
@@ -930,12 +935,7 @@ mod split_tests {
         let before = m.cluster.recompute(&m.dht, t(0));
         assert_eq!(before.members, vec![nid(1), nid(2)]);
 
-        let table_before: Vec<NodeId> = m
-            .dht
-            .table_snapshot()
-            .iter()
-            .map(|(id, _)| *id)
-            .collect();
+        let table_before: Vec<NodeId> = m.dht.table_snapshot().iter().map(|(id, _)| *id).collect();
 
         // Exactly what `split_if_due` does, minus the timer: the only
         // input that changes is the local id.
@@ -953,12 +953,7 @@ mod split_tests {
             "every peer still advertises the old id: {after:?}"
         );
 
-        let table_after: Vec<NodeId> = m
-            .dht
-            .table_snapshot()
-            .iter()
-            .map(|(id, _)| *id)
-            .collect();
+        let table_after: Vec<NodeId> = m.dht.table_snapshot().iter().map(|(id, _)| *id).collect();
         assert_eq!(
             table_after, table_before,
             "no peer left the routing table; the partition is the tuple's doing"
@@ -1371,4 +1366,3 @@ mod split_tests {
         assert!(!m.cluster.split_attempt_pending());
     }
 }
-

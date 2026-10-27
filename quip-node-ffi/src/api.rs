@@ -12,12 +12,12 @@
 //! [`NodeHandle::trust_peer`] with `Trusted`, and every peer-related
 //! event carries the current trust level.
 
+use crate::frb_generated::StreamSink;
 use quip_core::time::{Clock, SystemClock, Timestamp};
 use quip_net::crypto::Ed25519Signer;
 use quip_net::establishment::{FlowFailure, KtStatus};
 use quip_node::trust::PeerTrust as CorePeerTrust;
 use quip_node::{Node as CoreNode, NodeConfig, NodeEvent};
-use crate::frb_generated::StreamSink;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -111,9 +111,7 @@ impl From<FlowFailure> for FlowFailureFfi {
             FlowFailure::KeyClaimTimeout => FlowFailureFfi::KeyClaimTimeout,
             FlowFailure::NatFailed => FlowFailureFfi::NatFailed,
             FlowFailure::NatTimeout => FlowFailureFfi::NatTimeout,
-            FlowFailure::DiscoveryTimeout => {
-                FlowFailureFfi::DiscoveryTimeout
-            }
+            FlowFailure::DiscoveryTimeout => FlowFailureFfi::DiscoveryTimeout,
         }
     }
 }
@@ -283,18 +281,14 @@ impl NodeEventFfi {
                 failure: failure.into(),
                 trust: trust.into(),
             },
-            NodeEvent::Disconnected { peer, trust } => {
-                NodeEventFfi::Disconnected {
-                    peer: peer.to_vec(),
-                    trust: trust.into(),
-                }
-            }
-            NodeEvent::PeerTrustChanged { peer, trust } => {
-                NodeEventFfi::PeerTrustChanged {
-                    peer: peer.to_vec(),
-                    trust: trust.into(),
-                }
-            }
+            NodeEvent::Disconnected { peer, trust } => NodeEventFfi::Disconnected {
+                peer: peer.to_vec(),
+                trust: trust.into(),
+            },
+            NodeEvent::PeerTrustChanged { peer, trust } => NodeEventFfi::PeerTrustChanged {
+                peer: peer.to_vec(),
+                trust: trust.into(),
+            },
             NodeEvent::Message { peer, tier, msg } => NodeEventFfi::Message {
                 peer: peer.to_vec(),
                 tier: tier as u8,
@@ -343,16 +337,10 @@ impl NodeHandle {
     ///
     /// Returns a handle on success. The node's accept loop and DHT
     /// router are already running by the time this future resolves.
-    pub async fn bind(
-        bind_addr: String,
-        seed: Vec<u8>,
-    ) -> FfiResult<NodeHandle> {
+    pub async fn bind(bind_addr: String, seed: Vec<u8>) -> FfiResult<NodeHandle> {
         if seed.len() != 32 {
             return Err(FfiError {
-                message: format!(
-                    "seed must be exactly 32 bytes, got {}",
-                    seed.len()
-                ),
+                message: format!("seed must be exactly 32 bytes, got {}", seed.len()),
             });
         }
         let mut seed_arr = [0u8; 32];
@@ -398,11 +386,7 @@ impl NodeHandle {
     /// Returns the peer's NodeId as 32 raw bytes. The returned value
     /// is available as soon as the transport handshake completes;
     /// `NodeEventFfi::Ready` fires later, after the §16 flow completes.
-    pub async fn connect(
-        &self,
-        addr: String,
-        server_name: String,
-    ) -> FfiResult<Vec<u8>> {
+    pub async fn connect(&self, addr: String, server_name: String) -> FfiResult<Vec<u8>> {
         let addr: SocketAddr = addr.parse()?;
         let mut guard = self.inner.lock().await;
         let peer = guard.connect(addr, &server_name).await?;
@@ -418,10 +402,7 @@ impl NodeHandle {
     ///
     /// Only one subscription per node is allowed; a second call
     /// returns an error.
-    pub fn subscribe_events(
-        &self,
-        sink: StreamSink<NodeEventFfi>,
-    ) -> FfiResult<()> {
+    pub fn subscribe_events(&self, sink: StreamSink<NodeEventFfi>) -> FfiResult<()> {
         let rx = self
             .events
             .lock()
@@ -460,34 +441,16 @@ impl NodeHandle {
     /// Returns `true` if the decision was recorded. On a successful
     /// change, a `NodeEventFfi::PeerTrustChanged` fires on the event
     /// stream.
-    pub async fn trust_peer(
-        &self,
-        peer: Vec<u8>,
-        decision: PeerTrustFfi,
-    ) -> FfiResult<bool> {
+    pub async fn trust_peer(&self, peer: Vec<u8>, decision: PeerTrustFfi) -> FfiResult<bool> {
         let peer_id = decode_node_id(&peer)?;
         let decision: CorePeerTrust = decision.into();
-        Ok(self
-            .inner
-            .lock()
-            .await
-            .trust_peer(&peer_id, decision)
-            .await)
+        Ok(self.inner.lock().await.trust_peer(&peer_id, decision).await)
     }
 
     /// Current trust level for `peer`.
-    pub async fn peer_trust(
-        &self,
-        peer: Vec<u8>,
-    ) -> FfiResult<PeerTrustFfi> {
+    pub async fn peer_trust(&self, peer: Vec<u8>) -> FfiResult<PeerTrustFfi> {
         let peer_id = decode_node_id(&peer)?;
-        Ok(self
-            .inner
-            .lock()
-            .await
-            .peer_trust(&peer_id)
-            .await
-            .into())
+        Ok(self.inner.lock().await.peer_trust(&peer_id).await.into())
     }
 
     /// Initiate a graceful shutdown of the node.
@@ -509,10 +472,7 @@ impl NodeHandle {
 fn decode_node_id(bytes: &[u8]) -> FfiResult<[u8; 32]> {
     if bytes.len() != 32 {
         return Err(FfiError {
-            message: format!(
-                "peer must be exactly 32 bytes, got {}",
-                bytes.len()
-            ),
+            message: format!("peer must be exactly 32 bytes, got {}", bytes.len()),
         });
     }
     let mut id = [0u8; 32];

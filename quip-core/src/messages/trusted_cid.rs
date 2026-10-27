@@ -82,7 +82,7 @@ impl TrustedCidRegistration {
 mod tests {
     use super::*;
     use crate::cid::Cid;
-    use alloc::string::ToString; 
+    use alloc::string::ToString;
 
     fn nid(b: u8) -> NodeId {
         let mut n = [0u8; 32];
@@ -94,10 +94,7 @@ mod tests {
     fn roundtrip() {
         let r = TrustedCidRegistration {
             cid: CidOrV1::Raw(Cid([0x11; 32])),
-            app_metadata: alloc::vec![(
-                "title".to_string(),
-                CborValue::String("Example".into())
-            )],
+            app_metadata: alloc::vec![("title".to_string(), CborValue::String("Example".into()))],
             owner: nid(1),
             timestamp: Timestamp::from_millis(1_700_000_000_000),
             signature: [0xef; 64],

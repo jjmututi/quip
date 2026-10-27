@@ -3,12 +3,7 @@
 /// A pluggable Ed25519 verifier.
 pub trait Verifier {
     /// Verify a 64-byte Ed25519 signature over `message` using `public_key`.
-    fn verify_ed25519(
-        &self,
-        public_key: &[u8; 32],
-        message: &[u8],
-        signature: &[u8; 64],
-    ) -> bool;
+    fn verify_ed25519(&self, public_key: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool;
 }
 
 /// A pluggable Ed25519 signer.

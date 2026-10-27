@@ -56,6 +56,10 @@
 //! the spec instead intended to inline the inner fields, the wire shape
 //! would have to change in both this crate and `quip-core`.
 
+use crate::bft::{
+    BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPrepare, BftPreprepare,
+    BftStateTransfer, BftViewChange,
+};
 use crate::cluster::{
     ClusterInfoAnnounce, ClusterMergeAccept, ClusterMergePropose, ClusterMergeReject,
 };
@@ -67,19 +71,13 @@ use crate::coral::{
 use crate::error::{Error, Result};
 use crate::event::{EmitEvent, PinAnnounce};
 use crate::frame::Tier;
-use crate::nat_wire::{
-    CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery, RelayResponse,
-};
+use crate::nat_wire::{CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery, RelayResponse};
 use crate::query::Query;
 use crate::range::{FetchRange, RangeResponse};
 use crate::resource::{QueryResource, ResourceAnnounce};
 use crate::sync::{
     GetRequest, PinList, PinQuery, QueryPins, QueryQuarantined, RbsrRequest, RbsrResponse,
     SetRequest, SyncRequest, UnpinRequest,
-};
-use crate::bft::{
-    BftCheckpoint, BftCommit, BftNewView, BftPrecommit, BftPreprepare, BftPrepare,
-    BftStateTransfer, BftViewChange,
 };
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -385,7 +383,7 @@ pub enum Message {
     RelayDiscovery(RelayDiscovery),
     /// `relay_response` — relays that can reach a target (§12.2).
     RelayResponse(RelayResponse),
-        /// `bft_preprepare` — primary proposes an operation (§5.3.4).
+    /// `bft_preprepare` — primary proposes an operation (§5.3.4).
     BftPreprepare(BftPreprepare),
     /// `bft_prepare` — witness acknowledges a proposal (§5.3.4).
     BftPrepare(BftPrepare),
@@ -529,7 +527,7 @@ impl Message {
             | Message::CandidateAnnounce(_)
             | Message::RelayDiscovery(_)
             | Message::RelayResponse(_) => Tier::Ctrl,
-            | Message::BftPreprepare(_)
+            Message::BftPreprepare(_)
             | Message::BftPrepare(_)
             | Message::BftPrecommit(_)
             | Message::BftCommit(_)
@@ -553,9 +551,7 @@ impl Message {
             | Message::RangeResponse(_) => Tier::Sync,
 
             // ---- T2 BULK ----
-            Message::SendStart(_)
-            | Message::SendChunk(_)
-            | Message::SendComplete(_) => Tier::Bulk,
+            Message::SendStart(_) | Message::SendChunk(_) | Message::SendComplete(_) => Tier::Bulk,
 
             // ---- T3 EVENT ----
             Message::Emit(_) | Message::PinAnnounce(_) => Tier::Event,
@@ -569,9 +565,7 @@ impl Message {
             | Message::Delegation(_)
             | Message::Quarantine(_)
             | Message::Unquarantine(_)
-            | Message::DerivativeLink(_) => {
-                Some(crate::handshake::Capabilities::GOVERNANCE)
-            }
+            | Message::DerivativeLink(_) => Some(crate::handshake::Capabilities::GOVERNANCE),
             Message::CoralLookup(_)
             | Message::CoralLookupResponse(_)
             | Message::Spillover(_)
@@ -581,15 +575,11 @@ impl Message {
             | Message::ClusterInfo(_)
             | Message::ClusterMergePropose(_)
             | Message::ClusterMergeAccept(_)
-            | Message::ClusterMergeReject(_) => {
-                Some(crate::handshake::Capabilities::DHT_DISCOVERY)
-            }
+            | Message::ClusterMergeReject(_) => Some(crate::handshake::Capabilities::DHT_DISCOVERY),
             Message::ConnectivityAnnounce(_)
             | Message::CandidateAnnounce(_)
             | Message::RelayDiscovery(_)
-            | Message::RelayResponse(_) => {
-                Some(crate::handshake::Capabilities::NAT_TRAVERSAL)
-            }
+            | Message::RelayResponse(_) => Some(crate::handshake::Capabilities::NAT_TRAVERSAL),
             Message::FetchRange(_) | Message::RangeResponse(_) => {
                 Some(crate::handshake::Capabilities::MERKLE_RANGE)
             }
@@ -601,10 +591,7 @@ impl Message {
     }
 
     /// Enforce the capability invariant (spec §4).
-    pub fn check_capability(
-        &self,
-        negotiated: crate::handshake::Capabilities,
-    ) -> Result<()> {
+    pub fn check_capability(&self, negotiated: crate::handshake::Capabilities) -> Result<()> {
         if let Some(required) = self.required_capability() {
             if !negotiated.has(required) {
                 return Err(Error::CapabilityViolation {
@@ -624,21 +611,13 @@ impl Message {
             Message::QueryResource(m) => m.to_bytes(),
             Message::ResourceAnnounce(m) => m.to_bytes(),
             Message::AnnounceKey(m) => encode_core_verb("announce_key", m.to_cbor()),
-            Message::AnnounceWitness(m) => {
-                encode_core_verb("announce_witness", m.to_cbor())
-            }
+            Message::AnnounceWitness(m) => encode_core_verb("announce_witness", m.to_cbor()),
             Message::Query(m) => m.to_bytes(),
-            Message::RegisterTcid(m) => {
-                encode_core_verb("register_tcid", m.to_cbor())
-            }
+            Message::RegisterTcid(m) => encode_core_verb("register_tcid", m.to_cbor()),
             Message::Delegation(m) => encode_core_verb("delegation", m.to_cbor()),
             Message::Quarantine(m) => encode_core_verb("quarantine", m.to_cbor()),
-            Message::Unquarantine(m) => {
-                encode_core_verb("unquarantine", m.to_cbor())
-            }
-            Message::DerivativeLink(m) => {
-                encode_core_verb("derivative_link", m.to_cbor())
-            }
+            Message::Unquarantine(m) => encode_core_verb("unquarantine", m.to_cbor()),
+            Message::DerivativeLink(m) => encode_core_verb("derivative_link", m.to_cbor()),
             Message::CoralLookup(m) => m.to_bytes(),
             Message::CoralLookupResponse(m) => m.to_bytes(),
             Message::Spillover(m) => m.to_bytes(),
@@ -731,19 +710,13 @@ pub fn dispatch(bytes: &[u8], tier: Tier) -> Result<Message> {
             DerivativeLink::from_cbor,
         )?),
         "coral_lookup" => Message::CoralLookup(CoralLookup::from_bytes(bytes)?),
-        "coral_lookup_response" => {
-            Message::CoralLookupResponse(LookupResponse::from_bytes(bytes)?)
-        }
+        "coral_lookup_response" => Message::CoralLookupResponse(LookupResponse::from_bytes(bytes)?),
         "spillover" => Message::Spillover(SpilloverRequest::from_bytes(bytes)?),
-        "spillover_response" => {
-            Message::SpilloverResponse(SpilloverResponse::from_bytes(bytes)?)
-        }
+        "spillover_response" => Message::SpilloverResponse(SpilloverResponse::from_bytes(bytes)?),
         "cross_path_validation" => {
             Message::CrossPathValidation(CrossPathValidation::from_bytes(bytes)?)
         }
-        "cross_path_result" => {
-            Message::CrossPathResult(CrossPathResult::from_bytes(bytes)?)
-        }
+        "cross_path_result" => Message::CrossPathResult(CrossPathResult::from_bytes(bytes)?),
         "cluster_info" => Message::ClusterInfo(ClusterInfoAnnounce::from_bytes(bytes)?),
         "cluster_merge_propose" => {
             Message::ClusterMergePropose(ClusterMergePropose::from_bytes(bytes)?)
@@ -757,15 +730,9 @@ pub fn dispatch(bytes: &[u8], tier: Tier) -> Result<Message> {
         "connectivity_announce" => {
             Message::ConnectivityAnnounce(ConnectivityAnnounce::from_bytes(bytes)?)
         }
-        "candidate_announce" => {
-            Message::CandidateAnnounce(CandidateAnnounce::from_bytes(bytes)?)
-        }
-        "relay_discovery" => {
-            Message::RelayDiscovery(RelayDiscovery::from_bytes(bytes)?)
-        }
-        "relay_response" => {
-            Message::RelayResponse(RelayResponse::from_bytes(bytes)?)
-        }
+        "candidate_announce" => Message::CandidateAnnounce(CandidateAnnounce::from_bytes(bytes)?),
+        "relay_discovery" => Message::RelayDiscovery(RelayDiscovery::from_bytes(bytes)?),
+        "relay_response" => Message::RelayResponse(RelayResponse::from_bytes(bytes)?),
         "get" => Message::Get(GetRequest::from_bytes(bytes)?),
         "set" => Message::Set(SetRequest::from_bytes(bytes)?),
         "sync" => Message::Sync(SyncRequest::from_bytes(bytes)?),
@@ -775,9 +742,7 @@ pub fn dispatch(bytes: &[u8], tier: Tier) -> Result<Message> {
         "unpin" => Message::Unpin(UnpinRequest::from_bytes(bytes)?),
         "query_pins" => Message::QueryPins(QueryPins::from_bytes(bytes)?),
         "pin_list" => Message::PinList(PinList::from_bytes(bytes)?),
-        "query_quarantined" => {
-            Message::QueryQuarantined(QueryQuarantined::from_bytes(bytes)?)
-        }
+        "query_quarantined" => Message::QueryQuarantined(QueryQuarantined::from_bytes(bytes)?),
         "fetch_range" => Message::FetchRange(FetchRange::from_bytes(bytes)?),
         "range_response" => Message::RangeResponse(RangeResponse::from_bytes(bytes)?),
         "send_start" => Message::SendStart(SendStart::from_bytes(bytes)?),
@@ -789,16 +754,10 @@ pub fn dispatch(bytes: &[u8], tier: Tier) -> Result<Message> {
         "bft_prepare" => Message::BftPrepare(BftPrepare::from_bytes(bytes)?),
         "bft_precommit" => Message::BftPrecommit(BftPrecommit::from_bytes(bytes)?),
         "bft_commit" => Message::BftCommit(BftCommit::from_bytes(bytes)?),
-        "bft_view_change" => {
-            Message::BftViewChange(BftViewChange::from_bytes(bytes)?)
-        }
+        "bft_view_change" => Message::BftViewChange(BftViewChange::from_bytes(bytes)?),
         "bft_new_view" => Message::BftNewView(BftNewView::from_bytes(bytes)?),
-        "bft_checkpoint" => {
-            Message::BftCheckpoint(BftCheckpoint::from_bytes(bytes)?)
-        }
-        "bft_state_transfer" => {
-            Message::BftStateTransfer(BftStateTransfer::from_bytes(bytes)?)
-        }
+        "bft_checkpoint" => Message::BftCheckpoint(BftCheckpoint::from_bytes(bytes)?),
+        "bft_state_transfer" => Message::BftStateTransfer(BftStateTransfer::from_bytes(bytes)?),
         other => return Err(Error::UnknownVerb(other.to_string())),
     };
 
@@ -1367,7 +1326,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             dispatch(&bytes, Tier::Bulk),
-            Err(Error::WrongTier { verb: "set", tier: 2 })
+            Err(Error::WrongTier {
+                verb: "set",
+                tier: 2
+            })
         ));
     }
 
@@ -1381,7 +1343,10 @@ mod tests {
         .unwrap();
         assert!(matches!(
             dispatch(&bytes, Tier::Ctrl),
-            Err(Error::WrongTier { verb: "emit", tier: 0 })
+            Err(Error::WrongTier {
+                verb: "emit",
+                tier: 0
+            })
         ));
     }
 
@@ -1473,8 +1438,8 @@ mod tests {
             signature: [0xef; 64],
         });
         let baseline = crate::handshake::Capabilities::baseline();
-        let with_gov = baseline
-            | crate::handshake::Capabilities(crate::handshake::Capabilities::GOVERNANCE);
+        let with_gov =
+            baseline | crate::handshake::Capabilities(crate::handshake::Capabilities::GOVERNANCE);
         assert!(msg.check_capability(baseline).is_err());
         assert!(msg.check_capability(with_gov).is_ok());
     }
@@ -1509,8 +1474,7 @@ mod tests {
             signature: [0xef; 64],
         });
         let bytes = msg.to_bytes().unwrap();
-        let with_gov =
-            Capabilities::baseline() | Capabilities(Capabilities::GOVERNANCE);
+        let with_gov = Capabilities::baseline() | Capabilities(Capabilities::GOVERNANCE);
         let back = dispatch_inbound(with_gov, &bytes, Tier::Ctrl).unwrap();
         assert_eq!(back, msg);
     }
@@ -1518,8 +1482,7 @@ mod tests {
     #[test]
     fn dispatch_inbound_preserves_parse_errors() {
         use crate::handshake::Capabilities;
-        let bytes =
-            encode(&envelope("not_a_real_verb", vec![CborValue::Int(1)])).unwrap();
+        let bytes = encode(&envelope("not_a_real_verb", vec![CborValue::Int(1)])).unwrap();
         match dispatch_inbound(Capabilities::baseline(), &bytes, Tier::Ctrl) {
             Err(Error::UnknownVerb(v)) => assert_eq!(v, "not_a_real_verb"),
             other => panic!("expected UnknownVerb, got {other:?}"),

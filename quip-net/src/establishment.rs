@@ -295,10 +295,7 @@ impl ConnectionFlow {
 
     /// Number of distinct witnesses recorded for the remote NodeId.
     pub fn witness_count(&self) -> usize {
-        self.remote
-            .as_ref()
-            .map(|r| r.witnesses.len())
-            .unwrap_or(0)
+        self.remote.as_ref().map(|r| r.witnesses.len()).unwrap_or(0)
     }
 
     /// When the remote Key Claim was first seen.
@@ -328,11 +325,7 @@ impl ConnectionFlow {
     /// Callers MUST verify signatures on `AnnounceKey` and
     /// `AnnounceWitness` before calling this. Messages that do not
     /// advance the flow are ignored.
-    pub fn on_message(
-        &mut self,
-        msg: &Message,
-        now: Timestamp,
-    ) -> Vec<FlowAction> {
+    pub fn on_message(&mut self, msg: &Message, now: Timestamp) -> Vec<FlowAction> {
         match msg {
             Message::AnnounceKey(claim) => self.on_remote_key_claim(claim, now),
             Message::AnnounceWitness(stmt) => {
@@ -366,11 +359,7 @@ impl ConnectionFlow {
     /// The flow does not use the ring contents; the caller may keep it
     /// for diagnostics. The KT status is computed from the
     /// `AnnounceWitness` messages the flow has already seen.
-    pub fn on_discovery_complete(
-        &mut self,
-        _ring: Vec<NodeId>,
-        now: Timestamp,
-    ) -> Vec<FlowAction> {
+    pub fn on_discovery_complete(&mut self, _ring: Vec<NodeId>, now: Timestamp) -> Vec<FlowAction> {
         if self.phase != FlowPhase::WitnessDiscovery {
             return Vec::new();
         }
@@ -400,17 +389,13 @@ impl ConnectionFlow {
             .as_millis()
             .saturating_sub(self.phase_entered_at.as_millis());
         let failure = match self.phase {
-            FlowPhase::AwaitKeyClaim
-                if elapsed >= self.config.key_claim_timeout_ms =>
-            {
+            FlowPhase::AwaitKeyClaim if elapsed >= self.config.key_claim_timeout_ms => {
                 Some(FlowFailure::KeyClaimTimeout)
             }
             FlowPhase::NatTraversal if elapsed >= self.config.nat_timeout_ms => {
                 Some(FlowFailure::NatTimeout)
             }
-            FlowPhase::WitnessDiscovery
-                if elapsed >= self.config.discovery_timeout_ms =>
-            {
+            FlowPhase::WitnessDiscovery if elapsed >= self.config.discovery_timeout_ms => {
                 Some(FlowFailure::DiscoveryTimeout)
             }
             _ => None,
@@ -428,11 +413,7 @@ impl ConnectionFlow {
     // Internal
     // ---------------------------------------------------------------------
 
-    fn on_remote_key_claim(
-        &mut self,
-        claim: &KeyClaim,
-        now: Timestamp,
-    ) -> Vec<FlowAction> {
+    fn on_remote_key_claim(&mut self, claim: &KeyClaim, now: Timestamp) -> Vec<FlowAction> {
         if self.phase != FlowPhase::AwaitKeyClaim {
             return Vec::new();
         }
@@ -479,17 +460,15 @@ impl ConnectionFlow {
             None => return KtStatus::Pending,
         };
         let _ = remote.first_seen; // reserved for the §5.3.3 6-hour rule
-        // §5.3.3's witnesses must be *independent*. A node's own
-        // statement about a peer cannot corroborate that peer for it, so
-        // the local NodeId is excluded from the count even if a peer
-        // echoes our statement back.
+                                   // §5.3.3's witnesses must be *independent*. A node's own
+                                   // statement about a peer cannot corroborate that peer for it, so
+                                   // the local NodeId is excluded from the count even if a peer
+                                   // echoes our statement back.
         let local = self.local_claim.node_id;
         let valid = remote
             .witnesses
             .iter()
-            .filter(|(witness, stmt)| {
-                **witness != local && stmt.valid_until > now
-            })
+            .filter(|(witness, stmt)| **witness != local && stmt.valid_until > now)
             .count();
         if valid >= 4 {
             KtStatus::Verified
@@ -518,12 +497,7 @@ mod tests {
     }
 
     fn new_flow() -> ConnectionFlow {
-       ConnectionFlow::new(
-           FakeSigner::new(1),
-           [0x42; 16],
-           FlowConfig::default(),
-           t(0),
-       )
+        ConnectionFlow::new(FakeSigner::new(1), [0x42; 16], FlowConfig::default(), t(0))
     }
 
     fn claim_for(n: u8, at: Timestamp) -> KeyClaim {
@@ -535,11 +509,7 @@ mod tests {
         }
     }
 
-    fn statement_for(
-        subject: u8,
-        witness: u8,
-        valid_until: Timestamp,
-    ) -> WitnessStatement {
+    fn statement_for(subject: u8, witness: u8, valid_until: Timestamp) -> WitnessStatement {
         WitnessStatement {
             subject: nid(subject),
             timestamp: t(0),
@@ -769,10 +739,7 @@ mod tests {
         drive_to_discovery(&mut f);
         // drive_to_discovery enters WitnessDiscovery at t(3).
         let actions = f.poll(t(3 + 30_000));
-        assert_eq!(
-            *f.phase(),
-            FlowPhase::Failed(FlowFailure::DiscoveryTimeout)
-        );
+        assert_eq!(*f.phase(), FlowPhase::Failed(FlowFailure::DiscoveryTimeout));
         assert_eq!(
             actions,
             vec![FlowAction::Failed(FlowFailure::DiscoveryTimeout)]

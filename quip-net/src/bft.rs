@@ -437,11 +437,7 @@ macro_rules! impl_vote_message {
             }
 
             /// Verify the witness's signature.
-            pub fn verify(
-                &self,
-                witness: &NodeId,
-                v: &impl Verifier,
-            ) -> Result<bool> {
+            pub fn verify(&self, witness: &NodeId, v: &impl Verifier) -> Result<bool> {
                 let payload = self.signing_payload()?;
                 Ok(v.verify_ed25519(witness, &payload, &self.witness_sig))
             }
@@ -944,10 +940,7 @@ mod tests {
     #[test]
     fn operation_rejects_non_string_kind() {
         let v = CborValue::Map(vec![
-            (
-                CborValue::String(String::from("kind")),
-                CborValue::Int(1),
-            ),
+            (CborValue::String(String::from("kind")), CborValue::Int(1)),
             (
                 CborValue::String(String::from("subject")),
                 CborValue::Bytes(vec![1]),
@@ -985,10 +978,7 @@ mod tests {
                 CborValue::Bytes(vec![1]),
             ),
             (CborValue::String(String::from("body")), CborValue::Null),
-            (
-                CborValue::String(String::from("extra")),
-                CborValue::Int(1),
-            ),
+            (CborValue::String(String::from("extra")), CborValue::Int(1)),
         ]);
         assert!(Operation::from_cbor(&v).is_err());
     }
@@ -1432,10 +1422,7 @@ mod tests {
 
     #[test]
     fn wrong_arity_rejected() {
-        let msg = envelope(
-            "bft_preprepare",
-            vec![CborValue::Bytes(vec![0; 32])],
-        );
+        let msg = envelope("bft_preprepare", vec![CborValue::Bytes(vec![0; 32])]);
         let bytes = encode(&msg).unwrap();
         assert!(BftPreprepare::from_bytes(&bytes).is_err());
     }

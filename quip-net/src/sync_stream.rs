@@ -162,10 +162,9 @@ impl SyncStream {
                 self.requests_handled = self.requests_handled.saturating_add(1);
                 SyncState::Idle
             }
-            (
-                state,
-                SyncEvent::RecvDvv | SyncEvent::RecvRbsrSync | SyncEvent::RecvFetchRange,
-            ) if state.is_busy() => {
+            (state, SyncEvent::RecvDvv | SyncEvent::RecvRbsrSync | SyncEvent::RecvFetchRange)
+                if state.is_busy() =>
+            {
                 self.last_event = Some(event);
                 return Err(Error::BadStream(
                     "request received while a T1 request is in flight",
@@ -245,7 +244,10 @@ mod tests {
     fn response_returns_to_idle_and_counts_the_request() {
         let mut m = SyncStream::new();
         m.on_event(SyncEvent::RecvDvv).unwrap();
-        assert_eq!(m.on_event(SyncEvent::ResponseSent).unwrap(), SyncState::Idle);
+        assert_eq!(
+            m.on_event(SyncEvent::ResponseSent).unwrap(),
+            SyncState::Idle
+        );
         assert_eq!(m.requests_handled(), 1);
     }
 

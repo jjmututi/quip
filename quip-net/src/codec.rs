@@ -22,7 +22,9 @@ pub fn verb_of(value: &CborValue) -> Result<&str> {
 /// Build a `["quip-v1", verb, ...fields]` envelope.
 pub fn envelope(verb: &str, fields: Vec<CborValue>) -> CborValue {
     let mut out = Vec::with_capacity(fields.len() + 2);
-    out.push(CborValue::String(alloc::string::ToString::to_string("quip-v1")));
+    out.push(CborValue::String(alloc::string::ToString::to_string(
+        "quip-v1",
+    )));
     out.push(CborValue::String(alloc::string::ToString::to_string(verb)));
     out.extend(fields);
     CborValue::Array(out)

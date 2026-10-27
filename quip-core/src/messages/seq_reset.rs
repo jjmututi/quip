@@ -87,19 +87,21 @@ impl SeqReset {
     /// Returns `Ok(())` if the timestamp falls inside the acceptable
     /// window `[last_seen_time - MAX_REPLAY_WINDOW_MS,
     ///          now + MAX_REPLAY_WINDOW_MS]`, and `Err` otherwise.
-    pub fn check_replay_window(
-        &self,
-        last_seen_time: Timestamp,
-        now: Timestamp,
-    ) -> Result<()> {
+    pub fn check_replay_window(&self, last_seen_time: Timestamp, now: Timestamp) -> Result<()> {
         let ts = self.timestamp.as_millis();
-        let earliest = last_seen_time.as_millis().saturating_sub(MAX_REPLAY_WINDOW_MS);
+        let earliest = last_seen_time
+            .as_millis()
+            .saturating_sub(MAX_REPLAY_WINDOW_MS);
         let latest = now.as_millis().saturating_add(MAX_REPLAY_WINDOW_MS);
         if ts < earliest {
-            return Err(Error::BadEncoding("seq_reset timestamp too far in the past"));
+            return Err(Error::BadEncoding(
+                "seq_reset timestamp too far in the past",
+            ));
         }
         if ts > latest {
-            return Err(Error::BadEncoding("seq_reset timestamp too far in the future"));
+            return Err(Error::BadEncoding(
+                "seq_reset timestamp too far in the future",
+            ));
         }
         Ok(())
     }

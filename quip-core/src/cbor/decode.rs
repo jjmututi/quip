@@ -275,7 +275,7 @@ fn read_u64(bytes: &[u8], pos: &mut usize) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloc::vec;  
+    use alloc::vec;
 
     #[test]
     fn null_and_bools() {

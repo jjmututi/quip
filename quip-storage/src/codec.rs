@@ -118,10 +118,7 @@ mod tests {
 
     #[test]
     fn unknown_key_rejected() {
-        let value = CborValue::Map(vec![(
-            CborValue::String("nope".into()),
-            CborValue::Int(1),
-        )]);
+        let value = CborValue::Map(vec![(CborValue::String("nope".into()), CborValue::Int(1))]);
         assert!(matches!(parse_map(&value, &["ok"]), Err(Error::Core(_))));
     }
 

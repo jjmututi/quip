@@ -9,7 +9,9 @@ use crate::error::{Error, Result};
 use crate::pins::PinRecord;
 use alloc::vec::Vec;
 use quip_core::cbor::CborValue;
-use quip_core::messages::{DelegationCertificate, DerivativeLink, QuarantineNotice, TrustedCidRegistration};
+use quip_core::messages::{
+    DelegationCertificate, DerivativeLink, QuarantineNotice, TrustedCidRegistration,
+};
 use quip_core::time::Timestamp;
 
 /// Current snapshot format version.
@@ -77,17 +79,32 @@ impl Snapshot {
         let res: Vec<CborValue> = self.resources.iter().map(|r| r.to_cbor()).collect();
 
         CborValue::Map(alloc::vec![
-            (CborValue::String("version".into()), CborValue::Int(self.version as i128)),
+            (
+                CborValue::String("version".into()),
+                CborValue::Int(self.version as i128)
+            ),
             (
                 CborValue::String("created_at".into()),
                 CborValue::Int(self.created_at.as_millis() as i128),
             ),
             (CborValue::String("pins".into()), CborValue::Array(pins)),
             (CborValue::String("blobs".into()), CborValue::Array(blobs)),
-            (CborValue::String("quarantine".into()), CborValue::Array(quar)),
-            (CborValue::String("trusted_cids".into()), CborValue::Array(tcids)),
-            (CborValue::String("delegations".into()), CborValue::Array(dels)),
-            (CborValue::String("derivative_links".into()), CborValue::Array(links)),
+            (
+                CborValue::String("quarantine".into()),
+                CborValue::Array(quar)
+            ),
+            (
+                CborValue::String("trusted_cids".into()),
+                CborValue::Array(tcids)
+            ),
+            (
+                CborValue::String("delegations".into()),
+                CborValue::Array(dels)
+            ),
+            (
+                CborValue::String("derivative_links".into()),
+                CborValue::Array(links)
+            ),
             (CborValue::String("resources".into()), CborValue::Array(res)),
         ])
     }
@@ -134,7 +151,11 @@ impl Snapshot {
             delegations.push(DelegationCertificate::from_cbor(d)?);
         }
 
-        let link_arr = as_array(expect_key(&map, "derivative_links", "missing derivative_links")?)?;
+        let link_arr = as_array(expect_key(
+            &map,
+            "derivative_links",
+            "missing derivative_links",
+        )?)?;
         let mut derivative_links = Vec::with_capacity(link_arr.len());
         for l in link_arr {
             derivative_links.push(DerivativeLink::from_cbor(l)?);

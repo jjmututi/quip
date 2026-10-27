@@ -176,7 +176,11 @@ mod tests {
         }
         let c = ManualClock::new(Timestamp::from_millis(42));
         assert_eq!(read(&c).as_millis(), 42);
-        assert_eq!(read(&&c).as_millis(), 42, "reference-of-reference also works");
+        assert_eq!(
+            read(&&c).as_millis(),
+            42,
+            "reference-of-reference also works"
+        );
     }
 
     #[cfg(feature = "std")]

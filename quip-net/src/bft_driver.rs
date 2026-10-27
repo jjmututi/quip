@@ -87,9 +87,7 @@ use alloc::vec::Vec;
 use quip_core::cbor::{encode, CborValue};
 use quip_core::constants::{CHECKPOINT_INTERVAL, MIN_WITNESSES, WITNESS_COUNT};
 use quip_core::dvv::NodeId;
-use quip_core::messages::{
-    IndividualRingSig, OperationOutcome, RingSignature, Signer, Verifier,
-};
+use quip_core::messages::{IndividualRingSig, OperationOutcome, RingSignature, Signer, Verifier};
 
 /// The operation kinds whose admission requires full consensus
 /// (5 of 7). Draft 1596's five defined kinds are exactly the
@@ -695,12 +693,7 @@ where
             // sequence advance, no preprepare on the wire.
             return Err(Error::Bft("operation rejected by validate"));
         }
-        let digest = compute_digest_parts(
-            &self.ring_id,
-            self.view,
-            self.sequence,
-            &operation,
-        )?;
+        let digest = compute_digest_parts(&self.ring_id, self.view, self.sequence, &operation)?;
         let mut msg = BftPreprepare {
             ring_id: self.ring_id,
             view: self.view,
@@ -737,11 +730,7 @@ where
     ///
     /// `primary` is the NodeId of the sender as identified by the
     /// transport. It must equal the primary for the current view.
-    pub fn on_preprepare(
-        &mut self,
-        primary: &NodeId,
-        msg: &BftPreprepare,
-    ) -> Result<()> {
+    pub fn on_preprepare(&mut self, primary: &NodeId, msg: &BftPreprepare) -> Result<()> {
         if msg.ring_id != self.ring_id {
             return Err(Error::Bft("preprepare for wrong ring"));
         }
@@ -775,7 +764,10 @@ where
         // round state untouched and its sequence where it is, and the
         // primary's proposal dies on the quorum that fails to form.
         let context = self.operation_context();
-        if !self.handler.validate(&self.ring_id, &context, &msg.operation) {
+        if !self
+            .handler
+            .validate(&self.ring_id, &context, &msg.operation)
+        {
             return Ok(());
         }
 
@@ -798,29 +790,17 @@ where
     }
 
     /// Receive a `bft_prepare`.
-    pub fn on_prepare(
-        &mut self,
-        witness: &NodeId,
-        msg: &BftPrepare,
-    ) -> Result<()> {
+    pub fn on_prepare(&mut self, witness: &NodeId, msg: &BftPrepare) -> Result<()> {
         self.handle_vote(witness, msg)
     }
 
     /// Receive a `bft_precommit`.
-    pub fn on_precommit(
-        &mut self,
-        witness: &NodeId,
-        msg: &BftPrecommit,
-    ) -> Result<()> {
+    pub fn on_precommit(&mut self, witness: &NodeId, msg: &BftPrecommit) -> Result<()> {
         self.handle_vote(witness, msg)
     }
 
     /// Receive a `bft_commit`.
-    pub fn on_commit(
-        &mut self,
-        witness: &NodeId,
-        msg: &BftCommit,
-    ) -> Result<()> {
+    pub fn on_commit(&mut self, witness: &NodeId, msg: &BftCommit) -> Result<()> {
         self.handle_vote(witness, msg)
     }
 
@@ -828,11 +808,7 @@ where
     // Internal
     // ---------------------------------------------------------------------
 
-    fn handle_vote<Vote: VoteShape>(
-        &mut self,
-        witness: &NodeId,
-        msg: &Vote,
-    ) -> Result<()> {
+    fn handle_vote<Vote: VoteShape>(&mut self, witness: &NodeId, msg: &Vote) -> Result<()> {
         if msg.ring_id() != &self.ring_id {
             return Err(Error::Bft("bft vote for wrong ring"));
         }
@@ -1079,7 +1055,8 @@ where
         self.view_change.target_view = Some(target_view);
         self.view_change.votes.insert(self.local, msg.clone());
 
-        self.events.push_back(BftEvent::ViewChangeInitiated { target_view });
+        self.events
+            .push_back(BftEvent::ViewChangeInitiated { target_view });
         self.outbound.push_back(BftOutbound::ViewChange(msg));
 
         self.maybe_emit_new_view()?;
@@ -1091,11 +1068,7 @@ where
     /// If the driver has not yet started a view change, the vote
     /// triggers one. Votes for a different target view are ignored
     /// until the current one resolves.
-    pub fn on_view_change(
-        &mut self,
-        sender: &NodeId,
-        msg: &BftViewChange,
-    ) -> Result<()> {
+    pub fn on_view_change(&mut self, sender: &NodeId, msg: &BftViewChange) -> Result<()> {
         if msg.ring_id != self.ring_id {
             return Err(Error::Bft("view change for wrong ring"));
         }
@@ -1143,11 +1116,7 @@ where
     /// signature is valid, and the enclosed view-change messages
     /// constitute a quorum of distinct members. On success, adopts
     /// the new view.
-    pub fn on_new_view(
-        &mut self,
-        sender: &NodeId,
-        msg: &BftNewView,
-    ) -> Result<()> {
+    pub fn on_new_view(&mut self, sender: &NodeId, msg: &BftNewView) -> Result<()> {
         if msg.ring_id != self.ring_id {
             return Err(Error::Bft("new view for wrong ring"));
         }
@@ -1302,7 +1271,8 @@ where
         let payload = msg.signing_payload()?;
         msg.primary_sig = self.signer.sign_ed25519(&payload);
 
-        self.events.push_back(BftEvent::ViewChangeQuorum { target_view });
+        self.events
+            .push_back(BftEvent::ViewChangeQuorum { target_view });
         self.outbound.push_back(BftOutbound::NewView(msg));
 
         self.adopt_view(target_view);
@@ -1317,9 +1287,8 @@ where
         self.current = None;
         self.state = RoundState::Idle;
         self.view_change = ViewChangeState::default();
-        self.events.push_back(BftEvent::NewViewAdopted {
-            view: target_view,
-        });
+        self.events
+            .push_back(BftEvent::NewViewAdopted { view: target_view });
     }
 
     /// Locate the ring member whose key signed `vc`, or `None`.
@@ -1328,10 +1297,7 @@ where
     /// driver resolves it by trial verification against each member.
     /// For the ring sizes this protocol supports (≤ 9) the cost is
     /// negligible.
-    fn find_view_change_signer(
-        &self,
-        vc: &BftViewChange,
-    ) -> Result<Option<NodeId>> {
+    fn find_view_change_signer(&self, vc: &BftViewChange) -> Result<Option<NodeId>> {
         let payload = vc.signing_payload()?;
         for member in self.membership.members() {
             if self
@@ -1398,11 +1364,7 @@ where
     }
 
     /// Receive a `bft_checkpoint`.
-    pub fn on_checkpoint(
-        &mut self,
-        sender: &NodeId,
-        msg: &BftCheckpoint,
-    ) -> Result<()> {
+    pub fn on_checkpoint(&mut self, sender: &NodeId, msg: &BftCheckpoint) -> Result<()> {
         if msg.ring_id != self.ring_id {
             return Err(Error::Bft("checkpoint for wrong ring"));
         }
@@ -1516,11 +1478,7 @@ where
     /// that `checkpoint_digest` is the SHA-256 of `state`, installs
     /// the state via the handler, and resumes from the checkpoint
     /// sequence.
-    pub fn on_state_transfer(
-        &mut self,
-        sender: &NodeId,
-        msg: &BftStateTransfer,
-    ) -> Result<()> {
+    pub fn on_state_transfer(&mut self, sender: &NodeId, msg: &BftStateTransfer) -> Result<()> {
         if msg.ring_id != self.ring_id {
             return Err(Error::Bft("state transfer for wrong ring"));
         }
@@ -1685,12 +1643,7 @@ macro_rules! impl_vote_shape {
             fn verify(&self, witness: &NodeId, v: &impl Verifier) -> Result<bool> {
                 $ty::verify(self, witness, v)
             }
-            fn insert_vote(
-                &self,
-                current: &mut InFlight,
-                witness: NodeId,
-                sig: [u8; 64],
-            ) {
+            fn insert_vote(&self, current: &mut InFlight, witness: NodeId, sig: [u8; 64]) {
                 current.$field.insert(witness, sig);
             }
         }
@@ -2158,10 +2111,8 @@ mod tests {
         ring_id: RingId,
         view: u64,
     ) -> Vec<BftDriver<Ed25519Signer, Ed25519Verifier, H>> {
-        let by_id: BTreeMap<NodeId, Ed25519Signer> = signers
-            .into_iter()
-            .map(|s| (s.public_key(), s))
-            .collect();
+        let by_id: BTreeMap<NodeId, Ed25519Signer> =
+            signers.into_iter().map(|s| (s.public_key(), s)).collect();
         m.members()
             .iter()
             .map(|id| {
@@ -2180,25 +2131,13 @@ mod tests {
 
     fn build_ring() -> (RingMembership, Vec<Driver>) {
         let (m, signers) = ring7();
-        let drivers = drivers_in_order(
-            &m,
-            signers,
-            RecordingHandler::default,
-            [1; 32],
-            0,
-        );
+        let drivers = drivers_in_order(&m, signers, RecordingHandler::default, [1; 32], 0);
         (m, drivers)
     }
 
     fn build_counting_ring() -> (RingMembership, Vec<CountingDriver>) {
         let (m, signers) = ring7();
-        let drivers = drivers_in_order(
-            &m,
-            signers,
-            CountingHandler::default,
-            [1; 32],
-            0,
-        );
+        let drivers = drivers_in_order(&m, signers, CountingHandler::default, [1; 32], 0);
         (m, drivers)
     }
 
@@ -2228,10 +2167,7 @@ mod tests {
 
     /// Propagate messages until quiescent. Returns collected events
     /// per driver.
-    fn pump(
-        drivers: &mut [Driver],
-        membership: &RingMembership,
-    ) -> Vec<Vec<BftEvent>> {
+    fn pump(drivers: &mut [Driver], membership: &RingMembership) -> Vec<Vec<BftEvent>> {
         let n = drivers.len();
         let mut all: Vec<Vec<BftEvent>> = (0..n).map(|_| Vec::new()).collect();
         for _ in 0..20 {
@@ -2262,9 +2198,7 @@ mod tests {
                         BftOutbound::NewView(m) => d.on_new_view(&sender, m),
                         BftOutbound::Checkpoint(m) => d.on_checkpoint(&sender, m),
                         BftOutbound::StateTransferRequest(m)
-                        | BftOutbound::StateTransferResponse(m) => {
-                            d.on_state_transfer(&sender, m)
-                        }
+                        | BftOutbound::StateTransferResponse(m) => d.on_state_transfer(&sender, m),
                     };
                 }
             }
@@ -2338,9 +2272,7 @@ mod tests {
                         BftOutbound::NewView(m) => d.on_new_view(&sender, m),
                         BftOutbound::Checkpoint(m) => d.on_checkpoint(&sender, m),
                         BftOutbound::StateTransferRequest(m)
-                        | BftOutbound::StateTransferResponse(m) => {
-                            d.on_state_transfer(&sender, m)
-                        }
+                        | BftOutbound::StateTransferResponse(m) => d.on_state_transfer(&sender, m),
                     };
                 }
             }
@@ -2747,9 +2679,7 @@ mod tests {
                         BftOutbound::NewView(m) => d.on_new_view(&sender, m),
                         BftOutbound::Checkpoint(m) => d.on_checkpoint(&sender, m),
                         BftOutbound::StateTransferRequest(m)
-                        | BftOutbound::StateTransferResponse(m) => {
-                            d.on_state_transfer(&sender, m)
-                        }
+                        | BftOutbound::StateTransferResponse(m) => d.on_state_transfer(&sender, m),
                     };
                 }
             }
@@ -2845,7 +2775,10 @@ mod tests {
         // reaches PrePrepared; do not deliver the prepare/precommit/
         // commit stream.
         let out = drivers[0].drain_outbound();
-        let preprepare = match out.into_iter().find(|o| matches!(o, BftOutbound::Preprepare(_))) {
+        let preprepare = match out
+            .into_iter()
+            .find(|o| matches!(o, BftOutbound::Preprepare(_)))
+        {
             Some(BftOutbound::Preprepare(p)) => p,
             _ => panic!("expected preprepare"),
         };
@@ -2946,9 +2879,7 @@ mod tests {
                         BftOutbound::ViewChange(m) => {
                             let _ = d.on_view_change(&sender, m);
                         }
-                        BftOutbound::NewView(nv)
-                            if sender == new_primary && captured.is_none() =>
-                        {
+                        BftOutbound::NewView(nv) if sender == new_primary && captured.is_none() => {
                             captured = Some(nv.clone());
                         }
                         _ => {}

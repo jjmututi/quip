@@ -35,8 +35,7 @@ use quip_core::cid::{CidOrV1, HashAlgo};
 use quip_core::constants::{GOV_CAPACITY, PIN_CAPACITY};
 use quip_core::dvv::NodeId;
 use quip_core::messages::{
-    DelegationCertificate, DerivativeLink, PinEntry, QuarantineNotice,
-    TrustedCidRegistration,
+    DelegationCertificate, DerivativeLink, PinEntry, QuarantineNotice, TrustedCidRegistration,
 };
 use quip_core::time::Timestamp;
 
@@ -316,14 +315,8 @@ impl<B: BlobStore> QuipStore<B> {
     // ── Resource Discovery ───────────────────────────────────────────────
 
     /// Store a resource announcement, rejecting quarantined targets.
-    pub fn announce_resource(
-        &mut self,
-        ann: ResourceAnnouncement,
-        now: Timestamp,
-    ) -> Result<()> {
-        if self.config.enforce_quarantine
-            && self.quarantine.is_quarantined(&ann.latest_cid, now)
-        {
+    pub fn announce_resource(&mut self, ann: ResourceAnnouncement, now: Timestamp) -> Result<()> {
+        if self.config.enforce_quarantine && self.quarantine.is_quarantined(&ann.latest_cid, now) {
             return Err(Error::Quarantined);
         }
         self.directory.announce(ann, now)
@@ -337,9 +330,7 @@ impl<B: BlobStore> QuipStore<B> {
         now: Timestamp,
     ) -> Option<&ResourceAnnouncement> {
         let ann = self.directory.query(resource_id, cid, now)?;
-        if self.config.enforce_quarantine
-            && self.quarantine.is_quarantined(&ann.latest_cid, now)
-        {
+        if self.config.enforce_quarantine && self.quarantine.is_quarantined(&ann.latest_cid, now) {
             return None;
         }
         Some(ann)
@@ -443,9 +434,7 @@ impl<B: BlobStoreMut> QuipStore<B> {
         bytes: Vec<u8>,
         stored_at: Timestamp,
     ) -> Result<()> {
-        if self.config.enforce_quarantine
-            && self.quarantine.is_quarantined(cid, stored_at)
-        {
+        if self.config.enforce_quarantine && self.quarantine.is_quarantined(cid, stored_at) {
             return Err(Error::Quarantined);
         }
         self.blobs.put_trusted(cid, bytes, stored_at)

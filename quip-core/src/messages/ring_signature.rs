@@ -70,7 +70,9 @@ impl RingSignature {
             .ok_or(Error::BadEncoding("RingSignature missing `type`"))?;
 
         match ty.as_str() {
-            "individual" => Ok(RingSignature::Individual(IndividualRingSig::from_cbor(value)?)),
+            "individual" => Ok(RingSignature::Individual(IndividualRingSig::from_cbor(
+                value,
+            )?)),
             "frost" => Ok(RingSignature::Frost(FrostRingSig::from_cbor(value)?)),
             _ => Err(Error::BadEncoding("unknown RingSignature type")),
         }
@@ -154,8 +156,14 @@ impl IndividualRingSig {
                 CborValue::String("type".to_string()),
                 CborValue::String("individual".to_string())
             ),
-            (CborValue::String("signatures".to_string()), CborValue::Array(sigs)),
-            (CborValue::String("signers".to_string()), CborValue::Array(signers)),
+            (
+                CborValue::String("signatures".to_string()),
+                CborValue::Array(sigs)
+            ),
+            (
+                CborValue::String("signers".to_string()),
+                CborValue::Array(signers)
+            ),
         ])
     }
 
@@ -205,7 +213,10 @@ impl IndividualRingSig {
         if signatures.len() != signers.len() {
             return Err(Error::BadEncoding("signatures/signers length mismatch"));
         }
-        Ok(IndividualRingSig { signatures, signers })
+        Ok(IndividualRingSig {
+            signatures,
+            signers,
+        })
     }
 }
 

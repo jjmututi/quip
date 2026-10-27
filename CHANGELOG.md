@@ -2151,12 +2151,22 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     not shift. Do this before the next milestone that cites an item
     by number.
 
-36. **rustfmt drift across the tree.** The tree is not clean under the
-    installed `rustfmt`: a `cargo fmt --all` during the BFT-A item 1
-    work reformatted about 95 files and had to be reverted. CI has no
-    fmt job; adding one is a separate decision, because the first run
-    would reformat the whole tree rather than check it. Until then,
-    instructions check the `rustfmt --check` delta and do not reformat.
+36. **rustfmt drift across the tree — LANDED.** The tree was not clean
+    under `rustfmt`: a `cargo fmt --all` during the BFT-A item 1 work
+    reformatted about 95 files and was reverted, and until now every
+    instruction has said "do not run `cargo fmt --all`". The policy is
+    now enforced instead of avoided. A single `style:` commit ran
+    `cargo fmt --all` once on the whole tree; CI gained a sixth job,
+    `fmt`, that runs `cargo fmt --all -- --check` on every push and PR.
+    The diff is whitespace and import ordering; `git diff
+    --ignore-all-space` is empty for every file except
+    `quip-node-ffi/src/api.rs`, whose only non-whitespace change is
+    moving `use crate::frb_generated::StreamSink;` to its correct
+    position in the import block. The reformat commit's SHA is appended
+    to `.git-blame-ignore-revs` by its follow-up, so `git blame` skips
+    it. Future toolchain bumps that change rustfmt's output append a new
+    SHA; the job fails until the tree is reformatted and the SHA
+    appended.
 
 37. **BFT-A items 2–3 design note.** Landed at
     `docs/bft-items-2-3-design.md` (`3a460f2`). The note records three

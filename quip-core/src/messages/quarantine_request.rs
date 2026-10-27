@@ -15,8 +15,8 @@
 
 use super::verifier::Verifier;
 use super::{
-    expect_len, extract_metadata, extract_node_id, extract_sig64, extract_text,
-    extract_timestamp, metadata_to_cbor, unwrap, wrap,
+    expect_len, extract_metadata, extract_node_id, extract_sig64, extract_text, extract_timestamp,
+    metadata_to_cbor, unwrap, wrap,
 };
 use crate::cbor::{encode, CborValue};
 use crate::cid::CidOrV1;

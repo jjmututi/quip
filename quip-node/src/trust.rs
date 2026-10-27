@@ -138,11 +138,7 @@ impl TrustPolicy {
     /// - Tombstoned peer: returns `Revoked`; nothing changes.
     ///
     /// A first-seen peer is stored with trust `Unknown`.
-    pub fn observe_claim(
-        &mut self,
-        claim: KeyClaim,
-        now: Timestamp,
-    ) -> PeerTrust {
+    pub fn observe_claim(&mut self, claim: KeyClaim, now: Timestamp) -> PeerTrust {
         let peer = claim.node_id;
 
         // Record the observation before any early return: the log's fact
@@ -195,12 +191,7 @@ impl TrustPolicy {
     /// `Unknown` is a starting state, and `Verified` is derived from
     /// the flow's witness discovery, not from application choice.
     /// Passing either returns `false` and leaves the policy unchanged.
-    pub fn record_decision(
-        &mut self,
-        peer: &NodeId,
-        decision: PeerTrust,
-        now: Timestamp,
-    ) -> bool {
+    pub fn record_decision(&mut self, peer: &NodeId, decision: PeerTrust, now: Timestamp) -> bool {
         match decision {
             PeerTrust::Trusted | PeerTrust::Untrusted => {}
             PeerTrust::Revoked => {
@@ -263,10 +254,7 @@ impl TrustPolicy {
             .iter()
             .filter(|(peer, stored)| {
                 !self.tombstoned.contains(*peer)
-                    && matches!(
-                        stored.trust,
-                        PeerTrust::Trusted | PeerTrust::Verified
-                    )
+                    && matches!(stored.trust, PeerTrust::Trusted | PeerTrust::Verified)
             })
             .map(|(peer, _)| *peer)
             .collect()
@@ -279,10 +267,7 @@ impl TrustPolicy {
 
     /// A snapshot of the store, for inspection.
     pub fn snapshot(&self) -> Vec<(NodeId, StoredClaim)> {
-        self.claims
-            .iter()
-            .map(|(k, v)| (*k, v.clone()))
-            .collect()
+        self.claims.iter().map(|(k, v)| (*k, v.clone())).collect()
     }
 }
 

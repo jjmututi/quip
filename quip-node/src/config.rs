@@ -114,11 +114,7 @@ impl NodeConfig {
     /// `DHT_DISCOVERY` is what allows the Coral verbs of §13. Neither
     /// is in the baseline set (which is transport-level), so both are
     /// added explicitly here.
-    pub fn new(
-        bind: SocketAddr,
-        signer: SharedSigner,
-        now: Timestamp,
-    ) -> Result<Self> {
+    pub fn new(bind: SocketAddr, signer: SharedSigner, now: Timestamp) -> Result<Self> {
         Ok(Self {
             bind,
             capabilities: Capabilities::baseline()

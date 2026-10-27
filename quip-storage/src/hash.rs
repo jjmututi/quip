@@ -110,7 +110,11 @@ mod tests {
 
     #[test]
     fn verify_accepts_matching_digest() {
-        let cid = CidOrV1::V1(compute_cid(HashAlgo::Blake3, b"x", &Fake).unwrap().with_algo(HashAlgo::Blake3));
+        let cid = CidOrV1::V1(
+            compute_cid(HashAlgo::Blake3, b"x", &Fake)
+                .unwrap()
+                .with_algo(HashAlgo::Blake3),
+        );
         assert!(verify_content(&cid, b"x", HashAlgo::Sha256, &Fake).is_ok());
         assert!(matches!(
             verify_content(&cid, b"y", HashAlgo::Sha256, &Fake),
@@ -132,9 +136,6 @@ mod tests {
     #[test]
     fn unsupported_algorithm_reports_unknown_hash_algo() {
         let err = compute_cid(HashAlgo::Blake3, &[1, 2, 3], &ShaOnly).unwrap_err();
-        assert!(matches!(
-            err,
-            Error::Core(CoreError::UnknownHashAlgo(1))
-        ));
+        assert!(matches!(err, Error::Core(CoreError::UnknownHashAlgo(1))));
     }
 }

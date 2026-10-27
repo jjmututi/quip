@@ -276,9 +276,18 @@ impl GovernanceStore {
         let links: Vec<CborValue> = self.derivative_links.iter().map(|l| l.to_cbor()).collect();
 
         CborValue::Map(alloc::vec![
-            (CborValue::String("trusted_cids".into()), CborValue::Array(tcids)),
-            (CborValue::String("delegations".into()), CborValue::Array(dels)),
-            (CborValue::String("derivative_links".into()), CborValue::Array(links)),
+            (
+                CborValue::String("trusted_cids".into()),
+                CborValue::Array(tcids)
+            ),
+            (
+                CborValue::String("delegations".into()),
+                CborValue::Array(dels)
+            ),
+            (
+                CborValue::String("derivative_links".into()),
+                CborValue::Array(links)
+            ),
         ])
     }
 
@@ -398,7 +407,10 @@ mod tests {
         // Expired at 3000
         assert!(!store.is_authorized(&tcid, &delegate, 0b010, Timestamp::from_millis(3_000)));
 
-        assert_eq!(store.sweep_expired_delegations(Timestamp::from_millis(3_000)), 1);
+        assert_eq!(
+            store.sweep_expired_delegations(Timestamp::from_millis(3_000)),
+            1
+        );
     }
 
     #[test]

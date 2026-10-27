@@ -161,7 +161,10 @@ impl fmt::Display for Error {
             Error::Dht(m) => write!(f, "dht lookup failed: {m}"),
             Error::Bft(m) => write!(f, "bft failure: {m}"),
             Error::TooLarge { size, max } => {
-                write!(f, "payload of {size} bytes exceeds tier limit of {max} bytes")
+                write!(
+                    f,
+                    "payload of {size} bytes exceeds tier limit of {max} bytes"
+                )
             }
             Error::Transport(msg) => write!(f, "transport error: {msg}"),
         }
@@ -177,10 +180,7 @@ mod tests {
 
     #[test]
     fn mappings_match_section_15() {
-        assert_eq!(
-            Error::Bft("digest mismatch").code(),
-            ErrorCode::BftFailure
-        );
+        assert_eq!(Error::Bft("digest mismatch").code(), ErrorCode::BftFailure);
         assert_eq!(Error::NatUnreachable.code(), ErrorCode::NatUnreachable);
         assert_eq!(Error::Dht("x").code(), ErrorCode::DhtError);
         assert_eq!(

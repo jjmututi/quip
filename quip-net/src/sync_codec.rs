@@ -37,7 +37,11 @@ pub fn range_from_cbor(v: &CborValue) -> Result<Range> {
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&hash);
-    Ok(Range { start: as_u64(&items[0])?, end: as_u64(&items[1])?, hash: arr })
+    Ok(Range {
+        start: as_u64(&items[0])?,
+        end: as_u64(&items[1])?,
+        hash: arr,
+    })
 }
 
 /// Encode a `[* Range]` list.
@@ -51,7 +55,10 @@ pub fn ranges_from_cbor(v: &CborValue) -> Result<Vec<Range>> {
         return Err(Error::BadFrame("ranges must be an array"));
     };
     if items.len() > crate::sync::MAX_RANGES {
-        return Err(Error::TooLarge { size: items.len(), max: crate::sync::MAX_RANGES });
+        return Err(Error::TooLarge {
+            size: items.len(),
+            max: crate::sync::MAX_RANGES,
+        });
     }
     items.iter().map(range_from_cbor).collect()
 }
@@ -72,7 +79,10 @@ pub fn fingerprint_from_cbor(v: &CborValue) -> Result<Fingerprint> {
     if items.len() != 2 {
         return Err(Error::BadFrame("fingerprint arity"));
     }
-    Ok(Fingerprint { algo: FingerprintAlgo::from_u64(as_u64(&items[0])?)?, value: as_bytes(&items[1])? })
+    Ok(Fingerprint {
+        algo: FingerprintAlgo::from_u64(as_u64(&items[0])?)?,
+        value: as_bytes(&items[1])?,
+    })
 }
 
 /// Encode an optional CID.

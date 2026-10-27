@@ -84,8 +84,14 @@ impl ResourceAnnouncement {
                 CborValue::String("latest_cid".into()),
                 self.latest_cid.to_cbor(),
             ),
-            (CborValue::String("witness_ring".into()), CborValue::Array(ring)),
-            (CborValue::String("dht_locations".into()), CborValue::Array(dht)),
+            (
+                CborValue::String("witness_ring".into()),
+                CborValue::Array(ring)
+            ),
+            (
+                CborValue::String("dht_locations".into()),
+                CborValue::Array(dht)
+            ),
             (
                 CborValue::String("relay_locations".into()),
                 CborValue::Array(relay),
@@ -103,11 +109,7 @@ impl ResourceAnnouncement {
         Ok(ResourceAnnouncement {
             resource_id: as_bytes(expect_key(&map, "resource_id", "missing resource_id")?)?,
             latest_cid: CidOrV1::from_cbor(expect_key(&map, "latest_cid", "missing latest_cid")?)?,
-            witness_ring: as_node_ids(expect_key(
-                &map,
-                "witness_ring",
-                "missing witness_ring",
-            )?)?,
+            witness_ring: as_node_ids(expect_key(&map, "witness_ring", "missing witness_ring")?)?,
             dht_locations: as_node_ids(expect_key(
                 &map,
                 "dht_locations",
@@ -250,7 +252,8 @@ impl ResourceDirectory {
     pub fn sweep_stale(&mut self, now: Timestamp) -> usize {
         let max_age = self.max_age_seconds;
         let before = self.announcements.len();
-        self.announcements.retain(|_, ann| !ann.is_stale(now, max_age));
+        self.announcements
+            .retain(|_, ann| !ann.is_stale(now, max_age));
         before - self.announcements.len()
     }
 
@@ -382,10 +385,7 @@ mod tests {
     #[test]
     fn restore_exact_ignores_capacity() {
         let mut dir = ResourceDirectory::with_capacity(1);
-        dir.restore_exact(alloc::vec![
-            dummy_ann(b"a", 1, 0),
-            dummy_ann(b"b", 2, 0),
-        ]);
+        dir.restore_exact(alloc::vec![dummy_ann(b"a", 1, 0), dummy_ann(b"b", 2, 0),]);
         assert_eq!(dir.len(), 2);
     }
 }

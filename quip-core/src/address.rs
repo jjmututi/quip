@@ -112,11 +112,7 @@ impl Address {
                     CborValue::Int(n) if *n >= 0 && *n <= u16::MAX as i128 => {
                         port = Some(*n as u16);
                     }
-                    _ => {
-                        return Err(Error::BadEncoding(
-                            "Address.port must be in 0..=65535",
-                        ))
-                    }
+                    _ => return Err(Error::BadEncoding("Address.port must be in 0..=65535")),
                 },
                 CborValue::String(_) => {
                     return Err(Error::BadEncoding("unknown key in Address"));
@@ -134,9 +130,7 @@ impl Address {
         match family {
             4 => {
                 if ip.len() != 4 {
-                    return Err(Error::BadEncoding(
-                        "IPv4 address must be exactly 4 bytes",
-                    ));
+                    return Err(Error::BadEncoding("IPv4 address must be exactly 4 bytes"));
                 }
                 let mut arr = [0u8; 4];
                 arr.copy_from_slice(&ip);
@@ -144,9 +138,7 @@ impl Address {
             }
             6 => {
                 if ip.len() != 16 {
-                    return Err(Error::BadEncoding(
-                        "IPv6 address must be exactly 16 bytes",
-                    ));
+                    return Err(Error::BadEncoding("IPv6 address must be exactly 16 bytes"));
                 }
                 let mut arr = [0u8; 16];
                 arr.copy_from_slice(&ip);
@@ -189,8 +181,14 @@ mod tests {
 
     #[test]
     fn family_discriminant_matches_spec() {
-        let v4 = Address::V4 { ip: [0; 4], port: 0 };
-        let v6 = Address::V6 { ip: [0; 16], port: 0 };
+        let v4 = Address::V4 {
+            ip: [0; 4],
+            port: 0,
+        };
+        let v6 = Address::V6 {
+            ip: [0; 16],
+            port: 0,
+        };
         assert_eq!(v4.family(), 4);
         assert_eq!(v6.family(), 6);
     }

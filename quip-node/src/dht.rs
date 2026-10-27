@@ -103,9 +103,7 @@ use quip_net::crypto::Ed25519Verifier;
 use quip_net::dht::RttClass;
 use quip_net::message::Message;
 use quip_net::nat_driver::{DhtClient, DhtResult};
-use quip_net::nat_wire::{
-    CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery,
-};
+use quip_net::nat_wire::{CandidateAnnounce, ConnectivityAnnounce, RelayDiscovery};
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
@@ -200,9 +198,7 @@ pub struct DhtHandle {
 impl DhtHandle {
     /// Build a `DhtHandle` and the outbound receiver the router task
     /// should drain.
-    pub(crate) fn new(
-        local_id: NodeId,
-    ) -> (Self, mpsc::UnboundedReceiver<Outbound>) {
+    pub(crate) fn new(local_id: NodeId) -> (Self, mpsc::UnboundedReceiver<Outbound>) {
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel();
         let (inbound_tx, inbound_rx) = mpsc::unbounded_channel();
         (
@@ -302,10 +298,7 @@ impl DhtHandle {
     /// slot has already been superseded.
     pub fn forget_peer(&self, peer: &NodeId, slot: &PeerSlot) {
         if let Ok(mut table) = self.inner.table.lock() {
-            let matches = table
-                .get(peer)
-                .map(|r| r.slot == *slot)
-                .unwrap_or(false);
+            let matches = table.get(peer).map(|r| r.slot == *slot).unwrap_or(false);
             if matches {
                 table.remove(peer);
             }
@@ -324,12 +317,7 @@ impl DhtHandle {
     /// peer task routes every transition through the registry first
     /// — where [`crate::peer::PeerLifecycle::transition_to`] rejects
     /// an invalid edge — and only mirrors accepted transitions here.
-    pub fn update_lifecycle(
-        &self,
-        peer: &NodeId,
-        slot: &PeerSlot,
-        lifecycle: PeerLifecycle,
-    ) {
+    pub fn update_lifecycle(&self, peer: &NodeId, slot: &PeerSlot, lifecycle: PeerLifecycle) {
         if let Ok(mut table) = self.inner.table.lock() {
             if let Some(r) = table.get_mut(peer) {
                 if r.slot == *slot {

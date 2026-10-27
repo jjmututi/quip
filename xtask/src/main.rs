@@ -11,10 +11,8 @@ use std::path::PathBuf;
 
 use ed25519_dalek::{Signer, SigningKey};
 use quip_core::dvv::NodeId;
+use quip_core::messages::ring_signature::{FrostRingSig, IndividualRingSig, RingSignature};
 use quip_core::messages::{KeyClaim, WitnessStatement};
-use quip_core::messages::ring_signature::{
-    FrostRingSig, IndividualRingSig, RingSignature,
-};
 use quip_core::time::Timestamp;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
@@ -198,8 +196,7 @@ fn generate_individual_ring_sig() -> Vector {
     let message_cbor = quip_core::cbor::encode(&cbor).expect("encode");
 
     Vector {
-        description:
-            "IndividualRingSig, 5-of-5 individual signatures (spec §5.3.4, §10.1)".into(),
+        description: "IndividualRingSig, 5-of-5 individual signatures (spec §5.3.4, §10.1)".into(),
         message: BytesField {
             cbor_bytes_hex: hex::encode(&message_cbor),
         },
@@ -218,8 +215,8 @@ fn generate_individual_ring_sig() -> Vector {
 // ---------------------------------------------------------------------
 
 fn generate_frost_ring_sig() -> Vector {
-    use frost_ed25519 as frost;
     use frost::keys::IdentifierList;
+    use frost_ed25519 as frost;
     use std::collections::BTreeMap;
 
     // 5-of-7 FROST group. Deterministic nonces.
@@ -241,8 +238,8 @@ fn generate_frost_ring_sig() -> Vector {
     // this per-participant; we do it once and reuse.
     let mut key_packages: BTreeMap<_, _> = BTreeMap::new();
     for (identifier, secret_share) in shares {
-        let key_package = frost::keys::KeyPackage::try_from(secret_share)
-            .expect("KeyPackage conversion");
+        let key_package =
+            frost::keys::KeyPackage::try_from(secret_share).expect("KeyPackage conversion");
         key_packages.insert(identifier, key_package);
     }
 
@@ -259,8 +256,7 @@ fn generate_frost_ring_sig() -> Vector {
         let key_package = &key_packages[&participant_identifier];
 
         // Seed the nonce RNG from the participant identifier.
-        let id_bytes = participant_identifier
-            .serialize();
+        let id_bytes = participant_identifier.serialize();
         let mut seed = [0u8; 32];
         let n = id_bytes.len().min(32);
         seed[..n].copy_from_slice(&id_bytes[..n]);
@@ -274,28 +270,23 @@ fn generate_frost_ring_sig() -> Vector {
     }
 
     // Round 2: build the signing package and sign.
-    let signing_package =
-        frost::SigningPackage::new(commitments_map.clone(), RING_PAYLOAD);
+    let signing_package = frost::SigningPackage::new(commitments_map.clone(), RING_PAYLOAD);
 
     let mut signature_shares = BTreeMap::new();
     for participant_identifier in nonces_map.keys() {
         let key_package = &key_packages[participant_identifier];
         let nonces = &nonces_map[participant_identifier];
         let signature_share =
-            frost::round2::sign(&signing_package, nonces, key_package)
-                .expect("round2 sign");
+            frost::round2::sign(&signing_package, nonces, key_package).expect("round2 sign");
         signature_shares.insert(*participant_identifier, signature_share);
     }
 
     // Aggregate.
     let group_signature =
-        frost::aggregate(&signing_package, &signature_shares, &pubkey_package)
-            .expect("aggregate");
+        frost::aggregate(&signing_package, &signature_shares, &pubkey_package).expect("aggregate");
 
     // Serialize.
-    let sig_bytes = group_signature
-        .serialize()
-        .expect("signature serialize");
+    let sig_bytes = group_signature.serialize().expect("signature serialize");
     let group_pk_bytes = pubkey_package
         .verifying_key()
         .serialize()
@@ -305,11 +296,8 @@ fn generate_frost_ring_sig() -> Vector {
     // spec's FrostRingSig.participants is Vec<NodeId>, but FROST
     // identifiers are small integers. We left-pad into 32 bytes as a
     // wire-format convention; real deployments will map explicitly.
-    let mut participants_sorted: Vec<frost::Identifier> =
-        nonces_map.keys().copied().collect();
-    participants_sorted.sort_by_key(|id| {
-        id.serialize()
-    });
+    let mut participants_sorted: Vec<frost::Identifier> = nonces_map.keys().copied().collect();
+    participants_sorted.sort_by_key(|id| id.serialize());
 
     let participants_wire: Vec<NodeId> = participants_sorted
         .iter()
@@ -344,8 +332,7 @@ fn generate_frost_ring_sig() -> Vector {
     let message_cbor = quip_core::cbor::encode(&cbor).expect("encode");
 
     Vector {
-        description:
-            "FrostRingSig, 5-of-7 FROST aggregate (spec §5.3.4, §10.1, §9)".into(),
+        description: "FrostRingSig, 5-of-7 FROST aggregate (spec §5.3.4, §10.1, §9)".into(),
         message: BytesField {
             cbor_bytes_hex: hex::encode(&message_cbor),
         },

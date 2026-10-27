@@ -502,7 +502,9 @@ mod tests {
         // A one-byte payload is a single chunk, so it has no parent nodes
         // and its outboard is just the header. Nine bytes cannot be right.
         assert_eq!(::bao::encode::outboard_size(1), 8);
-        let err = cache.insert_outboard(digest, 1, vec![0; 9], t(0)).unwrap_err();
+        let err = cache
+            .insert_outboard(digest, 1, vec![0; 9], t(0))
+            .unwrap_err();
         assert!(matches!(err, Error::ProofInvalid(_)), "got {err:?}");
         assert!(cache.is_empty());
     }
@@ -514,7 +516,12 @@ mod tests {
         let mut cache = BaoCache::new();
 
         assert!(cache
-            .insert_outboard(*cid_of(&payload).digest(), payload.len() as u64, outboard, t(0))
+            .insert_outboard(
+                *cid_of(&payload).digest(),
+                payload.len() as u64,
+                outboard,
+                t(0)
+            )
             .unwrap());
         assert_eq!(cache.len(), 1);
     }

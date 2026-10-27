@@ -747,7 +747,9 @@ mod tests {
         };
         let bytes = s.to_bytes().unwrap();
         let v = decode(&bytes).unwrap();
-        let CborValue::Array(arr) = &v else { panic!("expected array") };
+        let CborValue::Array(arr) = &v else {
+            panic!("expected array")
+        };
         // ["quip-v1","set", rid, dvv, payload, cid, null, 1]
         assert_eq!(arr.len(), 8);
         assert_eq!(arr[6], CborValue::Null);
@@ -784,7 +786,10 @@ mod tests {
     fn query_pins_arity_variants() {
         // (None, None)
         let none = QueryPins::default();
-        assert_eq!(QueryPins::from_bytes(&none.to_bytes().unwrap()).unwrap(), none);
+        assert_eq!(
+            QueryPins::from_bytes(&none.to_bytes().unwrap()).unwrap(),
+            none
+        );
 
         // (Some, None)
         let rid_only = QueryPins {
@@ -801,7 +806,10 @@ mod tests {
             resource_id: Some(b"r".to_vec()),
             cid: Some(cid(1)),
         };
-        assert_eq!(QueryPins::from_bytes(&both.to_bytes().unwrap()).unwrap(), both);
+        assert_eq!(
+            QueryPins::from_bytes(&both.to_bytes().unwrap()).unwrap(),
+            both
+        );
 
         // (None, Some) — nullable resource_id slot
         let cid_only = QueryPins {
@@ -810,7 +818,9 @@ mod tests {
         };
         let bytes = cid_only.to_bytes().unwrap();
         let v = decode(&bytes).unwrap();
-        let CborValue::Array(arr) = &v else { panic!("expected array") };
+        let CborValue::Array(arr) = &v else {
+            panic!("expected array")
+        };
         // ["quip-v1","query_pins", null, cid]
         assert_eq!(arr.len(), 4);
         assert_eq!(arr[2], CborValue::Null);
@@ -823,10 +833,7 @@ mod tests {
         // accepted per spec ("receivers SHOULD normalize").
         let msg = envelope(
             "query_pins",
-            alloc::vec![
-                CborValue::Bytes(b"r".to_vec()),
-                CborValue::Null,
-            ],
+            alloc::vec![CborValue::Bytes(b"r".to_vec()), CborValue::Null,],
         );
         let bytes = encode(&msg).unwrap();
         let back = QueryPins::from_bytes(&bytes).unwrap();
@@ -877,13 +884,12 @@ mod tests {
         };
         let bytes = cid_only.to_bytes().unwrap();
         let v = decode(&bytes).unwrap();
-        let CborValue::Array(arr) = &v else { panic!("expected array") };
+        let CborValue::Array(arr) = &v else {
+            panic!("expected array")
+        };
         assert_eq!(arr.len(), 4);
         assert_eq!(arr[2], CborValue::Null);
-        assert_eq!(
-            QueryQuarantined::from_bytes(&bytes).unwrap(),
-            cid_only
-        );
+        assert_eq!(QueryQuarantined::from_bytes(&bytes).unwrap(), cid_only);
     }
 
     #[test]

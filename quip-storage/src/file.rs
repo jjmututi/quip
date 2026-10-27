@@ -83,8 +83,8 @@ impl FileBlobStore {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("meta") {
                 let meta_bytes = fs::read(&path).map_err(|e| Error::Io(e.to_string()))?;
-                let cbor = quip_core::cbor::decode(&meta_bytes)
-                    .map_err(|e| Error::Io(e.to_string()))?;
+                let cbor =
+                    quip_core::cbor::decode(&meta_bytes).map_err(|e| Error::Io(e.to_string()))?;
                 let map = parse_map(&cbor, META_KEYS)?;
                 let cid = CidOrV1::from_cbor(expect_key(&map, "cid", "missing cid")?)?;
                 let stored_at = Timestamp::from_millis(as_u64(expect_key(

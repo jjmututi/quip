@@ -50,7 +50,10 @@ impl PinEntry {
                 CborValue::String("ref_count".to_string()),
                 CborValue::Int(self.ref_count as i128),
             ),
-            (CborValue::String("local".to_string()), CborValue::Bool(self.local)),
+            (
+                CborValue::String("local".to_string()),
+                CborValue::Bool(self.local),
+            ),
         ])
     }
 

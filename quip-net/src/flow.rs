@@ -502,4 +502,4 @@ mod tests {
         assert_eq!(m.send_state(), FlowState::Blocked);
         assert_eq!(m.recv_state(), FlowState::Blocked);
     }
-} 
+}

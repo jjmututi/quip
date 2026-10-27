@@ -90,11 +90,7 @@ pub fn is_blake3(cid: &CidOrV1, negotiated: HashAlgo) -> bool {
 /// returns the `(offset, length)` pairs for those requests.
 ///
 /// Returns an error if `length` is zero or `max_per_request` is zero.
-pub fn split_range(
-    offset: u64,
-    length: u64,
-    max_per_request: u64,
-) -> Result<Vec<(u64, u64)>> {
+pub fn split_range(offset: u64, length: u64, max_per_request: u64) -> Result<Vec<(u64, u64)>> {
     if length == 0 {
         return Err(Error::RangeInvalid("range length must be non-zero"));
     }
@@ -365,11 +361,7 @@ pub mod bao_support {
     /// resource size. This is the "recompute on demand" path that §8.2
     /// permits. [`extract_proof_cached`] is the caching path §8.2 prefers
     /// and produces byte-identical proofs.
-    pub fn extract_proof(
-        payload: &[u8],
-        offset: u64,
-        length: u64,
-    ) -> Result<(Vec<u8>, Vec<u8>)> {
+    pub fn extract_proof(payload: &[u8], offset: u64, length: u64) -> Result<(Vec<u8>, Vec<u8>)> {
         let (start, end) = checked_range(payload, offset, length)?;
 
         let slice = payload[start..end].to_vec();
@@ -570,11 +562,7 @@ pub mod bao_support {
 
     impl<'a, Q: QuarantineCheck> RangeResponder<'a, Q> {
         /// Build a responder.
-        pub fn new(
-            cache: &'a mut BaoCache,
-            quarantine: &'a Q,
-            max_range_length: u64,
-        ) -> Self {
+        pub fn new(cache: &'a mut BaoCache, quarantine: &'a Q, max_range_length: u64) -> Self {
             Self {
                 cache,
                 quarantine,
@@ -1042,9 +1030,16 @@ mod tests {
             let cid = cid_blake3(&payload);
             let mut cache = BaoCache::new();
 
-            let out =
-                extract_proof_cached(&mut cache, &cid, &payload, 100, 200, HashAlgo::Blake3, now())
-                    .unwrap();
+            let out = extract_proof_cached(
+                &mut cache,
+                &cid,
+                &payload,
+                100,
+                200,
+                HashAlgo::Blake3,
+                now(),
+            )
+            .unwrap();
 
             // The client side is untouched by this milestone: the same
             // verifier that accepted the uncached proofs must accept this.
@@ -1110,8 +1105,7 @@ mod tests {
             let cid = cid_blake3(&payload);
             let mut cache = BaoCache::new();
 
-            let cases: [(u64, u64); 5] =
-                [(0, 1), (1023, 2), (1024, 1024), (2048, 2048), (4095, 1)];
+            let cases: [(u64, u64); 5] = [(0, 1), (1023, 2), (1024, 1024), (2048, 2048), (4095, 1)];
             for (offset, length) in cases {
                 let (expected_slice, expected_proof) =
                     extract_proof(&payload, offset, length).unwrap();
@@ -1240,16 +1234,9 @@ mod tests {
             assert!(cache.contains(&small_cid));
 
             // The larger resource evicts the smaller one.
-            let _ = extract_proof_cached(
-                &mut cache,
-                &big_cid,
-                &big,
-                0,
-                64,
-                HashAlgo::Blake3,
-                now(),
-            )
-            .unwrap();
+            let _ =
+                extract_proof_cached(&mut cache, &big_cid, &big, 0, 64, HashAlgo::Blake3, now())
+                    .unwrap();
             assert!(!cache.contains(&small_cid), "small tree should be evicted");
 
             // Re-requesting the small resource rebuilds it; the proof still
@@ -1280,19 +1267,11 @@ mod tests {
             let mut cache = BaoCache::new();
 
             // Warm the cache, then take the whole resource from the hit.
-            let _ =
-                extract_proof_cached(&mut cache, &cid, &payload, 0, 1, HashAlgo::Blake3, now())
+            let _ = extract_proof_cached(&mut cache, &cid, &payload, 0, 1, HashAlgo::Blake3, now())
+                .unwrap();
+            let out =
+                extract_proof_cached(&mut cache, &cid, &payload, 0, 2048, HashAlgo::Blake3, now())
                     .unwrap();
-            let out = extract_proof_cached(
-                &mut cache,
-                &cid,
-                &payload,
-                0,
-                2048,
-                HashAlgo::Blake3,
-                now(),
-            )
-            .unwrap();
 
             assert!(!out.recomputed);
             assert_eq!(out.slice, payload);
@@ -1338,8 +1317,7 @@ mod tests {
             let cid = cid_blake3(&payload);
             let mut cache = BaoCache::new();
             let q = AlwaysQuarantined;
-            let mut resp =
-                RangeResponder::new(&mut cache, &q, MAX_RANGE_IN_SINGLE_RESPONSE);
+            let mut resp = RangeResponder::new(&mut cache, &q, MAX_RANGE_IN_SINGLE_RESPONSE);
 
             let req = FetchRange {
                 resource_id: b"r".to_vec(),
@@ -1363,8 +1341,7 @@ mod tests {
             let cid = cid_blake3(&payload);
             let mut cache = BaoCache::new();
             let q = NoQuarantine;
-            let mut resp =
-                RangeResponder::new(&mut cache, &q, MAX_RANGE_IN_SINGLE_RESPONSE);
+            let mut resp = RangeResponder::new(&mut cache, &q, MAX_RANGE_IN_SINGLE_RESPONSE);
 
             let req = FetchRange {
                 resource_id: b"r".to_vec(),
@@ -1372,9 +1349,7 @@ mod tests {
                 offset: 100,
                 length: 200,
             };
-            let out = resp
-                .serve(&req, &payload, HashAlgo::Blake3, now())
-                .unwrap();
+            let out = resp.serve(&req, &payload, HashAlgo::Blake3, now()).unwrap();
             assert_eq!(out.slice, payload[100..300].to_vec());
 
             let r = RangeResponse {

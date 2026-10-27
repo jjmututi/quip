@@ -28,10 +28,9 @@
 
 use crate::codec::{as_bytes_n, as_u64, envelope, fields, verb_of};
 use crate::constants::{
-    CLUSTER_ACCEPTANCE_PERCENTILE, CLUSTER_HEARTBEAT_S, CLUSTER_LEVELS,
-    COORDINATOR_INTERVAL_S, MAX_CLUSTER_SIZE, MAX_SPLIT_ATTEMPTS,
-    MERGE_DELTA_INTERVAL_S, MIN_CLUSTER_SIZE, RTT_GLOBAL_MS, RTT_LOCAL_MS,
-    RTT_REGIONAL_MS,
+    CLUSTER_ACCEPTANCE_PERCENTILE, CLUSTER_HEARTBEAT_S, CLUSTER_LEVELS, COORDINATOR_INTERVAL_S,
+    MAX_CLUSTER_SIZE, MAX_SPLIT_ATTEMPTS, MERGE_DELTA_INTERVAL_S, MIN_CLUSTER_SIZE, RTT_GLOBAL_MS,
+    RTT_LOCAL_MS, RTT_REGIONAL_MS,
 };
 use crate::error::{Error, Result};
 use alloc::vec::Vec;
@@ -688,9 +687,7 @@ impl ClusterState {
 
     /// True if the last heartbeat is older than `config.heartbeat_s`.
     pub fn heartbeat_expired(&self, now: Timestamp, config: &ClusterConfig) -> bool {
-        let elapsed_s = now
-            .as_secs()
-            .saturating_sub(self.last_heartbeat.as_secs());
+        let elapsed_s = now.as_secs().saturating_sub(self.last_heartbeat.as_secs());
         elapsed_s > config.heartbeat_s
     }
 
@@ -1045,8 +1042,7 @@ impl ClusterState {
 /// input, which is adequate for merge decisions — those only care about
 /// log2 of the sizes.
 pub fn estimate_size_from_routing_table(avg_routing_table_size: u64) -> u64 {
-    1u64
-        .checked_shl(avg_routing_table_size as u32)
+    1u64.checked_shl(avg_routing_table_size as u32)
         .unwrap_or(u64::MAX)
 }
 
@@ -1100,9 +1096,7 @@ pub fn percentile(values: &[u64], percentile: u8) -> Option<u64> {
     }
     let n = values.len() as u64;
     let p = percentile.min(100) as u64;
-    let idx = (p * n).div_ceil(100)
-        .saturating_sub(1)
-        .min(n - 1) as usize;
+    let idx = (p * n).div_ceil(100).saturating_sub(1).min(n - 1) as usize;
     let mut sorted: Vec<u64> = values.to_vec();
     sorted.sort_unstable();
     Some(sorted[idx])
@@ -1177,7 +1171,10 @@ mod tests {
         );
         assert_eq!(ClusterLevel::Local.more_specific(), None);
 
-        assert_eq!(ClusterLevel::Local.less_specific(), Some(ClusterLevel::Regional));
+        assert_eq!(
+            ClusterLevel::Local.less_specific(),
+            Some(ClusterLevel::Regional)
+        );
         assert_eq!(ClusterLevel::Global.less_specific(), None);
     }
 
@@ -1202,8 +1199,14 @@ mod tests {
         let mut c = ClusterState::new(cid(1), ClusterLevel::Local, t(0));
         let cfg = local_config();
         c.note_heartbeat(t(0));
-        assert!(!c.heartbeat_expired(t(60), &cfg), "at the interval, not yet");
-        assert!(c.heartbeat_expired(t(61), &cfg), "past the interval, expired");
+        assert!(
+            !c.heartbeat_expired(t(60), &cfg),
+            "at the interval, not yet"
+        );
+        assert!(
+            c.heartbeat_expired(t(61), &cfg),
+            "past the interval, expired"
+        );
 
         c.note_heartbeat(t(100));
         assert!(!c.heartbeat_expired(t(150), &cfg));
@@ -1325,7 +1328,7 @@ mod tests {
         // δ = 2 during odd intervals; use a time inside one.
         let now = Timestamp::from_secs(3600); // interval 1, δ = 2
         let other = info(1, 100); // same size, lower id
-        // |log2(100) - log2(100)| = 0, not > 2; tie-break to lower id.
+                                  // |log2(100) - log2(100)| = 0, not > 2; tie-break to lower id.
         assert_eq!(c.should_merge(&other, now, &cfg), MergeDecision::Merge);
 
         let other = info(99, 100); // same size, higher id
@@ -1682,101 +1685,103 @@ mod tests {
         assert_eq!(estimate_size_from_routing_table(1000), u64::MAX);
     }
 
-#[cfg(test)]
-mod cluster_info_wire_tests {
-    use super::*;
+    #[cfg(test)]
+    mod cluster_info_wire_tests {
+        use super::*;
 
-    #[cfg(feature = "crypto")]
-    use quip_core::messages::Signer;
+        #[cfg(feature = "crypto")]
+        use quip_core::messages::Signer;
 
-    fn cid(b: u8) -> ClusterId {
-        [b; 16]
-    }
+        fn cid(b: u8) -> ClusterId {
+            [b; 16]
+        }
 
-    fn sample() -> ClusterInfo {
-        ClusterInfo {
-            id: cid(0x33),
-            size: 42,
-            ctime: Timestamp::from_secs(1_000),
+        fn sample() -> ClusterInfo {
+            ClusterInfo {
+                id: cid(0x33),
+                size: 42,
+                ctime: Timestamp::from_secs(1_000),
+            }
+        }
+
+        #[test]
+        fn roundtrips_and_rejects_other_verbs() {
+            let a = ClusterInfoAnnounce {
+                info: sample(),
+                signature: [9u8; 64],
+            };
+            let bytes = a.to_bytes().unwrap();
+            assert_eq!(ClusterInfoAnnounce::from_bytes(&bytes).unwrap(), a);
+
+            // The verb is checked, not ignored: a `cluster_info` decoder given
+            // a `coral_lookup` frame must refuse it rather than read fields
+            // positionally out of a foreign message.
+            let foreign = envelope("coral_lookup", alloc::vec![CborValue::Int(1)]);
+            let encoded = encode(&foreign).unwrap();
+            assert!(ClusterInfoAnnounce::from_bytes(&encoded).is_err());
+        }
+
+        #[test]
+        fn arity_is_enforced() {
+            let short = envelope(
+                "cluster_info",
+                alloc::vec![CborValue::Bytes(cid(1).to_vec())],
+            );
+            let encoded = encode(&short).unwrap();
+            assert!(ClusterInfoAnnounce::from_bytes(&encoded).is_err());
+        }
+
+        #[cfg(feature = "crypto")]
+        #[test]
+        fn signature_verifies_against_the_sender_only() {
+            use crate::crypto::{Ed25519Signer, Ed25519Verifier};
+
+            let signer = Ed25519Signer::from_seed(&[7u8; 32]);
+            let sender: NodeId = signer.public_key();
+            let mut a = ClusterInfoAnnounce {
+                info: sample(),
+                signature: [0u8; 64],
+            };
+            a.signature = signer.sign_ed25519(&a.signing_payload().unwrap());
+            let v = Ed25519Verifier;
+
+            assert!(a.verify(&sender, &v).unwrap(), "authentic sender verifies");
+
+            // A different node cannot announce on the signer's behalf: the
+            // payload carries no node id, so the id must come from the
+            // authenticated connection and be part of the check.
+            let mut other: NodeId = sender;
+            other[0] ^= 0xff;
+            assert!(
+                !a.verify(&other, &v).unwrap(),
+                "wrong sender must not verify"
+            );
+
+            // Any field the signature covers is covered in fact.
+            let mut tampered = a.clone();
+            tampered.info.size = 43;
+            assert!(!tampered.verify(&sender, &v).unwrap());
+        }
+
+        #[cfg(feature = "crypto")]
+        #[test]
+        fn signing_payload_excludes_signature() {
+            use crate::crypto::Ed25519Signer;
+
+            let signer = Ed25519Signer::from_seed(&[3u8; 32]);
+            let mut a = ClusterInfoAnnounce {
+                info: sample(),
+                signature: [0u8; 64],
+            };
+            let payload = a.signing_payload().unwrap();
+            a.signature = signer.sign_ed25519(&payload);
+            assert_eq!(
+                a.signing_payload().unwrap(),
+                payload,
+                "signing the payload must not change it"
+            );
         }
     }
-
-    #[test]
-    fn roundtrips_and_rejects_other_verbs() {
-        let a = ClusterInfoAnnounce {
-            info: sample(),
-            signature: [9u8; 64],
-        };
-        let bytes = a.to_bytes().unwrap();
-        assert_eq!(ClusterInfoAnnounce::from_bytes(&bytes).unwrap(), a);
-
-        // The verb is checked, not ignored: a `cluster_info` decoder given
-        // a `coral_lookup` frame must refuse it rather than read fields
-        // positionally out of a foreign message.
-        let foreign = envelope("coral_lookup", alloc::vec![CborValue::Int(1)]);
-        let encoded = encode(&foreign).unwrap();
-        assert!(ClusterInfoAnnounce::from_bytes(&encoded).is_err());
-    }
-
-    #[test]
-    fn arity_is_enforced() {
-        let short = envelope(
-            "cluster_info",
-            alloc::vec![CborValue::Bytes(cid(1).to_vec())],
-        );
-        let encoded = encode(&short).unwrap();
-        assert!(ClusterInfoAnnounce::from_bytes(&encoded).is_err());
-    }
-
-    #[cfg(feature = "crypto")]
-    #[test]
-    fn signature_verifies_against_the_sender_only() {
-        use crate::crypto::{Ed25519Signer, Ed25519Verifier};
-
-        let signer = Ed25519Signer::from_seed(&[7u8; 32]);
-        let sender: NodeId = signer.public_key();
-        let mut a = ClusterInfoAnnounce {
-            info: sample(),
-            signature: [0u8; 64],
-        };
-        a.signature = signer.sign_ed25519(&a.signing_payload().unwrap());
-        let v = Ed25519Verifier;
-
-        assert!(a.verify(&sender, &v).unwrap(), "authentic sender verifies");
-
-        // A different node cannot announce on the signer's behalf: the
-        // payload carries no node id, so the id must come from the
-        // authenticated connection and be part of the check.
-        let mut other: NodeId = sender;
-        other[0] ^= 0xff;
-        assert!(!a.verify(&other, &v).unwrap(), "wrong sender must not verify");
-
-        // Any field the signature covers is covered in fact.
-        let mut tampered = a.clone();
-        tampered.info.size = 43;
-        assert!(!tampered.verify(&sender, &v).unwrap());
-    }
-
-    #[cfg(feature = "crypto")]
-    #[test]
-    fn signing_payload_excludes_signature() {
-        use crate::crypto::Ed25519Signer;
-
-        let signer = Ed25519Signer::from_seed(&[3u8; 32]);
-        let mut a = ClusterInfoAnnounce {
-            info: sample(),
-            signature: [0u8; 64],
-        };
-        let payload = a.signing_payload().unwrap();
-        a.signature = signer.sign_ed25519(&payload);
-        assert_eq!(
-            a.signing_payload().unwrap(),
-            payload,
-            "signing the payload must not change it"
-        );
-    }
-}
-
 }
 
 #[cfg(test)]

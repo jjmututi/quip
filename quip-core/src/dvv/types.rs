@@ -135,8 +135,7 @@ impl Dvv {
             return;
         }
         let excess = self.deps.len() - MAX_DEPENDENCIES;
-        let mut entries: Vec<(NodeId, u64)> =
-            self.deps.iter().map(|(&k, &v)| (k, v)).collect();
+        let mut entries: Vec<(NodeId, u64)> = self.deps.iter().map(|(&k, &v)| (k, v)).collect();
         entries.sort_by_key(|&(_, c)| c);
         for (w, _) in entries.into_iter().take(excess) {
             self.deps.remove(&w);
@@ -200,9 +199,17 @@ impl Dvv {
         out.dot = match (&self.dot, &other.dot) {
             (Some(a), Some(b)) => {
                 if a.counter != b.counter {
-                    Some(if a.counter > b.counter { a.clone() } else { b.clone() })
+                    Some(if a.counter > b.counter {
+                        a.clone()
+                    } else {
+                        b.clone()
+                    })
                 } else {
-                    Some(if a.writer <= b.writer { a.clone() } else { b.clone() })
+                    Some(if a.writer <= b.writer {
+                        a.clone()
+                    } else {
+                        b.clone()
+                    })
                 }
             }
             (Some(a), None) => Some(a.clone()),

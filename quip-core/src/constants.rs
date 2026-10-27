@@ -298,18 +298,18 @@ pub mod verbs {
 // compiling without change.
 // -------------------------------------------------------------------------
 
-pub use wire::*;
-pub use dvv::*;
-pub use witness::*;
 pub use bft::*;
-pub use nat::*;
 pub use coral::*;
-pub use pin::*;
+pub use dvv::*;
 pub use governance::*;
-pub use sync::*;
-pub use resource::*;
-pub use verbs::*;
 pub use merkle::*;
+pub use nat::*;
+pub use pin::*;
+pub use resource::*;
+pub use sync::*;
+pub use verbs::*;
+pub use wire::*;
+pub use witness::*;
 
 #[cfg(test)]
 mod tests {

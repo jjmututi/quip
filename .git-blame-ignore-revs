@@ -2,5 +2,10 @@
 #
 # To use: git config blame.ignoreRevsFile .git-blame-ignore-revs
 #
-# Seed empty: the item 36 reformat commit, if it lands, appends its SHA
-# here. See Outstanding Work item 36 in CHANGELOG.md.
+# Outstanding Work item 36: the one-time rustfmt reformat. It touched 92
+# Rust files with whitespace, import order and block collapsing, so every
+# line it rewrote would otherwise blame to it. One full object name per
+# line, newest last; a toolchain bump that changes rustfmt's output
+# appends its own reformat commit here.
+
+0dd5180e69116471c7060b6206283cc5684f17c1

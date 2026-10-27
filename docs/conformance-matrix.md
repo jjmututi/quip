@@ -243,8 +243,8 @@ enough and the edit has not landed."
   `[capabilities]` asks for `MERKLE_RANGE` without `BLAKE3` is rejected by
   `Handshake::new_checked` at configuration time, with the binary exiting
   non-zero before it binds.
-- **History.** PARTIAL at HEAD until `<SHA>` (no caller for
-  `Handshake::new_checked`); PASS at `<SHA>` (caller at
+- **History.** PARTIAL at HEAD until `e378baf` (no caller for
+  `Handshake::new_checked`); PASS at `e378baf` (caller at
   `quip-node-headless/src/config.rs`; rejection test passes).
 
 ### 5. §5.3.3 — re-issue after expiry — PASS

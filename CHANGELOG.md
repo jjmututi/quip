@@ -2387,7 +2387,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     the reformat at all; the correction at `06864fa` recorded the
     wrong-claim fix under item 36 and this bullet records the reformat's
     existence in the work log.
-  - M9.7 code commit at `<SHA>`: the `quip-node-headless` crate is a new
+  - M9.7 code commit at `e378baf`: the `quip-node-headless` crate is a new
     workspace member. `quip-node-headless/src/config.rs` parses and
     validates the TOML config in two modes (`Development` /
     `Production`), with the mode table from `docs/M9.7-design.md` §1:

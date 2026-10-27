@@ -2292,6 +2292,17 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     `-04`); "quorum certificates for prepared messages" at 1528–1533;
     Trap 3's flat "5" at draft 1457–1462. The follow-up commit fills the
     `<SHA>` placeholder.
+  - Claude Code permission surface at `<SHA>`. `.claude/settings.json` is
+    the committed allow/deny list: `cargo`, `git` (read, add, commit —
+    not push, reset --hard, or checkout --), `sed`, `grep`, `sed`'s kin,
+    `Read`, `Edit`, `Write` allowed; `git push`, `git reset --hard`,
+    `git checkout --`, `rm -rf`, `sudo` denied. `.gitignore` gains
+    `.claude/settings.local.json` so a per-machine override cannot be
+    committed by accident. `.git-blame-ignore-revs` is seeded empty for
+    the item 36 reformat commit, if it lands, to append its SHA. Not a
+    code change and not a row move; the surface exists so `claude -p` can
+    run units without a prompt it cannot answer. The follow-up commit
+    fills the `<SHA>` placeholder.
 
 ---
 

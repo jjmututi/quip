@@ -28,3 +28,7 @@ target/
 
 # Local tooling artifacts.
 .cline/
+
+# Local Claude Code overrides. The committed settings.json is the shared
+# permission surface; this file is per-machine and must not be committed.
+.claude/settings.local.json

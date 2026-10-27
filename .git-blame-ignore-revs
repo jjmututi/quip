@@ -1,0 +1,6 @@
+# Commits that should be skipped by `git blame`.
+#
+# To use: git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# Seed empty: the item 36 reformat commit, if it lands, appends its SHA
+# here. See Outstanding Work item 36 in CHANGELOG.md.

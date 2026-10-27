@@ -1,0 +1,27 @@
+[package]
+name = "quip-node-headless"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.99.0"
+description = "Headless QUIP node binary: configuration, dev/production modes, logging, graceful shutdown."
+publish = false
+
+[[bin]]
+name = "quip-node-headless"
+path = "src/main.rs"
+
+[dependencies]
+quip-core = { path = "../quip-core" }
+quip-net = { path = "../quip-net", features = ["crypto", "quic"] }
+quip-node = { path = "../quip-node" }
+quip-storage = { path = "../quip-storage", features = ["std"] }
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tokio = { version = "1", features = ["full"] }
+hex = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

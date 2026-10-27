@@ -13,5 +13,6 @@ members = [
     "quip-net",
     "quip-node",
     "quip-node-ffi",
+    "quip-node-headless",
     "xtask",
 ]

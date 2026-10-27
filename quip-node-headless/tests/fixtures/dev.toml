@@ -1,0 +1,6 @@
+# A development-mode config that needs no setup: loopback bind, fixed
+# dev seed, in-memory store. `cargo run -p quip-node-headless --
+# --config quip-node-headless/tests/fixtures/dev.toml` starts a node.
+mode = "development"
+bind = "127.0.0.1:0"
+seed = "4242424242424242424242424242424242424242424242424242424242424242"

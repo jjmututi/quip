@@ -149,7 +149,7 @@ doc-tests       4 passed (one per crate)
 | M9.6b | `quip-node`: cluster-info exchange and split execution | landed |
 | M9.6b (merge) | `quip-node`: cluster merging (§13.4) | landed |
 | M9.6c | `quip-node`: trust bootstrap | not started |
-| M9.7 | `quip-node-headless`: binary, config file, deployment | not started |
+| M9.7 | `quip-node-headless`: binary, config file, deployment | landed |
 | M9.8 | `quip-node`: peer address book and bootstrap | not started |
 | M10.1 | `quip-node-ffi`: bind and query a node from Dart | landed |
 | M10.2 | `quip-node-ffi`: event stream across the FFI boundary | landed |
@@ -2376,6 +2376,46 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     config loader, so row 4 closes in the code commit, not this one. The
     reformat commit (item 36) lands before this note. The follow-up
     commit fills the `<SHA>` placeholder.
+  - **`0dd5180` — the reformat (item 36).** The tree was reformatted once
+    by `cargo fmt --all` at `0dd5180`; the reformat's SHA is in
+    `.git-blame-ignore-revs` (appended at `fd67d15`) so `git blame` skips
+    it. Outstanding Work item 36 records the reformat, the new `fmt` CI
+    job, and two correction bullets stating that `git diff
+    --ignore-all-space` still names 67 files because rustfmt re-wraps
+    lines, and that the `fmt` job does not warn about a missing final
+    newline. This entry exists because item 37 did not previously name
+    the reformat at all; the correction at `06864fa` recorded the
+    wrong-claim fix under item 36 and this bullet records the reformat's
+    existence in the work log.
+  - M9.7 code commit at `<SHA>`: the `quip-node-headless` crate is a new
+    workspace member. `quip-node-headless/src/config.rs` parses and
+    validates the TOML config in two modes (`Development` /
+    `Production`), with the mode table from `docs/M9.7-design.md` §1:
+    Development defaults bind to `127.0.0.1:0`, a fixed dev seed if
+    absent, an in-memory store if absent; Production requires bind, a
+    seed file with 0600 permissions, a store path, `auto_serve_pins`, and
+    `relay_capable`, and rejects a literal seed. The capability set is
+    validated by `Handshake::new_checked` at configuration time — row 4's
+    closure. `quip-node-headless/src/mode.rs` builds the store per mode
+    and runs a generic `run_with_store<B: BlobStore>` because `NodeConfig`
+    carries no store and `Node<B>` is generic. `quip-node-headless/src/log.rs`
+    logs JSON in production and human-readable in development.
+    `quip-node-headless/src/shutdown.rs` runs until ctrl-c or SIGTERM.
+    `quip-node-headless/tests/config.rs` covers the mode-validation
+    rejections, `config_rejects_unknown_capability` and
+    `config_rejects_closure_violation`; `quip-node-headless/tests/binary.rs`
+    starts the binary, connects a second in-process node to it, sends a
+    `get`, and confirms a clean exit 0 on SIGTERM. Row 4 moves PARTIAL →
+    PASS. Trust bootstrap (`[trust]`, `witness_ring`) is parsed and
+    shape-validated but not consumed; M9.6c consumes it. Peer address book
+    (M9.8) not touched. The follow-up commit fills the `<SHA>`
+    placeholder.
+  - Correction to the M9.7 design note's §3 item 3: the config loader
+    calls `Handshake::new_checked`, not `Capabilities::new_checked`;
+    `Capabilities` has no such method. The matrix's row 4 source line
+    already said the true path; the note's prose and the matrix's other
+    two mentions of the old name are a `-04` tidy, not this commit's
+    scope.
 
 ---
 

@@ -193,7 +193,7 @@ enough and the edit has not landed."
   depends on the cluster-info exchange (§3 of the M9.6b note), which has
   no row of its own.
 
-### 4. §4 — capability dependency closure — PARTIAL
+### 4. §4 — capability dependency closure — PASS
 
 - **Clause.** "A peer `MUST NOT` advertise a capability whose
   dependencies are not also advertised… Implementations `MUST` reject a
@@ -204,9 +204,15 @@ enough and the edit has not landed."
   so that an inconsistent configuration never reaches the wire."
 - **Requirement.** `MUST` reject, locally and remotely; the local
   rejection at configuration time.
-- **Source.** `quip_net::handshake::Capabilities::validate_closure`,
-  called from `Handshake::new_checked`, `Handshake::to_bytes`,
-  `Handshake::from_bytes` and `Handshake::negotiate`.
+- **Source.** `quip-node-headless/src/config.rs` — `Config::load` builds the
+  capability set from the config file and calls
+  `Handshake::new_checked` (`quip-net/src/handshake.rs:255`) before the
+  node binds; an unknown capability name or a set the code does not
+  implement returns `ConfigError::Invalid` and the binary exits with
+  code 2. Underneath, `quip_net::handshake::Capabilities::validate_closure`
+  is also called from `Handshake::to_bytes`, `Handshake::from_bytes` and
+  `Handshake::negotiate`, so the remote and negotiated paths keep their
+  earlier coverage.
 - **Test.** `closure_accepts_baseline`,
   `closure_rejects_blake3_without_cid_addressing`,
   `closure_rejects_cidv1_without_cid_addressing`,
@@ -217,20 +223,29 @@ enough and the edit has not landed."
   `closure_rejects_bft_checkpoint_without_dht`,
   `to_bytes_rejects_local_closure_violation`,
   `from_bytes_rejects_remote_closure_violation`,
-  `negotiate_rejects_intersection_that_breaks_closure`.
-- **Verdict.** PARTIAL — remote sets and the negotiated intersection are
-  rejected, and `to_bytes` rejects a bad local set before any byte
-  reaches the wire, so the clause's stated purpose holds. But
-  `new_checked`, the entry point that would reject at construction, has
-  no caller: a bad local configuration binds an endpoint and fails at
-  its first handshake rather than at configuration time.
+  `negotiate_rejects_intersection_that_breaks_closure`, plus
+  `config_rejects_closure_violation` and
+  `config_rejects_unknown_capability` (`quip-node-headless/tests/config.rs`),
+  which drive the binary with `--check-config` and assert a non-zero exit.
+- **Verdict.** PASS — the configuration-time rejection now has a caller.
+  `Config::load` builds the set, calls `Handshake::new_checked`, and
+  returns `ConfigError::Invalid` before any socket is bound, so an
+  inconsistent configuration never reaches the wire. The test drives the
+  binary with `--check-config`, asserts exit code 2, and asserts the
+  message names the offending capability.
 - **Specification status.** clear — the dependency list, the error code
   and the required timing are all stated.
-- **Submission impact.** `non-blocking` — the text is adequate; the gap
-  is in the reference implementation, and it is a `PARTIAL` rather than
-  a `FAIL` because the observable guarantee holds.
+- **Submission impact.** `non-blocking` — the text is adequate and the
+  reference implementation now meets it.
 - **Depends on.** row 1 — the negotiated set row 1's gate reads is the
   same set this closure validates.
+- **Closure test.** `config_rejects_closure_violation` — a config whose
+  `[capabilities]` asks for `MERKLE_RANGE` without `BLAKE3` is rejected by
+  `Handshake::new_checked` at configuration time, with the binary exiting
+  non-zero before it binds.
+- **History.** PARTIAL at HEAD until `<SHA>` (no caller for
+  `Handshake::new_checked`); PASS at `<SHA>` (caller at
+  `quip-node-headless/src/config.rs`; rejection test passes).
 
 ### 5. §5.3.3 — re-issue after expiry — PASS
 

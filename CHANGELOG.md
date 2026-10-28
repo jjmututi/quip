@@ -2482,6 +2482,24 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
       caught as a group rather than one at a time. The pair should not
       stop running: it is the mechanism that resolves the class, not the
       exception that catches it.
+  - M9.6c design note at `docs/M9.6c-design.md` (`<SHA>`): trust bootstrap
+    from a configured witness ring. The note chooses the configured-ring
+    reading over Coral discovery on the argument the draft itself makes —
+    "Without out-of-band verification, the witness ring cannot rescue a
+    poisoned bootstrap" (draft 5362–5363) — and records what that costs: a
+    node with no operator cannot bootstrap, which is the point. It amends the
+    record's "either a configured witness ring or a discovery path" sentence
+    by narrowing it to the configured arm, and says so. Measured against the
+    tree: M9.7's parser validates `witness_ring` entries as 32-byte NodeIds
+    (`quip-node-headless/src/config.rs:224`–`:229`), but
+    `TrustPolicy::record_decision` returns `false` for a peer with no stored
+    claim (`quip-node/src/trust.rs:194`), so the `Trusted` seed is applied at
+    first contact, not at load — a boot-time seed would be a silent no-op.
+    `PeerTrust` has five variants, not four; `Revoked` is a terminal
+    tombstone. M9.6a's `ClaimLog` persistence deferral was handed to "M9.7's
+    store-persistence work"; M9.7 landed without it, so the deferral is
+    unowned and M9.6c inherits it. No code, no test, no draft, no matrix row.
+    The follow-up commit fills the `<SHA>` placeholder.
 
 ---
 

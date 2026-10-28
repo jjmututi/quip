@@ -2482,7 +2482,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
       caught as a group rather than one at a time. The pair should not
       stop running: it is the mechanism that resolves the class, not the
       exception that catches it.
-  - M9.6c design note at `docs/M9.6c-design.md` (`<SHA>`): trust bootstrap
+  - M9.6c design note at `docs/M9.6c-design.md` (`4e3349b`): trust bootstrap
     from a configured witness ring. The note chooses the configured-ring
     reading over Coral discovery on the argument the draft itself makes —
     "Without out-of-band verification, the witness ring cannot rescue a

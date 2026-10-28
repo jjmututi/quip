@@ -2500,7 +2500,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     store-persistence work"; M9.7 landed without it, so the deferral is
     unowned and M9.6c inherits it. No code, no test, no draft, no matrix row.
     The follow-up commit fills the `<SHA>` placeholder.
-  - M9.6c code commit at `<SHA>`: `quip-node-headless` now consumes
+  - M9.6c code commit at `b2f6020`: `quip-node-headless` now consumes
     `witness_ring`. The configured ring members are seeded into the trust
     policy at first contact, after `TrustPolicy::observe_claim` inserts the
     peer's `StoredClaim` and before the issuance policy runs — a boot-time

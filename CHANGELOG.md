@@ -2529,7 +2529,7 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     codes into a pipe. No draft change, no matrix row move; the matrix's
     row count is unchanged at the twenty headings it already had. The
     follow-up commit fills the `<SHA>` placeholder.
-  - M9.6c boundary batch, commit 2 of 2 at `<SHA>`. This commit corrects
+  - M9.6c boundary batch, commit 2 of 2 at `0840b68`. This commit corrects
     the record of `b2f6020` and `4e3349b`; the `fix:` predecessor
     `8c90d2b` pinned the ring test to the seed's acceptance. (a) The "As
     implemented" paragraph was written at the end of `docs/M9.6c-design.md`,

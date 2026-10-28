@@ -3,6 +3,14 @@
 //! The file is TOML. Two modes, `Development` and `Production`,
 //! selected by the `mode` field. See `docs/M9.7-design.md` §1 for the
 //! full field table and the reason each mode differs.
+//!
+//! `witness_ring` and `trust_at_start` are two fields, not one. The
+//! first names the ring whose `WitnessStatement`s the node accepts for
+//! `Verified` computation; the second names peers the application trusts
+//! as peers. Both resolve to NodeIds in the parser, and both are
+//! validated the same way, but they play different roles and a future
+//! revision that merged them would make the two roles one field. The
+//! distinction is M9.6c's; see `docs/M9.6c-design.md` §4.
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -116,6 +124,12 @@ pub struct Config {
     pub relay_capable: bool,
     pub force_relay: bool,
     pub peers: Vec<PeerConfig>,
+    /// The configured witness ring, resolved from `witness_ring`.
+    ///
+    /// M9.6c: these are the peers whose statements the node accepts for
+    /// `Verified` computation. The node seeds each of them as `Trusted`
+    /// at first contact — see `quip-node-headless/src/shutdown.rs`.
+    pub witness_ring: Vec<[u8; 32]>,
     /// Trust bootstraps — parsed and validated, not yet consumed (M9.6c).
     pub trust_at_start: Vec<[u8; 32]>,
 }
@@ -218,15 +232,16 @@ impl Config {
             None => Vec::new(),
         };
 
-        // The witness_ring section is shape-validated, not honoured:
-        // M9.6c defines what a witness ring config means. Every entry
-        // must be a valid 32-byte NodeId.
-        if let Some(ring) = &file.witness_ring {
-            for entry in ring {
-                decode_hex_node_id(entry)?;
-            }
-            tracing::warn!("witness_ring is parsed but not yet honoured; M9.6c consumes it");
-        }
+        // M9.6c: `witness_ring` is resolved and consumed. Every entry
+        // must be a valid 32-byte NodeId; the resolved `Config` carries
+        // them so the node can seed its trust policy at first contact.
+        let witness_ring = match &file.witness_ring {
+            Some(ring) => ring
+                .iter()
+                .map(|h| decode_hex_node_id(h))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => Vec::new(),
+        };
 
         Ok(Config {
             mode: file.mode,
@@ -238,6 +253,7 @@ impl Config {
             relay_capable,
             force_relay,
             peers: file.peers,
+            witness_ring,
             trust_at_start,
         })
     }

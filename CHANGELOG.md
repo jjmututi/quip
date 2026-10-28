@@ -2500,6 +2500,35 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     store-persistence work"; M9.7 landed without it, so the deferral is
     unowned and M9.6c inherits it. No code, no test, no draft, no matrix row.
     The follow-up commit fills the `<SHA>` placeholder.
+  - M9.6c code commit at `<SHA>`: `quip-node-headless` now consumes
+    `witness_ring`. The configured ring members are seeded into the trust
+    policy at first contact, after `TrustPolicy::observe_claim` inserts the
+    peer's `StoredClaim` and before the issuance policy runs — a boot-time
+    seed would be a silent no-op because `TrustPolicy::record_decision`
+    returns `false` against an empty policy
+    (`quip-node/src/trust.rs:194`). The seed point is the binary's
+    `NodeEvent::Connected` arm (`quip-node/src/lib.rs:691`–`:699` emits it
+    after `observe_claim`), and a unit test
+    (`seed_requires_an_observed_claim`) pins the ordering the design rests
+    on. A ring member is `Trusted`, not `Verified`; `Verified` follows
+    M9.6a's first-seen window once the statements flow, and a peer that
+    already carries a decision is never re-seeded, so an operator's explicit
+    `Untrusted` survives a reconnect. `witness_ring` and `trust_at_start`
+    stay two fields, with the distinction documented in the config module:
+    the first is the ring whose statements the node accepts, the second the
+    peers the application trusts. No `quip-node` API change was needed; the
+    seed goes through the existing `Node::trust_peer`
+    (`quip-node/src/lib.rs:958`). Two integration tests in
+    `quip-node-headless/tests/trust.rs`, one per class the note names minus
+    the `Verified`-after-window half — `configured_ring_seeds_trusted_peers`
+    and the control `configured_ring_ignores_unlisted_peers` — plus the unit
+    test above; `docs/M9.6c-design.md` §3 gains an "As implemented"
+    paragraph recording that substitution and two measured facts: a
+    dialling node must be pumped (`Node::poll`) or the server never emits
+    `Connected`, and the binary's human-readable subscriber emits ANSI
+    codes into a pipe. No draft change, no matrix row move; the matrix's
+    row count is unchanged at the twenty headings it already had. The
+    follow-up commit fills the `<SHA>` placeholder.
 
 ---
 

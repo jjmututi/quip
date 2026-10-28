@@ -21,6 +21,9 @@ pub struct NodePlan {
     pub config: NodeConfig,
     pub peers: Vec<PeerConfig>,
     pub trust_at_start: Vec<[u8; 32]>,
+    /// M9.6c: the configured witness ring. Seeded at first contact in
+    /// `shutdown::run_until_signal`.
+    pub witness_ring: Vec<[u8; 32]>,
 }
 
 impl NodePlan {
@@ -37,6 +40,7 @@ impl NodePlan {
             config: node_config,
             peers: config.peers.clone(),
             trust_at_start: config.trust_at_start.clone(),
+            witness_ring: config.witness_ring.clone(),
         })
     }
 }
@@ -68,11 +72,18 @@ where
     if !plan.trust_at_start.is_empty() {
         tracing::warn!(
             count = plan.trust_at_start.len(),
-            "trust_at_start is parsed but not yet consumed; M9.6c consumes it"
+            "trust_at_start is parsed but not yet consumed; M9.6c consumes witness_ring"
         );
     }
 
-    crate::shutdown::run_until_signal(&mut node).await
+    if !plan.witness_ring.is_empty() {
+        tracing::info!(
+            count = plan.witness_ring.len(),
+            "witness_ring configured; ring members are seeded at first contact"
+        );
+    }
+
+    crate::shutdown::run_until_signal(&mut node, &plan.witness_ring).await
 }
 
 /// Run the node in the mode `config` names.

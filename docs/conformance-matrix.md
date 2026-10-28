@@ -1,7 +1,7 @@
 # Conformance matrix
 
 **Status: fifth delivery.** The nine-field schema, its vocabulary, and
-eighteen rows. The rows cover the decision points where the code and
+twenty rows. The rows cover the decision points where the code and
 the draft have a comparison to make. They do not cover the draft's
 mechanical conformance (canonical CBOR, wire framing, ALPN, the
 `quip-v1` prefix), which every wire test asserts and no row would add
@@ -11,7 +11,7 @@ quarantine, Trusted CID registration), which are recorded in
 draft's size or its division into one or several documents. "What
 follows" names both the sections with a comparison yet to make and the
 sections the code has not landed. **The decisive query returns zero
-rows over the eighteen rows that exist; it does not speak for the
+rows over the twenty rows that exist; it does not speak for the
 draft's unrowed statements.**
 
 ## What this is
@@ -1029,7 +1029,7 @@ wrong. When the code agrees with the draft and the result is a latch, the
 draft's definition is the defect, not the code.
 
 **The decisive query returns zero rows: none `review required`, none
-`blocking` — over the eighteen rows that exist.** It does not speak
+`blocking` — over the twenty rows that exist.** It does not speak
 for the draft's unrowed statements (see the status header and the
 Method section's note). Rows 3, 5 and 6 left it in this revision, each by a
 different route: §13.5's attempt episode and §5.3.3's expiry filter were
@@ -1047,7 +1047,7 @@ the draft's statements that have no row: a normative statement the
 code has not implemented is recorded in `CHANGELOG.md`'s status
 table as unlanded, and a normative statement that every wire
 message mechanically satisfies is not rowed at all. The query
-returns zero rows over the eighteen rows that exist; that is a
+returns zero rows over the twenty rows that exist; that is a
 statement about their specification status, not a statement about
 the draft.
 

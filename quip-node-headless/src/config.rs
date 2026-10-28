@@ -130,7 +130,13 @@ pub struct Config {
     /// `Verified` computation. The node seeds each of them as `Trusted`
     /// at first contact — see `quip-node-headless/src/shutdown.rs`.
     pub witness_ring: Vec<[u8; 32]>,
-    /// Trust bootstraps — parsed and validated, not yet consumed (M9.6c).
+    /// Peers the application trusts as peers at startup, hex-encoded
+    /// NodeIds. Parsed and resolved but **not yet consumed**: M9.6c
+    /// consumes `witness_ring`, not this. The field is the
+    /// `known_hosts` half of the trust configuration — who the operator
+    /// trusts as peers — as distinct from `witness_ring`, which names the
+    /// ring whose statements the node accepts. See
+    /// `docs/M9.6c-design.md` §4.
     pub trust_at_start: Vec<[u8; 32]>,
 }
 

@@ -2529,6 +2529,37 @@ M9.5b-c, M9.6b, M9.6c, M9.7, M10.4, M10.5, M11).
     codes into a pipe. No draft change, no matrix row move; the matrix's
     row count is unchanged at the twenty headings it already had. The
     follow-up commit fills the `<SHA>` placeholder.
+  - M9.6c boundary batch, commit 2 of 2 at `<SHA>`. This commit corrects
+    the record of `b2f6020` and `4e3349b`; the `fix:` predecessor
+    `8c90d2b` pinned the ring test to the seed's acceptance. (a) The "As
+    implemented" paragraph was written at the end of `docs/M9.6c-design.md`,
+    after §7, and both `b2f6020`'s message and the earlier CHANGELOG bullet
+    said it was inside §3. It is now inside §3 (line 222), and §3 names the
+    implemented test alongside the class it belongs to. (b) `b2f6020`'s
+    message says "three record files" and there were two (`CHANGELOG.md` and
+    `docs/M9.6c-design.md`, the other four files being `quip-node-headless`
+    source and tests). The claim was wrong in the message; this bullet
+    records the correction and the message is not rewritten. (c)
+    `trust_at_start` is parsed and not consumed; the earlier bullet did not
+    say so, and the config now documents the field's role — the
+    `known_hosts` half — beside `witness_ring`'s. (d) §1b's second bullet is
+    **implemented**: the seed fires on `NodeEvent::Connected` while the
+    peer's trust is still `Unknown`, which is after `observe_claim` has
+    inserted its `StoredClaim` (`quip-node/src/lib.rs:691`–`:699`), and
+    moves a ring member to `Trusted` there — the guard reads
+    `if trust != PeerTrust::Unknown { return false }`
+    (`quip-node-headless/src/shutdown.rs:90`), so an already-decided peer is
+    left alone and a first-seen ring member is accepted without an
+    application decision. §1b now says so. (e)
+    `docs/conformance-matrix.md`'s coverage line said "eighteen rows"
+    against a file with twenty; corrected to twenty in all four places that
+    carried the stale figure (lines 4, 14, 1032, 1050 — the instruction
+    named line 4, the measurement found four), and no row was touched. (f)
+    Batch 1's control now waits for both `Connected` and `Ready`
+    (`quip-node-headless/tests/trust.rs:269`–`:276`) before asserting the
+    absence of a seed, so it cannot pass on a connection that never
+    completed. No behavior change in this commit. The follow-up commit fills
+    the `<SHA>` placeholder.
 
 ---
 

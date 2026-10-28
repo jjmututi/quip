@@ -178,9 +178,22 @@ async fn test_node_dialling(port: u16) -> (Node, [u8; 32]) {
 }
 
 /// Class 1: a configured ring member is seeded as `Trusted` at first
-/// contact. The log line only appears when `record_decision` returned
-/// true, so it is evidence the seed took effect rather than evidence a
-/// call was attempted.
+/// contact.
+///
+/// The seed is proven by the `accepted=true` field on the `seeded` log
+/// line, or by the policy's `Trusted` level where the test can reach
+/// the node (see the assertion below). The log line itself fires
+/// whether or not `trust_peer` accepted — a refusal is a seeded line
+/// with `accepted=false` — so the assertion must be on the accepted
+/// value or on the policy, not on the line's presence.
+///
+/// The policy form is not available here: the node that seeds is inside
+/// the binary's process, and `Node::peer_trust`
+/// (`quip-node/src/lib.rs:980`) would query *this* process's policy
+/// about its own peer. The `accepted` field is therefore the strongest
+/// available evidence, and it is enough: it is the return value of
+/// `TrustPolicy::record_decision` (`quip-node/src/trust.rs:194`), which
+/// is only true when the peer's `StoredClaim` already exists.
 #[tokio::test]
 async fn configured_ring_seeds_trusted_peers() {
     // The ring must name a NodeId the test controls. The dialling node's
@@ -212,17 +225,22 @@ async fn configured_ring_seeds_trusted_peers() {
         pump_until(
             &mut node,
             &logs,
-            &format!("seeded configured ring member as Trusted peer={member}"),
+            &format!("seeded configured ring member as Trusted peer={member} accepted=true"),
             Duration::from_secs(15)
         )
         .await,
-        "expected the ring member to be seeded; log was:\n{}",
+        "expected the ring member to be seeded with the decision accepted; log was:\n{}",
         logs.lock().expect("log buffer")
     );
 }
 
-/// Class 2 (control): a peer outside the ring is not seeded, so no seed
-/// line appears — the `known_hosts` model, not "trust whoever connects".
+/// Class 2 (control): a peer outside the ring is not seeded — the
+/// `known_hosts` model, not "trust whoever connects".
+///
+/// A control that never sees the peer connect proves nothing: it would
+/// pass whether the peer connected and was not seeded, or never
+/// connected at all. This one asserts the connection first, then the
+/// absence of a seed.
 #[tokio::test]
 async fn configured_ring_ignores_unlisted_peers() {
     let outsider = hex::encode([0xAAu8; 32]);
@@ -231,16 +249,33 @@ async fn configured_ring_ignores_unlisted_peers() {
 
     let (mut node, _id) = test_node_dialling(port).await;
 
-    // Give the seed path a window in which it could have fired, while
-    // pumping the dialling node so the connection actually progresses.
-    let seeded = pump_until(
-        &mut node,
-        &logs,
-        "seeded configured ring member",
-        Duration::from_secs(2),
-    )
-    .await;
-    assert!(!seeded, "no peer outside the ring should be seeded");
+    // The connection evidence available from outside the binary's process
+    // is the dialling node's own view: `Connected` fires at handshake
+    // completion, and `Ready` only after the §16 establishment flow —
+    // which the binary answers. Both are asserted, so the control cannot
+    // pass on a connection that never completed.
+    let mut saw_connected = false;
+    let mut saw_ready = false;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline && !(saw_connected && saw_ready) {
+        for event in node.poll().await.expect("poll the dialling node") {
+            match event {
+                quip_node::NodeEvent::Connected { .. } => saw_connected = true,
+                quip_node::NodeEvent::Ready { .. } => saw_ready = true,
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        saw_connected,
+        "the unlisted peer must connect, or the control proves nothing"
+    );
+    assert!(
+        saw_ready,
+        "the establishment flow must complete, or the control proves nothing"
+    );
+
+    // Only now does "no seed" mean what it says.
     let text = logs.lock().expect("log buffer").clone();
     assert!(
         !text.contains("seeded configured ring member"),

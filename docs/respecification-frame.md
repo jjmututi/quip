@@ -88,6 +88,30 @@ what the reference implementation does; the draft's normative text carries no
 implementation claims.
 Carried by: A18, A19, A20.
 
+### D9 — Governance is normative; the application owns the policy
+Quarantine is a normative protocol operation, not an advisory hint: a node that
+supports governance honours a quorum-signed quarantine notice and does not return
+quarantined content in discovery or range responses. The ring enforces; the
+application supplies the policy the ring executes, and the application bears the
+consequence of a wrong enforcement. The authority to request a quarantine is the
+content's owner or the owner's delegate; a request that names neither is refused
+at the ring's own check. A young node learns of a quarantine on first contact
+with a governance-capable node; the protocol supplies the mechanism, and a young
+node's knowledge is whatever it has learned. Re-publication is application-level
+attribution: a new publisher re-publishing the same content is a new claim, and
+the quarantine does not catch it.
+Carried by: A14, A15, A16, A17.
+
+### D10 — The transport's negotiated surface is defined once, referenced elsewhere
+Capabilities, extension IDs, hash algorithms and the tier assignment of each verb
+are defined once, in the negotiated-profile section of §4 and the tier section of
+§11. The verb definitions reference them rather than restating them. A verb's
+tier is named in the verb's own definition, where it is testable, not in the
+tier section's table. A restated negotiation rule is a rule that can disagree
+with the one in the negotiated-profile section; the draft states each once and
+references it.
+Carried by: A03.
+
 ## The register answers
 
 One line per node the amendment plan touches. The register's 50 problems and
@@ -98,7 +122,7 @@ the unit the amendments carry.
   ephemeral keys from the handle; `dht_id` equals `NodeId`. Decisions D1–D4.
   Amendment A02 (with sub-amendments A02a–A02f), plus A10–A13.
 - **N007 QUIC transport** — ratify the negotiated surface and rewrite what the
-  capability/extension text leaves unsaid. **No frame decision.** Amendment A03.
+  capability/extension text leaves unsaid. Decision D10. Amendment A03.
 - **N009 Witness trust** — TOFU on first contact; the universal plug exchanges
   identities; the witness ring is drawn from the cluster by XOR proximity.
   Decisions D2, D5. Amendments A04, A09.
@@ -110,7 +134,7 @@ the unit the amendments carry.
   proximity trigger and four conditions; split keeps its existing rules.
   Decision D7. Amendment A06, with the prerequisite P1.
 - **N014 Governance** — quarantine becomes normative, with an authority model,
-  expiry, and young-node learning. **No frame decision.** Amendments A14–A17.
+  expiry, and young-node learning. Decision D9. Amendments A14–A17.
 - **No node** — A01 (definitions), A07 (primitives), A08 (role model), A18–A20
   (structural, D8), A21 (terminology). A01, A07, A08 and A21 carry no decision;
   they are the scaffolding the decided amendments are written on.
@@ -138,7 +162,7 @@ A Key Claim the protocol has not yet verified is in the pending state, named
 `KT_PENDING` in the trust layer's vocabulary. A node with no DHT connectivity
 treats every claim it has not verified as pending, because it has no evidence to
 leave the state.
-Carried by: A05f (the DVV-ordering statement's companion).
+Carried by: A23 (the pending-state sentence, §5.3.3 and §18).
 
 ## What the frame does not decide
 
@@ -149,6 +173,8 @@ Carried by: A05f (the DVV-ordering statement's companion).
   revision that records it.
 - **The 139 unnamed rows.** The mapping audit assigns them.
 - **The 412 unknown workspace cells.** The second workspace audit measures them.
+- **The governance and transport amendments' wording.** D9 and D10 state what
+  those amendments must say; the amendments state it.
 
 ## The amendment index
 
@@ -156,7 +182,7 @@ Carried by: A05f (the DVV-ordering statement's companion).
 |---|---|---|---|
 | A01 | Definitions section | — (no decision; scaffolding) | — |
 | A02 | §5.2 identity | D1, D2, D3, D4 | P2 |
-| A03 | §11 / §15 transport | — (no decision in the frame) | — |
+| A03 | §11 / §15 transport | D10 | — |
 | A04 | §5.3.3 witness trust | D5 | — |
 | A05 | §5.3.4 BFT | D6 | P2 |
 | A06 | §13 cluster | D7 | P1 |
@@ -167,18 +193,20 @@ Carried by: A05f (the DVV-ordering statement's companion).
 | A11 | Key Claim proves | D2 | — |
 | A12 | Ephemeral keys | D3 | — |
 | A13 | dht_id equals NodeId | D4 | — |
-| A14 | Quarantine normative | — (no decision in the frame) | — |
-| A15 | Authority model | — (no decision in the frame) | — |
-| A16 | Expiry and re-publication | — (no decision in the frame) | — |
-| A17 | Young node quarantine learning | — (no decision in the frame) | — |
+| A14 | Quarantine normative | D9 | — |
+| A15 | Authority model | D9 | — |
+| A16 | Expiry and re-publication | D9 | — |
+| A17 | Young node quarantine learning | D9 | — |
 | A18 | Appendix A informational + 13 MUSTs relocate | D8 | — |
 | A19 | Implementation-status appendix | D8 | — |
 | A20 | Thesis + boilerplate frame | D8 | — |
 | A21 | Terminology consolidation | — (no decision; scaffolding) | — |
 | A22 | §18 collusion paragraph | C1 | — |
+| A23 | §5.3.3 and §18 pending-state sentence | C3 | — |
 
-A22 is not in the plan's 21: it is the §18 amendment C1 awaits, and it joins the
-plan when written. The index lists it so C1's carrier has a row.
+A22 and A23 are not in the plan's 21: A22 is the §18 collusion paragraph C1
+awaits, and A23 is the pending-state sentence C3 awaits. Both join the plan when
+written; the index lists them so C1's and C3's carriers have rows.
 
 ## Prerequisites
 

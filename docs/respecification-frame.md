@@ -19,6 +19,67 @@ index at the end maps identifiers to amendments.
 The frame does not decide the draft's wording. It decides what the draft's
 wording must say. The amendments decide the wording.
 
+## The measurement instruments this frame rests on
+
+The frame's decisions are derived from three audits and one plan, all of which
+are working papers in `.cline/reviews/` and none of which is committed:
+
+- `.cline/reviews/draft-audit-2026-10-28.md` — 756 lines — the draft audit:
+  ten line bands over `draft-mututi-quip-03.xml` (6699 lines), 535 rows in the
+  form `draft line | statement | verdict | justification | section`.
+- `.cline/reviews/audit-2026-10-28.md` — 206 lines — the workspace audit: the
+  twenty conformance-matrix rows and their A/B1/B2/C findings.
+- `.cline/reviews/audit-2026-10-28-summary.md` — 70 lines — that audit's
+  summary: the findings counted by class.
+- `.cline/reviews/audit-crossref-2026-10-28.md` — 569 lines — the mapping
+  audit: the 485 joined lines against the workspace matrix, with the 412
+  cells it could not reach.
+- `.cline/reviews/protocol-intent-first-pass.md` — 815 lines — the first pass:
+  the node index (N001–N018 and their sub-nodes) the register is keyed to, and
+  the 139 draft-audit rows that named no node (line 799).
+- `.cline/reviews/amendment-plan-2026-10-28.md` — 145 lines — the plan: the 21
+  amendments, their sub-amendments, and the prerequisites P1–P3.
+
+Two things about the instruments matter for reading a citation. First, the
+draft audit's structure is ten line bands (`Band A — lines 70–1139` through
+`Band J — lines 5912–6699`), one row per normative statement, a verdict of
+CLEAR / AMBIGUOUS / INCOMPLETE / SILENT / UNIMPLEMENTABLE / CONTRADICTORY per
+row, and a summary with per-class verdict counts, per-section coherence
+verdicts, and a list of what the audit did not read. It does not group its
+findings; a grouping is this frame's work, stated here and nowhere else.
+Second, the counts the frame cites are the instruments' counts at the tree the
+frame was written against; a later audit may measure a different number, and
+the frame's count is the one the amendment plan was built on.
+
+A frame decision that cites "the audit" cites a row or an anchor summary. A
+decision that cites a group cites this frame's own grouping. The distinction
+matters because a reader following a frame citation must be able to tell
+whether the finding is the instrument's or the frame's.
+
+### The frame's own grouping
+
+The frame groups the audit's findings by what the answer *is*, not by the
+audit's sections. The grouping was made in the project's working conversation
+and is recorded here because it is the frame's, not the audit's:
+
+- **The eight frame decisions (D1–D10)** answer the register's decision-requiring
+  findings: identity, witness policy, BFT, merge, structure, governance,
+  transport.
+- **The three closing decisions (C1–C3)** answer the three findings the frame
+  closed after the decisions were made: collusion bound, relay encryption,
+  pending state.
+- **The residue** is what the frame does not decide: the 34 NAT findings, the
+  139 unnamed rows, the 412 unknown workspace cells. They are named in "What
+  the respecification does not close" below.
+
+A reader who wants the audit's own findings reads the audit; a reader who wants
+the frame's grouping reads this section.
+
+The grouping does not use the audit's band names and this frame does not adopt
+them. The phrase "Group 3" appears nowhere in `docs/` or in `.cline/reviews/`:
+a search for it over both returns nothing, so the grouping vocabulary below is
+this frame's and is not attributable to the audit.
+
 ## The eight frame decisions
 
 ### D1 — NodeId is permanent and durable
@@ -71,6 +132,11 @@ is below the threshold can merge with a nearby cluster whose combined count
 reaches it; the merged cluster can form a ring.
 Carried by: A05a, A05b, A05c, A05d, A05e, A05f.
 
+The audit found the statements (1031, 5253, 5295, 5296, 5297). The
+four-condition rule, the always-on rule, the seven-application bound, and the
+merge-growth escape are this frame's decisions about those statements. They are
+not in the audit and not in the draft.
+
 ### D7 — Merge is a cluster operation with a proximity trigger
 Merge is an operation a cluster performs; it is not an application's. Its
 trigger is the Coral DHT's proximity rule — when two clusters are within the
@@ -79,6 +145,11 @@ merge conditions (eligibility, authority, safety, completion) that
 `docs/m9.6b-merge-design.md` §2a–§2d defines. A merge-disabled cluster rejects
 proposals with `merge_not_supported`.
 Carried by: A06, P1.
+
+The audit found the merge rule UNIMPLEMENTABLE (3765, 3766 with 3810–3853).
+The proximity trigger and the merge-disabled rejection with
+`merge_not_supported` are this frame's decisions. The four conditions
+(eligibility, authority, safety, completion) are the merge design note's.
 
 ### D8 — The thesis is informative; the normative text begins at terminology
 The draft's thesis paragraph is informative and moves above the RFC 2119
@@ -171,10 +242,33 @@ Carried by: A23 (the pending-state sentence, §5.3.3 and §18).
   specifies the mechanism. P3.
 - **The merge design note's revision.** D7 states the trigger; P1 is the note
   revision that records it.
-- **The 139 unnamed rows.** The mapping audit assigns them.
-- **The 412 unknown workspace cells.** The second workspace audit measures them.
 - **The governance and transport amendments' wording.** D9 and D10 state what
   those amendments must say; the amendments state it.
+
+## What the respecification does not close
+
+The frame closes the contradictions the frame decided. Three classes of
+finding are named and not decided:
+
+- **34 NAT findings** are located in `docs/nat-design.md` §4 and deferred, one
+  answered (5381, by C2). Each needs a decision this frame does not make. The
+  `RelayResponse` signer (3261) is a wire change and is the one deferred finding
+  that changes the protocol.
+- **139 unnamed rows** the first pass could not assign to a node. They are
+  statement-level findings with no concept to hang from. The second workspace
+  audit assigns them; a decision follows if any is a concept the frame lacks.
+- **412 unknown workspace cells** are unmeasured. The second workspace audit
+  measures them; the frame's decisions cover their concepts but not their
+  per-statement workspace status.
+
+The frame is complete for the concepts it names. It is not complete for the
+draft. The difference is the three classes above, and the mapping audit's
+residue count is what says whether this list is the whole of it.
+
+Both figures are stated in the instruments, not inferred here: the 139 at
+`.cline/reviews/protocol-intent-first-pass.md` line 799 ("139 of 485 rows"),
+and the 412 at `.cline/reviews/audit-crossref-2026-10-28.md` line 530 ("there
+are 412 of them, = 85% of the 485 joined lines").
 
 ## The amendment index
 

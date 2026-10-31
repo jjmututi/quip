@@ -21,8 +21,9 @@ wording must say. The amendments decide the wording.
 
 ## The measurement instruments this frame rests on
 
-The frame's decisions are derived from three audits and one plan, all of which
-are working papers in `.cline/reviews/` and none of which is committed:
+The frame's decisions are derived from six working papers in `.cline/reviews/`,
+none of which is committed — the three audits, their summary, the first pass,
+and the plan:
 
 - `.cline/reviews/draft-audit-2026-10-28.md` — 756 lines — the draft audit:
   ten line bands over `draft-mututi-quip-03.xml` (6699 lines), 535 rows in the
@@ -62,15 +63,15 @@ The frame groups the audit's findings by what the answer *is*, not by the
 audit's sections. The grouping was made in the project's working conversation
 and is recorded here because it is the frame's, not the audit's:
 
-- **The eight frame decisions (D1–D10)** answer the register's decision-requiring
+- **The ten frame decisions (D1–D10)** answer the register's decision-requiring
   findings: identity, witness policy, BFT, merge, structure, governance,
   transport.
 - **The three closing decisions (C1–C3)** answer the three findings the frame
   closed after the decisions were made: collusion bound, relay encryption,
   pending state.
-- **The residue** is what the frame does not decide: the 34 NAT findings, the
-  139 unnamed rows, the 412 unknown workspace cells. They are named in "What
-  the respecification does not close" below.
+- **The residue** is what the frame does not decide: the NAT findings (31 after
+  C2's answer and A24's three), the 139 unnamed rows, the 412 unknown workspace
+  cells. They are named in "What the respecification does not close" below.
 
 A reader who wants the audit's own findings reads the audit; a reader who wants
 the frame's grouping reads this section.
@@ -80,7 +81,7 @@ them. The phrase "Group 3" appears nowhere in `docs/` or in `.cline/reviews/`:
 a search for it over both returns nothing, so the grouping vocabulary below is
 this frame's and is not attributable to the audit.
 
-## The eight frame decisions
+## The ten frame decisions
 
 ### D1 — NodeId is permanent and durable
 The NodeId is held for a user's lifetime. Its compromise response is KT_VERIFIED
@@ -250,10 +251,11 @@ Carried by: A23 (the pending-state sentence, §5.3.3 and §18).
 The frame closes the contradictions the frame decided. Three classes of
 finding are named and not decided:
 
-- **34 NAT findings** are located in `docs/nat-design.md` §4 and deferred, one
-  answered (5381, by C2). Each needs a decision this frame does not make. The
-  `RelayResponse` signer (3261) is a wire change and is the one deferred finding
-  that changes the protocol.
+- **31 NAT findings** are located in `docs/nat-design.md` §4 and deferred, one
+  answered (5381, by C2) and three carried by A24 (3261, 3454, 3151 — see the
+  amendment index). The remaining 31 each need a decision this frame does not
+  make; the largest class is the rate/window/action class, which the frame's
+  D11 will answer.
 - **139 unnamed rows** the first pass could not assign to a node. They are
   statement-level findings with no concept to hang from. The second workspace
   audit assigns them; a decision follows if any is a concept the frame lacks.
@@ -297,10 +299,39 @@ are 412 of them, = 85% of the 485 joined lines").
 | A21 | Terminology consolidation | — (no decision; scaffolding) | — |
 | A22 | §18 collusion paragraph | C1 | — |
 | A23 | §5.3.3 and §18 pending-state sentence | C3 | — |
+| A24 | §12 / §19 NAT fold + three findings | C2 | P3 |
 
 A22 and A23 are not in the plan's 21: A22 is the §18 collusion paragraph C1
 awaits, and A23 is the pending-state sentence C3 awaits. Both join the plan when
 written; the index lists them so C1's and C3's carriers have rows.
+
+A24 is the NAT fold C2 awaits — the follow-up `docs:` commit that folds
+`docs/nat-design.md` §1 and §2d into §12 and §19. It carries three of the
+residue's NAT findings as sub-edits, each under a `revision` node of the
+first pass's tree where a leftover is expected:
+
+- **3261 — `RelayResponse` signer.** Node N006.1. D2 applies: the signer field
+  is the responder's `NodeId`, because a Key Claim proves control of a key and
+  a signature with no signer is a signature the receiver cannot resolve. The
+  field is a wire addition; the code's struct is the draft's and has no signer,
+  so A24 adds it.
+- **3454 — `session_id` uniqueness scope.** Node N006. A ratification, not a
+  decision: the code scopes a session `(peer, session_id)`, and the draft's
+  "unique session identifier" gains the scope the code already enforces.
+- **3151 — `internal_addr` "(if known)" but mandatory.** Node N006.2. A
+  ratification: the CDDL makes the field mandatory, the comment says "(if
+  known)", and the comment yields to the CDDL.
+
+**Measured against the first pass.** Only the first of those three attributions
+is the instrument's. N006.1's draft lines begin `3155, 3248, 3261, …` (line
+637), so 3261 is filed there. N006's are `3482` alone (line 145) and N006.2's
+are `3152, 6170` (line 654), so neither 3454 nor 3151 is filed under the node
+the bullets above name: both appear in the first pass's list of draft-audit rows
+that named no node (line 801, "139 of 485 rows"). The bullets record where the
+findings belong by concept; the instrument files two of them nowhere. Closing
+that gap is the first pass's second revision, and until it lands A24's 3454 and
+3151 sub-edits rest on the code's answer (§2b, §2a of the NAT note) rather than
+on a node citation.
 
 ## Prerequisites
 
